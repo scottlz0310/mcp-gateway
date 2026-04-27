@@ -96,3 +96,45 @@ func TestParseRoutesEmptyPrefix(t *testing.T) {
 		t.Fatal("expected error for empty prefix")
 	}
 }
+
+func TestParseRoutesPrefixMissingLeadingSlash(t *testing.T) {
+	env := []string{"ROUTE_BAD=mcp|http://x:8080"}
+	_, err := parseRoutes(env)
+	if err == nil {
+		t.Fatal("expected error for prefix not starting with '/'")
+	}
+}
+
+func TestParseRoutesPrefixWithWhitespace(t *testing.T) {
+	env := []string{"ROUTE_BAD=/mcp /foo|http://x:8080"}
+	_, err := parseRoutes(env)
+	if err == nil {
+		t.Fatal("expected error for prefix containing whitespace")
+	}
+}
+
+func TestParseRoutesOpaqueUpstreamURL(t *testing.T) {
+	// url.Parse accepts "github-mcp:8082" as scheme=github-mcp, opaque=8082, host=""
+	// ReverseProxy requires absolute URL with host; this must be rejected.
+	env := []string{"ROUTE_BAD=/mcp|github-mcp:8082"}
+	_, err := parseRoutes(env)
+	if err == nil {
+		t.Fatal("expected error for opaque/relative upstream URL")
+	}
+}
+
+func TestParseRoutesRelativeUpstreamURL(t *testing.T) {
+	env := []string{"ROUTE_BAD=/mcp|/relative/path"}
+	_, err := parseRoutes(env)
+	if err == nil {
+		t.Fatal("expected error for relative upstream URL")
+	}
+}
+
+func TestParseRoutesNonHTTPScheme(t *testing.T) {
+	env := []string{"ROUTE_BAD=/mcp|ftp://x:8080"}
+	_, err := parseRoutes(env)
+	if err == nil {
+		t.Fatal("expected error for non-http/https upstream scheme")
+	}
+}

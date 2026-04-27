@@ -37,9 +37,21 @@ func parseRoutes(env []string) ([]Route, error) {
 		if prefix == "" {
 			return nil, fmt.Errorf("%s: prefix must not be empty", key)
 		}
+		if !strings.HasPrefix(prefix, "/") {
+			return nil, fmt.Errorf("%s: prefix must start with '/' (got %q)", key, prefix)
+		}
+		if strings.ContainsAny(prefix, " \t\n\r") {
+			return nil, fmt.Errorf("%s: prefix must not contain whitespace (got %q)", key, prefix)
+		}
 		u, err := url.Parse(upstreamRaw)
 		if err != nil {
 			return nil, fmt.Errorf("%s: invalid upstream URL: %w", key, err)
+		}
+		if u.Scheme == "" || u.Host == "" {
+			return nil, fmt.Errorf("%s: upstream URL must be absolute with scheme and host (got %q)", key, upstreamRaw)
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			return nil, fmt.Errorf("%s: upstream URL scheme must be http or https (got %q)", key, u.Scheme)
 		}
 		routes = append(routes, Route{Name: name, Prefix: prefix, Upstream: u})
 	}
