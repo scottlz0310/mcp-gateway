@@ -1,0 +1,16 @@
+pre-commit:
+  parallel: true
+  commands:
+    vet:
+      run: go vet ./...
+
+pre-push:
+  parallel: true
+  commands:
+    lint:
+      run: golangci-lint run ./...
+    test:
+      run: go test ./...
+      # -race requires CGO (unavailable on Windows); CI runs with -race on Linux
+    build:
+      run: go build ./cmd/server
