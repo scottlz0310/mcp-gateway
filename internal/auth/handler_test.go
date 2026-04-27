@@ -178,7 +178,7 @@ func TestDeviceAuthorizeSuccess(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{
+		_, _ = fmt.Fprint(w, `{
 			"device_code": "gh-dev-code-xyz",
 			"user_code": "WDJB-MJHT",
 			"verification_uri": "https://github.com/login/device",
@@ -233,7 +233,7 @@ func TestTokenDeviceGrantPending(t *testing.T) {
 	// Mock GitHub's token endpoint returning authorization_pending.
 	ghServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"error":"authorization_pending"}`)
+		_, _ = fmt.Fprint(w, `{"error":"authorization_pending"}`)
 	}))
 	defer ghServer.Close()
 
