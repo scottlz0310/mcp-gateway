@@ -41,6 +41,8 @@ mcp-gateway  :8080
 | `GITHUB_MCP_CLIENT_ID` | GitHub OAuth App Client ID |
 | `GITHUB_MCP_CLIENT_SECRET` | GitHub OAuth App Client Secret |
 
+At least one route must also be configured via `ROUTE_<NAME>` (see below) — the server exits on startup if no routes are defined.
+
 ### Route Configuration
 
 Routes are defined via `ROUTE_<NAME>=<prefix>|<upstream_url>` environment variables.
@@ -90,13 +92,14 @@ type Provider interface {
     Name() string
     ClientID() string
     AuthorizeURL(state, codeChallenge string) string
-    ExchangeCode(ctx context.Context, code string) (token string, scopes string, err error)
+    ExchangeCode(ctx context.Context, code string) (token string, scopes []string, err error)
     ValidateToken(ctx context.Context, token string) (Identity, error)
 }
 
 type Identity struct {
-    Subject string // stable user identifier forwarded as X-Authenticated-User
-    Login   string // provider-specific display name (GitHub login, etc.)
+    Provider    string
+    Subject     string // stable user identifier forwarded upstream
+    DisplayName string // optional human-readable name for logging
 }
 ```
 
@@ -105,7 +108,7 @@ The proxy forwards two headers to upstream MCP servers:
 | Header | Value |
 |--------|-------|
 | `X-Authenticated-User` | `Identity.Subject` (canonical, provider-agnostic) |
-| `X-GitHub-Login` | `Identity.Login` (legacy compatibility) |
+| `X-GitHub-Login` | same as `X-Authenticated-User` (legacy compatibility; both set from `Identity.Subject`) |
 
 Spoofable incoming headers (`X-Authenticated-User`, `X-GitHub-Login`) are stripped before proxying.
 
