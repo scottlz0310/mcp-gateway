@@ -155,7 +155,10 @@ func TestStoreDeviceDeny(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute)
 	expiresAt := time.Now().Add(15 * time.Minute)
 
-	code, _ := s.CreateDevice("gh-dev", "WXYZ-5678", "https://github.com/login/device", expiresAt, 5)
+	code, err := s.CreateDevice("gh-dev", "WXYZ-5678", "https://github.com/login/device", expiresAt, 5)
+	if err != nil {
+		t.Fatalf("CreateDevice: %v", err)
+	}
 	s.DenyDevice(code)
 
 	d, ok := s.GetDevice(code)

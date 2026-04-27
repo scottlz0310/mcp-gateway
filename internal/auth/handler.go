@@ -313,7 +313,7 @@ func (h *Handler) writeTokenResponse(w http.ResponseWriter, token, scope string)
 func (h *Handler) DeviceAuthorize(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	if err := r.ParseForm(); err != nil {
-		jsonError(w, "invalid_request", "malformed request body", http.StatusBadRequest)
+		oauthError(w, "invalid_request", "malformed request body", http.StatusBadRequest)
 		return
 	}
 
@@ -323,7 +323,7 @@ func (h *Handler) DeviceAuthorize(w http.ResponseWriter, r *http.Request) {
 	ghResp, err := h.startGitHubDeviceFlow(r.Context(), scope)
 	if err != nil {
 		slog.Error("GitHub device flow start failed", "err", err)
-		jsonError(w, "server_error", "failed to start device flow with GitHub", http.StatusBadGateway)
+		oauthError(w, "server_error", "failed to start device flow with GitHub", http.StatusBadGateway)
 		return
 	}
 
@@ -331,7 +331,7 @@ func (h *Handler) DeviceAuthorize(w http.ResponseWriter, r *http.Request) {
 	internalCode, err := h.store.CreateDevice(ghResp.DeviceCode, ghResp.UserCode, ghResp.VerificationURI, expiresAt, ghResp.Interval)
 	if err != nil {
 		slog.Error("device session creation failed", "err", err)
-		jsonError(w, "server_error", "internal error", http.StatusInternalServerError)
+		oauthError(w, "server_error", "internal error", http.StatusInternalServerError)
 		return
 	}
 

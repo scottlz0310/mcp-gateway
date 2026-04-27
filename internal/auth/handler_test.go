@@ -246,7 +246,10 @@ func TestTokenDeviceGrantPending(t *testing.T) {
 
 	// Create a pending device session directly in the store.
 	expiresAt := time.Now().Add(15 * time.Minute)
-	internalCode, _ := h.store.CreateDevice("gh-dev-code", "WDJB-MJHT", "https://github.com/login/device", expiresAt, 5)
+	internalCode, err := h.store.CreateDevice("gh-dev-code", "WDJB-MJHT", "https://github.com/login/device", expiresAt, 5)
+	if err != nil {
+		t.Fatalf("creating device session: %v", err)
+	}
 
 	body := fmt.Sprintf("grant_type=urn:ietf%%3Aparams%%3Aoauth%%3Agrant-type%%3Adevice_code&device_code=%s", internalCode)
 	r := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
@@ -282,7 +285,10 @@ func TestTokenDeviceGrantSuccess(t *testing.T) {
 	h := newTestHandler()
 
 	expiresAt := time.Now().Add(15 * time.Minute)
-	internalCode, _ := h.store.CreateDevice("gh-dev-code", "WDJB-MJHT", "https://github.com/login/device", expiresAt, 5)
+	internalCode, err := h.store.CreateDevice("gh-dev-code", "WDJB-MJHT", "https://github.com/login/device", expiresAt, 5)
+	if err != nil {
+		t.Fatalf("creating device session: %v", err)
+	}
 
 	body := fmt.Sprintf("grant_type=urn:ietf%%3Aparams%%3Aoauth%%3Agrant-type%%3Adevice_code&device_code=%s", internalCode)
 	r := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
@@ -311,10 +317,14 @@ type rewriteHostTransport struct {
 }
 
 func (t rewriteHostTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	parsed, _ := url.Parse(t.target)
+	parsed, err := url.Parse(t.target)
+	if err != nil {
+		return nil, err
+	}
 	req = req.Clone(req.Context())
 	req.URL.Scheme = parsed.Scheme
 	req.URL.Host = parsed.Host
+	req.Host = parsed.Host
 	if t.inner != nil {
 		return t.inner.RoundTrip(req)
 	}
