@@ -237,6 +237,8 @@ func TestTokenDeviceGrantPending(t *testing.T) {
 	}))
 	defer ghServer.Close()
 
+	originalTransport := githubClient.Transport
+	defer func() { githubClient.Transport = originalTransport }()
 	githubClient.Transport = rewriteHostTransport{target: ghServer.URL, inner: ghServer.Client().Transport}
 
 	h := newTestHandler()

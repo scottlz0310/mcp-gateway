@@ -206,6 +206,13 @@ func (s *Store) DenyDevice(internalCode string) {
 	}
 }
 
+// DeleteDevice removes the device session (one-time use after token issuance).
+func (s *Store) DeleteDevice(internalCode string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.devices, internalCode)
+}
+
 // CacheToken stores a validated login for a token.
 func (s *Store) CacheToken(token, login string) {
 	s.cache.mu.Lock()

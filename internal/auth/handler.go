@@ -245,13 +245,19 @@ func (h *Handler) tokenDeviceGrant(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pending, ok := h.store.GetDevice(deviceCode)
-	if !ok || time.Now().After(pending.ExpiresAt) {
-		oauthError(w, "expired_token", "device code not found or expired", http.StatusBadRequest)
+	if !ok {
+		oauthError(w, "invalid_grant", "device code not found", http.StatusBadRequest)
+		return
+	}
+	if time.Now().After(pending.ExpiresAt) {
+		oauthError(w, "expired_token", "device code expired", http.StatusBadRequest)
 		return
 	}
 
 	switch pending.Status {
 	case deviceAuthorized:
+		// Consume the code on first retrieval (single-use).
+		h.store.DeleteDevice(deviceCode)
 		h.writeTokenResponse(w, pending.AccessToken, pending.Scope)
 		return
 	case deviceDenied:
@@ -269,7 +275,8 @@ func (h *Handler) tokenDeviceGrant(w http.ResponseWriter, r *http.Request) {
 
 	switch result.Error {
 	case "":
-		h.store.AuthorizeDevice(deviceCode, result.AccessToken, result.Scope)
+		// Consume the code immediately after issuing the token (single-use).
+		h.store.DeleteDevice(deviceCode)
 		h.writeTokenResponse(w, result.AccessToken, result.Scope)
 	case "authorization_pending":
 		oauthError(w, "authorization_pending", "user has not yet authorized the device", http.StatusBadRequest)
@@ -313,10 +320,8 @@ func (h *Handler) DeviceAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	scope := r.FormValue("scope")
-	if scope == "" {
-		scope = h.cfg.Scopes
-	}
+	// Always use configured scopes to prevent clients from escalating to broader permissions.
+	scope := h.cfg.Scopes
 
 	ghResp, err := h.startGitHubDeviceFlow(r.Context(), scope)
 	if err != nil {
@@ -368,9 +373,12 @@ func (h *Handler) startGitHubDeviceFlow(ctx context.Context, scope string) (*git
 		"client_id": {h.cfg.GitHubClientID},
 		"scope":     {scope},
 	}
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost,
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		"https://github.com/login/device/code",
 		strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, fmt.Errorf("creating GitHub device code request: %w", err)
+	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
@@ -404,9 +412,12 @@ func (h *Handler) pollGitHubDeviceToken(ctx context.Context, githubDevCode strin
 		"device_code": {githubDevCode},
 		"grant_type":  {"urn:ietf:params:oauth:grant-type:device_code"},
 	}
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost,
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		"https://github.com/login/oauth/access_token",
 		strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, fmt.Errorf("creating GitHub device token request: %w", err)
+	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
@@ -429,6 +440,9 @@ func (h *Handler) pollGitHubDeviceToken(ctx context.Context, githubDevCode strin
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 		return nil, fmt.Errorf("decoding GitHub device token response: %w", err)
+	}
+	if raw.Error == "" && raw.AccessToken == "" {
+		return nil, fmt.Errorf("GitHub device token response: no access_token and no error field")
 	}
 	return &githubDevicePollResult{
 		AccessToken: raw.AccessToken,
