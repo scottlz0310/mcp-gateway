@@ -32,6 +32,7 @@ func TestStoreCompleteCallback(t *testing.T) {
 	sess := s.lookupByCode(code)
 	if sess == nil {
 		t.Fatal("expected session by code")
+		return // unreachable; satisfies staticcheck SA5011
 	}
 	if sess.AccessToken != "token123" {
 		t.Errorf("access token: got %q, want %q", sess.AccessToken, "token123")
