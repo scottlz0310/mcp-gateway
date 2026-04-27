@@ -20,6 +20,27 @@ type Session struct {
 	ExpiresAt     time.Time
 }
 
+type deviceStatus int
+
+const (
+	devicePending    deviceStatus = iota
+	deviceAuthorized              // GitHub returned access_token
+	deviceDenied                  // user denied or access_denied from GitHub
+)
+
+// DevicePending tracks an in-progress Device Authorization Grant (RFC 8628) flow.
+type DevicePending struct {
+	InternalCode  string
+	GitHubDevCode string // opaque GitHub device_code used for polling; never exposed to client
+	UserCode      string
+	VerifyURI     string
+	ExpiresAt     time.Time
+	Interval      int // minimum seconds between client polls (from GitHub)
+	AccessToken   string
+	Scope         string
+	Status        deviceStatus
+}
+
 type tokenEntry struct {
 	login     string
 	expiresAt time.Time
@@ -36,6 +57,7 @@ type Store struct {
 	mu       sync.RWMutex
 	sessions map[string]*Session
 	codes    map[string]*Session
+	devices  map[string]*DevicePending // keyed by gateway-internal device code
 	ttl      time.Duration
 
 	cache    *TokenCache
@@ -49,6 +71,7 @@ func NewStore(sessionTTL, cacheTTL time.Duration) *Store {
 	s := &Store{
 		sessions: make(map[string]*Session),
 		codes:    make(map[string]*Session),
+		devices:  make(map[string]*DevicePending),
 		ttl:      sessionTTL,
 		cache:    &TokenCache{entries: make(map[string]tokenEntry)},
 		cacheTTL: cacheTTL,
@@ -132,6 +155,57 @@ func (s *Store) ExchangeCode(code, redirectURI, codeVerifier string) (string, st
 	return token, scope, nil
 }
 
+// CreateDevice stores a new Device Authorization Grant session and returns the gateway-internal device code.
+func (s *Store) CreateDevice(githubDevCode, userCode, verifyURI string, expiresAt time.Time, interval int) (string, error) {
+	code, err := generateCode()
+	if err != nil {
+		return "", err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.devices[code] = &DevicePending{
+		InternalCode:  code,
+		GitHubDevCode: githubDevCode,
+		UserCode:      userCode,
+		VerifyURI:     verifyURI,
+		ExpiresAt:     expiresAt,
+		Interval:      interval,
+		Status:        devicePending,
+	}
+	return code, nil
+}
+
+// GetDevice returns a copy of the DevicePending for the given internal device code.
+func (s *Store) GetDevice(internalCode string) (DevicePending, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	d, ok := s.devices[internalCode]
+	if !ok {
+		return DevicePending{}, false
+	}
+	return *d, true
+}
+
+// AuthorizeDevice marks the device session as authorized with the given token.
+func (s *Store) AuthorizeDevice(internalCode, accessToken, scope string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if d, ok := s.devices[internalCode]; ok {
+		d.AccessToken = accessToken
+		d.Scope = scope
+		d.Status = deviceAuthorized
+	}
+}
+
+// DenyDevice marks the device session as denied by the user.
+func (s *Store) DenyDevice(internalCode string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if d, ok := s.devices[internalCode]; ok {
+		d.Status = deviceDenied
+	}
+}
+
 // CacheToken stores a validated login for a token.
 func (s *Store) CacheToken(token, login string) {
 	s.cache.mu.Lock()
@@ -175,6 +249,11 @@ func (s *Store) janitor() {
 			for k, v := range s.codes {
 				if now.After(v.ExpiresAt) {
 					delete(s.codes, k)
+				}
+			}
+			for k, v := range s.devices {
+				if now.After(v.ExpiresAt) {
+					delete(s.devices, k)
 				}
 			}
 			s.mu.Unlock()

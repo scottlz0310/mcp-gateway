@@ -74,6 +74,7 @@ func main() {
 	mux.HandleFunc("GET /callback", oauthHandler.Callback)
 	mux.HandleFunc("POST /token", oauthHandler.Token)
 	mux.HandleFunc("POST /register", oauthHandler.Register)
+	mux.HandleFunc("POST /device_authorization", oauthHandler.DeviceAuthorize)
 
 	// Health check.
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
