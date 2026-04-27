@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 
 	"github.com/scottlz0310/mcp-gateway/internal/middleware"
 )
@@ -40,11 +41,11 @@ func NewHandler(upstream *url.URL, inv TokenInvalidator) http.Handler {
 			}
 
 			if subject := middleware.IdentityFromContext(pr.In.Context()); subject != "" {
-				pr.Out.Header.Set("X-Authenticated-User", subject)
+				pr.Out.Header.Set("X-Authenticated-User", sanitizeHeaderValue(subject))
 				// Legacy header retained during the migration window so that
 				// upstream MCP services (github-mcp, copilot-review-mcp) keep
 				// working until they migrate to X-Authenticated-User.
-				pr.Out.Header.Set("X-GitHub-Login", subject)
+				pr.Out.Header.Set("X-GitHub-Login", sanitizeHeaderValue(subject))
 			}
 
 			slog.Info("proxy request",
@@ -83,6 +84,11 @@ func extractBearer(req *http.Request) string {
 		return auth[len(prefix):]
 	}
 	return ""
+}
+
+// sanitizeHeaderValue strips CR and LF to prevent HTTP header injection.
+func sanitizeHeaderValue(s string) string {
+	return strings.NewReplacer("\r", "", "\n", "").Replace(s)
 }
 
 // tokenHash returns the first 8 hex characters of SHA-256(token) for log correlation.

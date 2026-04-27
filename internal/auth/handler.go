@@ -38,7 +38,11 @@ type Handler struct {
 }
 
 // NewHandler creates a new OAuth Handler with the given configuration and provider.
+// It panics if p is nil, because all handler methods dereference the provider.
 func NewHandler(cfg Config, p provider.Provider) *Handler {
+	if p == nil {
+		panic("auth.NewHandler: provider must not be nil")
+	}
 	cfg.BaseURL = strings.TrimRight(cfg.BaseURL, "/")
 	if len(cfg.AllowedRedirectHosts) == 0 {
 		cfg.AllowedRedirectHosts = []string{"localhost", "127.0.0.1", "vscode.dev"}

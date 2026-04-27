@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/scottlz0310/mcp-gateway/internal/middleware"
@@ -143,6 +144,25 @@ func TestProxyInvalidatesCacheOn401(t *testing.T) {
 
 	if len(inv.tokens) != 1 || inv.tokens[0] != "secret-token" {
 		t.Errorf("invalidated tokens: %v", inv.tokens)
+	}
+}
+
+func TestProxySanitizesHeaderInjectionCharacters(t *testing.T) {
+	var gotAuthUser string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuthUser = r.Header.Get("X-Authenticated-User")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	u, _ := url.Parse(upstream.URL)
+	h := NewHandler(u, &mockInvalidator{})
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, requestWithContext("alice\r\nevil: injected", "tok"))
+
+	if strings.Contains(gotAuthUser, "\r") || strings.Contains(gotAuthUser, "\n") {
+		t.Errorf("X-Authenticated-User contains CR/LF: %q", gotAuthUser)
 	}
 }
 

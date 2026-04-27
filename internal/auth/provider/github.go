@@ -35,11 +35,13 @@ type GitHubConfig struct {
 }
 
 type githubProvider struct {
-	cfg    GitHubConfig
-	client *http.Client
+	cfg          GitHubConfig
+	client       *http.Client
+	authorizeURL *url.URL // pre-parsed at construction to catch misconfigurations early
 }
 
 // NewGitHub returns a Provider backed by GitHub OAuth 2.0.
+// It panics if AuthorizeURL is not a valid URL, to catch misconfigurations at startup.
 func NewGitHub(cfg GitHubConfig) Provider {
 	if cfg.AuthorizeURL == "" {
 		cfg.AuthorizeURL = githubAuthorizeURL
@@ -50,18 +52,22 @@ func NewGitHub(cfg GitHubConfig) Provider {
 	if cfg.UserAPI == "" {
 		cfg.UserAPI = githubUserAPI
 	}
+	authorizeURL, err := url.Parse(cfg.AuthorizeURL)
+	if err != nil {
+		panic(fmt.Sprintf("provider.NewGitHub: invalid AuthorizeURL %q: %v", cfg.AuthorizeURL, err))
+	}
 	client := cfg.HTTPClient
 	if client == nil {
 		client = &http.Client{Timeout: 15 * time.Second}
 	}
-	return &githubProvider{cfg: cfg, client: client}
+	return &githubProvider{cfg: cfg, client: client, authorizeURL: authorizeURL}
 }
 
 func (p *githubProvider) Name() string     { return "github" }
 func (p *githubProvider) ClientID() string { return p.cfg.ClientID }
 
 func (p *githubProvider) AuthorizeURL(state, codeChallenge string) string {
-	u, _ := url.Parse(p.cfg.AuthorizeURL)
+	u := *p.authorizeURL // shallow copy to avoid mutating the stored URL
 	q := u.Query()
 	q.Set("client_id", p.cfg.ClientID)
 	q.Set("redirect_uri", p.cfg.RedirectURI)
@@ -82,8 +88,11 @@ func (p *githubProvider) ExchangeCode(ctx context.Context, code string) (string,
 		"redirect_uri":  {p.cfg.RedirectURI},
 	}
 
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost,
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		p.cfg.TokenURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", nil, &UpstreamError{Err: fmt.Errorf("building GitHub token request: %w", err)}
+	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
@@ -119,7 +128,10 @@ func (p *githubProvider) ExchangeCode(ctx context.Context, code string) (string,
 }
 
 func (p *githubProvider) ValidateToken(ctx context.Context, token string) (Identity, error) {
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, p.cfg.UserAPI, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.cfg.UserAPI, nil)
+	if err != nil {
+		return Identity{}, &UpstreamError{Err: fmt.Errorf("building GitHub user request: %w", err)}
+	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.github+json")
 
@@ -130,10 +142,17 @@ func (p *githubProvider) ValidateToken(ctx context.Context, token string) (Ident
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		if resp.StatusCode >= 500 {
+		switch resp.StatusCode {
+		case http.StatusUnauthorized:
+			return Identity{}, fmt.Errorf("invalid token: GitHub returned %d", resp.StatusCode)
+		case http.StatusForbidden, http.StatusTooManyRequests:
 			return Identity{}, &UpstreamError{Err: fmt.Errorf("GitHub API returned %d", resp.StatusCode)}
+		default:
+			if resp.StatusCode >= 500 {
+				return Identity{}, &UpstreamError{Err: fmt.Errorf("GitHub API returned %d", resp.StatusCode)}
+			}
+			return Identity{}, fmt.Errorf("invalid token: GitHub returned %d", resp.StatusCode)
 		}
-		return Identity{}, fmt.Errorf("invalid token: GitHub returned %d", resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(resp.Body)
@@ -144,8 +163,11 @@ func (p *githubProvider) ValidateToken(ctx context.Context, token string) (Ident
 		Login string `json:"login"`
 		Name  string `json:"name"`
 	}
-	if err := json.Unmarshal(body, &user); err != nil || user.Login == "" {
-		return Identity{}, fmt.Errorf("unexpected GitHub user response")
+	if err := json.Unmarshal(body, &user); err != nil {
+		return Identity{}, fmt.Errorf("decoding GitHub user response: %w", err)
+	}
+	if user.Login == "" {
+		return Identity{}, fmt.Errorf("GitHub user response missing login")
 	}
 
 	return Identity{

@@ -125,6 +125,15 @@ func TestAuthorizeDisallowedRedirectHost(t *testing.T) {
 	}
 }
 
+func TestNewHandlerPanicsOnNilProvider(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("expected panic for nil provider")
+		}
+	}()
+	NewHandler(Config{}, nil)
+}
+
 func TestAuthorizeRedirectsToGitHub(t *testing.T) {
 	h := newTestHandler()
 	r := httptest.NewRequest(http.MethodGet,

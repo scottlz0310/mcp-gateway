@@ -163,6 +163,20 @@ func TestGitHubValidateToken(t *testing.T) {
 			wantUpstrm: true,
 		},
 		{
+			name:       "403 is upstream error",
+			status:     http.StatusForbidden,
+			body:       "",
+			wantErr:    true,
+			wantUpstrm: true,
+		},
+		{
+			name:       "429 is upstream error",
+			status:     http.StatusTooManyRequests,
+			body:       "",
+			wantErr:    true,
+			wantUpstrm: true,
+		},
+		{
 			name:    "empty login",
 			status:  http.StatusOK,
 			body:    `{"login":""}`,
@@ -230,6 +244,18 @@ func TestNewFactory(t *testing.T) {
 		_, err := New(Config{Kind: "github"})
 		if err == nil {
 			t.Fatal("expected error")
+		}
+	})
+	t.Run("missing redirect uri", func(t *testing.T) {
+		_, err := New(Config{Kind: "github", ClientID: "cid", ClientSecret: "secret"})
+		if err == nil {
+			t.Fatal("expected error for missing RedirectURI")
+		}
+	})
+	t.Run("invalid redirect uri", func(t *testing.T) {
+		_, err := New(Config{Kind: "github", ClientID: "cid", ClientSecret: "secret", RedirectURI: "not-a-url"})
+		if err == nil {
+			t.Fatal("expected error for non-absolute RedirectURI")
 		}
 	})
 	t.Run("unsupported kind", func(t *testing.T) {

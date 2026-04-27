@@ -1,6 +1,9 @@
 package provider
 
-import "fmt"
+import (
+	"fmt"
+	"net/url"
+)
 
 // Config carries the provider-agnostic configuration consumed by New.
 // Provider-specific fields are added as additional providers are introduced.
@@ -20,6 +23,13 @@ func New(cfg Config) (Provider, error) {
 	case "github", "":
 		if cfg.ClientID == "" || cfg.ClientSecret == "" {
 			return nil, fmt.Errorf("github provider requires ClientID and ClientSecret")
+		}
+		if cfg.RedirectURI == "" {
+			return nil, fmt.Errorf("github provider requires RedirectURI")
+		}
+		u, err := url.Parse(cfg.RedirectURI)
+		if err != nil || !u.IsAbs() || (u.Scheme != "http" && u.Scheme != "https") {
+			return nil, fmt.Errorf("github provider requires an absolute http/https RedirectURI, got %q", cfg.RedirectURI)
 		}
 		return NewGitHub(GitHubConfig{
 			ClientID:     cfg.ClientID,
