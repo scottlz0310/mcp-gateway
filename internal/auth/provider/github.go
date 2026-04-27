@@ -56,6 +56,9 @@ func NewGitHub(cfg GitHubConfig) Provider {
 	if err != nil {
 		panic(fmt.Sprintf("provider.NewGitHub: invalid AuthorizeURL %q: %v", cfg.AuthorizeURL, err))
 	}
+	if !authorizeURL.IsAbs() || (authorizeURL.Scheme != "http" && authorizeURL.Scheme != "https") {
+		panic(fmt.Sprintf("provider.NewGitHub: AuthorizeURL %q must be an absolute http/https URL", cfg.AuthorizeURL))
+	}
 	client := cfg.HTTPClient
 	if client == nil {
 		client = &http.Client{Timeout: 15 * time.Second}

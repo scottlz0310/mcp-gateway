@@ -24,6 +24,31 @@ func newGitHubFromServer(t *testing.T, srv *httptest.Server) Provider {
 	})
 }
 
+func TestNewGitHubPanicsOnInvalidAuthorizeURL(t *testing.T) {
+	cases := []struct {
+		name         string
+		authorizeURL string
+	}{
+		{name: "relative URL", authorizeURL: "login/oauth/authorize"},
+		{name: "non-http scheme", authorizeURL: "ftp://github.com/login/oauth/authorize"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r == nil {
+					t.Error("expected panic but did not get one")
+				}
+			}()
+			NewGitHub(GitHubConfig{
+				ClientID:     "cid",
+				ClientSecret: "secret",
+				RedirectURI:  "http://localhost:8080/callback",
+				AuthorizeURL: tc.authorizeURL,
+			})
+		})
+	}
+}
+
 func TestGitHubAuthorizeURL(t *testing.T) {
 	p := NewGitHub(GitHubConfig{
 		ClientID:    "cid",

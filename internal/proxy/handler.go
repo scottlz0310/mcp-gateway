@@ -86,9 +86,12 @@ func extractBearer(req *http.Request) string {
 	return ""
 }
 
+// headerSanitizer is a package-level replacer reused on every proxied request.
+var headerSanitizer = strings.NewReplacer("\r", "", "\n", "")
+
 // sanitizeHeaderValue strips CR and LF to prevent HTTP header injection.
 func sanitizeHeaderValue(s string) string {
-	return strings.NewReplacer("\r", "", "\n", "").Replace(s)
+	return headerSanitizer.Replace(s)
 }
 
 // tokenHash returns the first 8 hex characters of SHA-256(token) for log correlation.

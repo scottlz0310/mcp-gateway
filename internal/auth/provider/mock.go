@@ -1,6 +1,9 @@
 package provider
 
-import "context"
+import (
+	"context"
+	"net/url"
+)
 
 // Mock is an in-memory Provider implementation for tests.
 //
@@ -27,7 +30,9 @@ func (m *Mock) AuthorizeURL(state, codeChallenge string) string {
 	if m.AuthorizeURLFunc != nil {
 		return m.AuthorizeURLFunc(state, codeChallenge)
 	}
-	return "https://mock.example.com/authorize?state=" + state
+	q := url.Values{}
+	q.Set("state", state)
+	return "https://mock.example.com/authorize?" + q.Encode()
 }
 
 func (m *Mock) ExchangeCode(ctx context.Context, code string) (string, []string, error) {
