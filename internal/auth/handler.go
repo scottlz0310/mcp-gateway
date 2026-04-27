@@ -256,7 +256,7 @@ func (h *Handler) ValidateToken(ctx context.Context, token string) (string, erro
 	if err != nil {
 		return "", &UpstreamError{err: fmt.Errorf("GitHub API unreachable: %w", err)}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		if resp.StatusCode >= 500 {
@@ -303,7 +303,7 @@ func (h *Handler) exchangeGitHubCode(ctx context.Context, code string) (string, 
 	if err != nil {
 		return "", "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
