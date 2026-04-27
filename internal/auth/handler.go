@@ -207,6 +207,7 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 
 // Token handles the authorization_code grant and returns the access token.
 func (h *Handler) Token(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	if err := r.ParseForm(); err != nil {
 		oauthError(w, "invalid_request", "malformed request body", http.StatusBadRequest)
 		return

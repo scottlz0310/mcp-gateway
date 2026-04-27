@@ -17,11 +17,12 @@ import (
 )
 
 func main() {
-	cfg := loadConfig()
-
+	// Initialize logger before loadConfig so mustEnv failures use the JSON handler.
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level: parseLogLevel(cfg.logLevel),
+		Level: parseLogLevel(getEnv("LOG_LEVEL", "info")),
 	})))
+
+	cfg := loadConfig()
 
 	routes, err := router.ParseEnv()
 	if err != nil {

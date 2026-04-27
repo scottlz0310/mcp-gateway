@@ -23,6 +23,7 @@ func ParseEnv() ([]Route, error) {
 
 func parseRoutes(env []string) ([]Route, error) {
 	var routes []Route
+	seen := make(map[string]struct{})
 	for _, entry := range env {
 		key, val, found := strings.Cut(entry, "=")
 		if !found || !strings.HasPrefix(key, "ROUTE_") {
@@ -53,6 +54,10 @@ func parseRoutes(env []string) ([]Route, error) {
 		if u.Scheme != "http" && u.Scheme != "https" {
 			return nil, fmt.Errorf("%s: upstream URL scheme must be http or https (got %q)", key, u.Scheme)
 		}
+		if _, dup := seen[prefix]; dup {
+			return nil, fmt.Errorf("%s: duplicate prefix %q", key, prefix)
+		}
+		seen[prefix] = struct{}{}
 		routes = append(routes, Route{Name: name, Prefix: prefix, Upstream: u})
 	}
 	// Longest prefix first for correct matching order.

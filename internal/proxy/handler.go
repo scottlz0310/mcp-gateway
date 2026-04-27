@@ -50,7 +50,7 @@ func NewHandler(upstream *url.URL, inv TokenInvalidator) http.Handler {
 		},
 
 		ModifyResponse: func(resp *http.Response) error {
-			if resp.StatusCode == http.StatusUnauthorized {
+			if resp.StatusCode == http.StatusUnauthorized && inv != nil {
 				if token := extractBearer(resp.Request); token != "" {
 					inv.InvalidateCachedToken(token)
 					slog.Warn("upstream rejected token; cache invalidated",

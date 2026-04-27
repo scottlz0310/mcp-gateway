@@ -138,3 +138,14 @@ func TestParseRoutesNonHTTPScheme(t *testing.T) {
 		t.Fatal("expected error for non-http/https upstream scheme")
 	}
 }
+
+func TestParseRoutesDuplicatePrefix(t *testing.T) {
+	env := []string{
+		"ROUTE_A=/mcp|http://a:8080",
+		"ROUTE_B=/mcp|http://b:8081",
+	}
+	_, err := parseRoutes(env)
+	if err == nil {
+		t.Fatal("expected error for duplicate prefix")
+	}
+}
