@@ -28,8 +28,8 @@ func New(cfg Config) (Provider, error) {
 			return nil, fmt.Errorf("github provider requires RedirectURI")
 		}
 		u, err := url.Parse(cfg.RedirectURI)
-		if err != nil || !u.IsAbs() || (u.Scheme != "http" && u.Scheme != "https") {
-			return nil, fmt.Errorf("github provider requires an absolute http/https RedirectURI, got %q", cfg.RedirectURI)
+		if err != nil || !u.IsAbs() || u.Host == "" || u.Fragment != "" || (u.Scheme != "http" && u.Scheme != "https") {
+			return nil, fmt.Errorf("github provider requires an absolute http/https RedirectURI with a host and no fragment, got %q", cfg.RedirectURI)
 		}
 		return NewGitHub(GitHubConfig{
 			ClientID:     cfg.ClientID,

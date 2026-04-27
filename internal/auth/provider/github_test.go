@@ -283,6 +283,18 @@ func TestNewFactory(t *testing.T) {
 			t.Fatal("expected error for non-absolute RedirectURI")
 		}
 	})
+	t.Run("redirect uri missing host", func(t *testing.T) {
+		_, err := New(Config{Kind: "github", ClientID: "cid", ClientSecret: "secret", RedirectURI: "https:///callback"})
+		if err == nil {
+			t.Fatal("expected error for RedirectURI with empty host")
+		}
+	})
+	t.Run("redirect uri with fragment", func(t *testing.T) {
+		_, err := New(Config{Kind: "github", ClientID: "cid", ClientSecret: "secret", RedirectURI: "https://example.com/callback#frag"})
+		if err == nil {
+			t.Fatal("expected error for RedirectURI with fragment")
+		}
+	})
 	t.Run("unsupported kind", func(t *testing.T) {
 		_, err := New(Config{Kind: "unknown", ClientID: "x", ClientSecret: "y"})
 		if err == nil {
