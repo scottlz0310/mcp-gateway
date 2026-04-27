@@ -3,7 +3,6 @@ package auth
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -12,16 +11,15 @@ import (
 	"time"
 
 	"log/slog"
+
+	"github.com/scottlz0310/mcp-gateway/internal/auth/provider"
 )
 
-var githubClient = &http.Client{Timeout: 15 * time.Second}
-
-// Config holds OAuth façade configuration.
+// Config holds OAuth façade configuration. Provider-specific fields (client
+// credentials, scope) live on the Provider implementation; this struct only
+// carries gateway-wide settings.
 type Config struct {
-	GitHubClientID       string
-	GitHubClientSecret   string
 	BaseURL              string
-	Scopes               string
 	SessionTTL           time.Duration
 	CacheTTL             time.Duration
 	AllowedRedirectHosts []string
@@ -31,23 +29,20 @@ type Config struct {
 	ExpiresIn time.Duration
 }
 
-// UpstreamError represents a failure contacting an upstream service.
-type UpstreamError struct {
-	err error
-}
-
-func (e *UpstreamError) Error() string         { return e.err.Error() }
-func (e *UpstreamError) Unwrap() error         { return e.err }
-func (e *UpstreamError) IsUpstreamError() bool { return true }
-
-// Handler implements the OAuth façade endpoints.
+// Handler implements the OAuth façade endpoints, delegating provider-specific
+// operations to a provider.Provider.
 type Handler struct {
-	cfg   Config
-	store *Store
+	cfg      Config
+	provider provider.Provider
+	store    *Store
 }
 
-// NewHandler creates a new OAuth Handler with the given configuration.
-func NewHandler(cfg Config) *Handler {
+// NewHandler creates a new OAuth Handler with the given configuration and provider.
+// It panics if p is nil, because all handler methods dereference the provider.
+func NewHandler(cfg Config, p provider.Provider) *Handler {
+	if p == nil {
+		panic("auth.NewHandler: provider must not be nil")
+	}
 	cfg.BaseURL = strings.TrimRight(cfg.BaseURL, "/")
 	if len(cfg.AllowedRedirectHosts) == 0 {
 		cfg.AllowedRedirectHosts = []string{"localhost", "127.0.0.1", "vscode.dev"}
@@ -56,8 +51,9 @@ func NewHandler(cfg Config) *Handler {
 		cfg.ExpiresIn = 90 * 24 * time.Hour
 	}
 	return &Handler{
-		cfg:   cfg,
-		store: NewStore(cfg.SessionTTL, cfg.CacheTTL),
+		cfg:      cfg,
+		provider: p,
+		store:    NewStore(cfg.SessionTTL, cfg.CacheTTL),
 	}
 }
 
@@ -77,7 +73,7 @@ func (h *Handler) Discovery(w http.ResponseWriter, r *http.Request) {
 }
 
 // Register implements RFC 7591 Dynamic Client Registration (pseudo).
-// Always returns the pre-configured GitHub OAuth App client_id.
+// Always returns the configured upstream OAuth App client_id.
 func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 
@@ -94,7 +90,7 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := map[string]any{
-		"client_id":                  h.cfg.GitHubClientID,
+		"client_id":                  h.provider.ClientID(),
 		"client_id_issued_at":        time.Now().Unix(),
 		"client_secret_expires_at":   0,
 		"token_endpoint_auth_method": "none",
@@ -113,7 +109,7 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// Authorize redirects the MCP client to GitHub OAuth.
+// Authorize redirects the MCP client to the configured OAuth provider.
 func (h *Handler) Authorize(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	state := q.Get("state")
@@ -150,18 +146,11 @@ func (h *Handler) Authorize(w http.ResponseWriter, r *http.Request) {
 
 	h.store.SaveSession(state, redirectURI, codeChallenge)
 
-	ghURL, _ := url.Parse("https://github.com/login/oauth/authorize")
-	ghq := ghURL.Query()
-	ghq.Set("client_id", h.cfg.GitHubClientID)
-	ghq.Set("redirect_uri", h.cfg.BaseURL+"/callback")
-	ghq.Set("state", state)
-	ghq.Set("scope", h.cfg.Scopes)
-	ghURL.RawQuery = ghq.Encode()
-
-	http.Redirect(w, r, ghURL.String(), http.StatusFound)
+	http.Redirect(w, r, h.provider.AuthorizeURL(state, codeChallenge), http.StatusFound)
 }
 
-// Callback receives GitHub's authorization code and exchanges it for an access token.
+// Callback receives the provider's authorization code and exchanges it for
+// an access token via the Provider implementation.
 func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	code := q.Get("code")
@@ -176,14 +165,14 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	accessToken, grantedScope, err := h.exchangeGitHubCode(r.Context(), code)
+	accessToken, scopes, err := h.provider.ExchangeCode(r.Context(), code)
 	if err != nil {
-		slog.Error("GitHub token exchange failed", "err", err)
+		slog.Error("OAuth token exchange failed", "provider", h.provider.Name(), "err", err)
 		http.Error(w, "token exchange failed", http.StatusBadGateway)
 		return
 	}
 
-	internalCode, err := h.store.CompleteCallback(state, accessToken, grantedScope)
+	internalCode, err := h.store.CompleteCallback(state, accessToken, joinScopes(scopes))
 	if err != nil {
 		slog.Error("session completion failed", "err", err)
 		http.Error(w, "invalid state", http.StatusBadRequest)
@@ -243,42 +232,18 @@ func (h *Handler) Token(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(tokenResp)
 }
 
-// ValidateToken checks the bearer token against GitHub API (with cache).
+// ValidateToken checks the bearer token via the provider (with cache).
+// The returned subject is the Identity.Subject from the provider.
 func (h *Handler) ValidateToken(ctx context.Context, token string) (string, error) {
-	if login, ok := h.store.LookupToken(token); ok {
-		return login, nil
+	if subject, ok := h.store.LookupToken(token); ok {
+		return subject, nil
 	}
-
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com/user", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-
-	resp, err := githubClient.Do(req)
+	id, err := h.provider.ValidateToken(ctx, token)
 	if err != nil {
-		return "", &UpstreamError{err: fmt.Errorf("GitHub API unreachable: %w", err)}
+		return "", err
 	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		if resp.StatusCode >= 500 {
-			return "", &UpstreamError{err: fmt.Errorf("GitHub API returned %d", resp.StatusCode)}
-		}
-		return "", fmt.Errorf("invalid token: GitHub returned %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", &UpstreamError{err: fmt.Errorf("reading GitHub user response: %w", err)}
-	}
-	var user struct {
-		Login string `json:"login"`
-	}
-	if err := json.Unmarshal(body, &user); err != nil || user.Login == "" {
-		return "", fmt.Errorf("unexpected GitHub user response")
-	}
-
-	h.store.CacheToken(token, user.Login)
-	return user.Login, nil
+	h.store.CacheToken(token, id.Subject)
+	return id.Subject, nil
 }
 
 // InvalidateCachedToken delegates cache invalidation to the underlying store.
@@ -286,50 +251,17 @@ func (h *Handler) InvalidateCachedToken(token string) {
 	h.store.InvalidateCachedToken(token)
 }
 
-func (h *Handler) exchangeGitHubCode(ctx context.Context, code string) (string, string, error) {
-	form := url.Values{
-		"client_id":     {h.cfg.GitHubClientID},
-		"client_secret": {h.cfg.GitHubClientSecret},
-		"code":          {code},
-		"redirect_uri":  {h.cfg.BaseURL + "/callback"},
-	}
-
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost,
-		"https://github.com/login/oauth/access_token",
-		strings.NewReader(form.Encode()))
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	resp, err := githubClient.Do(req)
-	if err != nil {
-		return "", "", err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
-		return "", "", fmt.Errorf("GitHub OAuth returned %d: %s", resp.StatusCode, strings.TrimSpace(string(snippet)))
-	}
-
-	var result struct {
-		AccessToken string `json:"access_token"`
-		Scope       string `json:"scope"`
-		Error       string `json:"error"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", "", fmt.Errorf("decoding GitHub OAuth response: %w", err)
-	}
-	if result.Error != "" {
-		return "", "", fmt.Errorf("GitHub OAuth error: %s", result.Error)
-	}
-	if result.AccessToken == "" {
-		return "", "", fmt.Errorf("empty access_token from GitHub")
-	}
-	return result.AccessToken, result.Scope, nil
-}
-
 func isAllowedRedirectHost(hostname string, allowed []string) bool {
 	return slices.Contains(allowed, hostname)
+}
+
+// joinScopes serializes the provider's scope slice for OAuth token responses.
+// The comma delimiter preserves backward compatibility with the previous
+// GitHub-coupled implementation, which forwarded GitHub's raw scope string.
+// RFC 6749 §3.3 specifies space delimiter; normalization to that form is
+// deferred to a separate change to keep this refactor non-breaking.
+func joinScopes(scopes []string) string {
+	return strings.Join(scopes, ",")
 }
 
 func oauthError(w http.ResponseWriter, code, description string, status int) {
