@@ -30,11 +30,17 @@ func parseRoutes(env []string) ([]Route, error) {
 			continue
 		}
 		name := strings.ToLower(strings.TrimPrefix(key, "ROUTE_"))
+		if name == "" {
+			return nil, fmt.Errorf("%s: route name must not be empty (use ROUTE_<NAME>=...)", key)
+		}
 		prefix, upstreamRaw, found := strings.Cut(val, "|")
 		if !found {
 			return nil, fmt.Errorf("%s: expected <prefix>|<upstream_url>, got %q", key, val)
 		}
-		prefix = strings.TrimRight(prefix, "/")
+		// Strip trailing slash(es) only when it won't erase the root prefix.
+		if prefix != "/" {
+			prefix = strings.TrimRight(prefix, "/")
+		}
 		if prefix == "" {
 			return nil, fmt.Errorf("%s: prefix must not be empty", key)
 		}

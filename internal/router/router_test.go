@@ -81,6 +81,25 @@ func TestParseRoutesNonRouteVarsIgnored(t *testing.T) {
 	}
 }
 
+func TestParseRoutesRootPrefix(t *testing.T) {
+	env := []string{"ROUTE_ROOT=/|http://root:8080"}
+	routes, err := parseRoutes(env)
+	if err != nil {
+		t.Fatalf("unexpected error for root prefix: %v", err)
+	}
+	if routes[0].Prefix != "/" {
+		t.Errorf("root prefix: got %q, want %q", routes[0].Prefix, "/")
+	}
+}
+
+func TestParseRoutesEmptyName(t *testing.T) {
+	env := []string{"ROUTE_=/mcp|http://x:8080"}
+	_, err := parseRoutes(env)
+	if err == nil {
+		t.Fatal("expected error for empty route name")
+	}
+}
+
 func TestParseRoutesInvalidFormat(t *testing.T) {
 	env := []string{"ROUTE_BAD=nopipe"}
 	_, err := parseRoutes(env)

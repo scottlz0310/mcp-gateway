@@ -37,6 +37,14 @@ func main() {
 			slog.Error("invalid upstream URL", "url", cfg.upstreamURL, "err", err)
 			os.Exit(1)
 		}
+		if u.Scheme == "" || u.Host == "" {
+			slog.Error("upstream URL must be absolute with scheme and host", "url", cfg.upstreamURL)
+			os.Exit(1)
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			slog.Error("upstream URL scheme must be http or https", "url", cfg.upstreamURL)
+			os.Exit(1)
+		}
 		routes = []router.Route{{Name: "default", Prefix: "/mcp", Upstream: u}}
 		slog.Warn("GITHUB_MCP_UPSTREAM_URL is deprecated; use ROUTE_<NAME>=<prefix>|<url> instead")
 	}

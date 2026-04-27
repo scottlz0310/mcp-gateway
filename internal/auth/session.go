@@ -40,6 +40,8 @@ type Store struct {
 
 	cache    *TokenCache
 	cacheTTL time.Duration
+
+	stopCh chan struct{}
 }
 
 // NewStore creates a Store with the given TTLs and starts a background janitor.
@@ -50,9 +52,15 @@ func NewStore(sessionTTL, cacheTTL time.Duration) *Store {
 		ttl:      sessionTTL,
 		cache:    &TokenCache{entries: make(map[string]tokenEntry)},
 		cacheTTL: cacheTTL,
+		stopCh:   make(chan struct{}),
 	}
 	go s.janitor()
 	return s
+}
+
+// Stop terminates the background janitor goroutine.
+func (s *Store) Stop() {
+	close(s.stopCh)
 }
 
 // SaveSession stores a new OAuth session keyed by state.
@@ -151,28 +159,34 @@ func (s *Store) InvalidateCachedToken(token string) {
 
 func (s *Store) janitor() {
 	ticker := time.NewTicker(time.Minute)
-	for range ticker.C {
-		now := time.Now()
-		s.mu.Lock()
-		for k, v := range s.sessions {
-			if now.After(v.ExpiresAt) {
-				delete(s.sessions, k)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.stopCh:
+			return
+		case <-ticker.C:
+			now := time.Now()
+			s.mu.Lock()
+			for k, v := range s.sessions {
+				if now.After(v.ExpiresAt) {
+					delete(s.sessions, k)
+				}
 			}
-		}
-		for k, v := range s.codes {
-			if now.After(v.ExpiresAt) {
-				delete(s.codes, k)
+			for k, v := range s.codes {
+				if now.After(v.ExpiresAt) {
+					delete(s.codes, k)
+				}
 			}
-		}
-		s.mu.Unlock()
+			s.mu.Unlock()
 
-		s.cache.mu.Lock()
-		for k, v := range s.cache.entries {
-			if now.After(v.expiresAt) {
-				delete(s.cache.entries, k)
+			s.cache.mu.Lock()
+			for k, v := range s.cache.entries {
+				if now.After(v.expiresAt) {
+					delete(s.cache.entries, k)
+				}
 			}
+			s.cache.mu.Unlock()
 		}
-		s.cache.mu.Unlock()
 	}
 }
 
