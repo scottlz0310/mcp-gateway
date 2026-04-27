@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -266,13 +267,22 @@ func TestTokenDeviceGrantPending(t *testing.T) {
 	}
 }
 
-func TestTokenDeviceGrantAuthorized(t *testing.T) {
+func TestTokenDeviceGrantSuccess(t *testing.T) {
+	// Mock GitHub's token endpoint returning a successful access token.
+	ghServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"access_token":"gha_success_token","scope":"repo,user","token_type":"bearer"}`)
+	}))
+	defer ghServer.Close()
+
+	originalTransport := githubClient.Transport
+	defer func() { githubClient.Transport = originalTransport }()
+	githubClient.Transport = rewriteHostTransport{target: ghServer.URL, inner: ghServer.Client().Transport}
+
 	h := newTestHandler()
 
-	// Create an already-authorized device session.
 	expiresAt := time.Now().Add(15 * time.Minute)
 	internalCode, _ := h.store.CreateDevice("gh-dev-code", "WDJB-MJHT", "https://github.com/login/device", expiresAt, 5)
-	h.store.AuthorizeDevice(internalCode, "gha_already_authorized_token", "repo,user")
 
 	body := fmt.Sprintf("grant_type=urn:ietf%%3Aparams%%3Aoauth%%3Agrant-type%%3Adevice_code&device_code=%s", internalCode)
 	r := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
@@ -288,7 +298,7 @@ func TestTokenDeviceGrantAuthorized(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("decoding response: %v", err)
 	}
-	if resp["access_token"] != "gha_already_authorized_token" {
+	if resp["access_token"] != "gha_success_token" {
 		t.Errorf("access_token: got %v", resp["access_token"])
 	}
 }
@@ -301,9 +311,10 @@ type rewriteHostTransport struct {
 }
 
 func (t rewriteHostTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	parsed, _ := url.Parse(t.target)
 	req = req.Clone(req.Context())
-	req.URL.Scheme = "http"
-	req.URL.Host = strings.TrimPrefix(t.target, "http://")
+	req.URL.Scheme = parsed.Scheme
+	req.URL.Host = parsed.Host
 	if t.inner != nil {
 		return t.inner.RoundTrip(req)
 	}

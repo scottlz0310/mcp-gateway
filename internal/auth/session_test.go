@@ -139,17 +139,15 @@ func TestStoreDeviceLifecycle(t *testing.T) {
 		t.Errorf("status: got %v, want pending", d.Status)
 	}
 
-	s.AuthorizeDevice(code, "gha_token", "repo,user")
-
-	d, ok = s.GetDevice(code)
+	consumed, ok := s.AuthorizeAndConsumeDevice(code, "gha_token", "repo,user")
 	if !ok {
-		t.Fatal("expected device session after authorization")
+		t.Fatal("expected AuthorizeAndConsumeDevice to succeed")
 	}
-	if d.Status != deviceAuthorized {
-		t.Errorf("status: got %v, want authorized", d.Status)
+	if consumed.AccessToken != "gha_token" {
+		t.Errorf("access_token: got %q", consumed.AccessToken)
 	}
-	if d.AccessToken != "gha_token" {
-		t.Errorf("access_token: got %q", d.AccessToken)
+	if _, ok := s.GetDevice(code); ok {
+		t.Error("expected device session to be removed after consuming")
 	}
 }
 

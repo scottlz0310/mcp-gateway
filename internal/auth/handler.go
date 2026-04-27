@@ -255,11 +255,6 @@ func (h *Handler) tokenDeviceGrant(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch pending.Status {
-	case deviceAuthorized:
-		// Consume the code on first retrieval (single-use).
-		h.store.DeleteDevice(deviceCode)
-		h.writeTokenResponse(w, pending.AccessToken, pending.Scope)
-		return
 	case deviceDenied:
 		oauthError(w, "access_denied", "user denied authorization", http.StatusBadRequest)
 		return
@@ -275,8 +270,10 @@ func (h *Handler) tokenDeviceGrant(w http.ResponseWriter, r *http.Request) {
 
 	switch result.Error {
 	case "":
-		// Consume the code immediately after issuing the token (single-use).
-		h.store.DeleteDevice(deviceCode)
+		if _, ok := h.store.AuthorizeAndConsumeDevice(deviceCode, result.AccessToken, result.Scope); !ok {
+			oauthError(w, "invalid_grant", "device code already consumed", http.StatusBadRequest)
+			return
+		}
 		h.writeTokenResponse(w, result.AccessToken, result.Scope)
 	case "authorization_pending":
 		oauthError(w, "authorization_pending", "user has not yet authorized the device", http.StatusBadRequest)
