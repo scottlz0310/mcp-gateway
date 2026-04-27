@@ -72,9 +72,9 @@ func TestAuthUpstreamError(t *testing.T) {
 }
 
 func TestAuthValidToken(t *testing.T) {
-	var gotLogin, gotToken string
+	var gotIdentity, gotToken string
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotLogin = LoginFromContext(r.Context())
+		gotIdentity = IdentityFromContext(r.Context())
 		gotToken = TokenFromContext(r.Context())
 		w.WriteHeader(http.StatusOK)
 	})
@@ -89,8 +89,8 @@ func TestAuthValidToken(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Errorf("status: got %d, want %d", w.Code, http.StatusOK)
 	}
-	if gotLogin != "alice" {
-		t.Errorf("login in context: got %q, want %q", gotLogin, "alice")
+	if gotIdentity != "alice" {
+		t.Errorf("identity in context: got %q, want %q", gotIdentity, "alice")
 	}
 	if gotToken != "my-token" {
 		t.Errorf("token in context: got %q, want %q", gotToken, "my-token")

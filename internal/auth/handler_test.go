@@ -7,18 +7,23 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/scottlz0310/mcp-gateway/internal/auth/provider"
 )
 
 func newTestHandler() *Handler {
-	return NewHandler(Config{
-		GitHubClientID:     "test-client-id",
-		GitHubClientSecret: "test-client-secret",
-		BaseURL:            "http://localhost:8080",
-		Scopes:             "repo,user",
-		SessionTTL:         10 * time.Minute,
-		CacheTTL:           5 * time.Minute,
-		ExpiresIn:          90 * 24 * time.Hour,
+	p := provider.NewGitHub(provider.GitHubConfig{
+		ClientID:     "test-client-id",
+		ClientSecret: "test-client-secret",
+		RedirectURI:  "http://localhost:8080/callback",
+		Scopes:       "repo,user",
 	})
+	return NewHandler(Config{
+		BaseURL:    "http://localhost:8080",
+		SessionTTL: 10 * time.Minute,
+		CacheTTL:   5 * time.Minute,
+		ExpiresIn:  90 * 24 * time.Hour,
+	}, p)
 }
 
 func TestDiscovery(t *testing.T) {
