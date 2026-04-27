@@ -11,6 +11,13 @@ import (
 	"github.com/scottlz0310/mcp-gateway/internal/middleware"
 )
 
+// testValidator is a stub TokenValidator for integration-level tests.
+type testValidator struct{ login string }
+
+func (v *testValidator) ValidateToken(_ context.Context, _ string) (string, error) {
+	return v.login, nil
+}
+
 type mockInvalidator struct {
 	tokens []string
 }
@@ -176,4 +183,45 @@ func TestProxyNilInvalidatorDoesNotPanicOn401(t *testing.T) {
 	w := httptest.NewRecorder()
 	// Must not panic.
 	h.ServeHTTP(w, requestWithContext("eve", "tok"))
+}
+
+// TestMiddlewareToProxyInjectsIdentityHeaders verifies the complete pipeline:
+// Auth middleware → proxy handler → upstream, confirming that both
+// X-Authenticated-User and X-GitHub-Login reach the upstream service
+// (e.g. github-mcp, copilot-review-mcp) on every proxied request.
+func TestMiddlewareToProxyInjectsIdentityHeaders(t *testing.T) {
+	var (
+		gotAuthUser    string
+		gotLegacyLogin string
+		gotAuth        string
+	)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuthUser = r.Header.Get("X-Authenticated-User")
+		gotLegacyLogin = r.Header.Get("X-GitHub-Login")
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	u, _ := url.Parse(upstream.URL)
+	validator := &testValidator{login: "octocat"}
+	chain := middleware.Auth(validator)(NewHandler(u, &mockInvalidator{}))
+
+	r := httptest.NewRequest(http.MethodGet, "/mcp/test", nil)
+	r.Header.Set("Authorization", "Bearer real-github-token")
+	w := httptest.NewRecorder()
+	chain.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 from upstream, got %d", w.Code)
+	}
+	if gotAuthUser != "octocat" {
+		t.Errorf("X-Authenticated-User: got %q, want %q", gotAuthUser, "octocat")
+	}
+	if gotLegacyLogin != "octocat" {
+		t.Errorf("X-GitHub-Login (legacy): got %q, want %q", gotLegacyLogin, "octocat")
+	}
+	if gotAuth != "Bearer real-github-token" {
+		t.Errorf("Authorization: got %q, want %q", gotAuth, "Bearer real-github-token")
+	}
 }
