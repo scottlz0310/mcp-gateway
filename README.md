@@ -139,6 +139,33 @@ services:
 
 See [mcp-docker](https://github.com/scottlz0310/Mcp-Docker) for a full Compose stack.
 
+### 2a. Multi-Upstream: github-mcp + copilot-review-mcp
+
+Route multiple MCP services through a single gateway by adding more `ROUTE_*` entries.
+A complete example that includes `copilot-review-mcp` is provided in
+[`examples/copilot-review-routing/`](examples/copilot-review-routing/):
+
+```yaml
+services:
+  mcp-gateway:
+    image: ghcr.io/scottlz0310/mcp-gateway:latest
+    ports:
+      - "8080:8080"
+    environment:
+      GITHUB_MCP_CLIENT_ID: <your-client-id>
+      GITHUB_MCP_CLIENT_SECRET: <your-client-secret>
+      MCP_GATEWAY_BASE_URL: http://localhost:8080
+      ROUTE_GITHUB: /mcp/github|http://github-mcp:8082
+      ROUTE_COPILOT_REVIEW: /mcp/copilot-review|http://copilot-review-mcp:8083
+    depends_on:
+      - github-mcp
+      - copilot-review-mcp
+```
+
+> **How it works**: `copilot-review-mcp` uses a Go `ServeMux` subtree handler (`/mcp/`),
+> so the path `/mcp/copilot-review` forwarded by mcp-gateway is caught correctly without
+> any code changes to `copilot-review-mcp`.
+
 ### 3. Configure your MCP Client
 
 Add to your MCP client configuration (e.g., `claude_desktop_config.json`):
@@ -148,6 +175,10 @@ Add to your MCP client configuration (e.g., `claude_desktop_config.json`):
   "mcpServers": {
     "github": {
       "url": "http://localhost:8080/mcp/github",
+      "transport": "http"
+    },
+    "copilot-review": {
+      "url": "http://localhost:8080/mcp/copilot-review",
       "transport": "http"
     }
   }

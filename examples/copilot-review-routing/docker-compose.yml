@@ -1,0 +1,122 @@
+# Full MCP stack: mcp-gateway routing both github-mcp-server and copilot-review-mcp.
+#
+# Copy .env.example to .env and fill in your credentials, then run:
+#   docker compose up -d
+#
+# MCP client endpoints (single gateway, no per-service auth):
+#   github-mcp:      http://localhost:8080/mcp/github
+#   copilot-review:  http://localhost:8080/mcp/copilot-review
+
+services:
+  mcp-gateway:
+    image: ghcr.io/scottlz0310/mcp-gateway:latest
+    container_name: mcp-gateway
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${MCP_GATEWAY_PORT:-8080}:${MCP_GATEWAY_PORT:-8080}"
+    environment:
+      GITHUB_MCP_CLIENT_ID: ${GITHUB_MCP_CLIENT_ID}
+      GITHUB_MCP_CLIENT_SECRET: ${GITHUB_MCP_CLIENT_SECRET}
+      MCP_GATEWAY_BASE_URL: ${MCP_GATEWAY_BASE_URL:-http://localhost:8080}
+      MCP_GATEWAY_PORT: ${MCP_GATEWAY_PORT:-8080}
+      # Route longest-prefix-first; both routes served from a single gateway port.
+      ROUTE_GITHUB: /mcp/github|http://github-mcp:8082
+      ROUTE_COPILOT_REVIEW: /mcp/copilot-review|http://copilot-review-mcp:8083
+      GITHUB_MCP_OAUTH_SCOPES: ${GITHUB_MCP_OAUTH_SCOPES:-repo,user}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      SESSION_TTL_MIN: ${SESSION_TTL_MIN:-10}
+      TOKEN_CACHE_TTL_MIN: ${TOKEN_CACHE_TTL_MIN:-30}
+    depends_on:
+      - github-mcp
+      - copilot-review-mcp
+    networks:
+      - mcp-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128M
+
+  github-mcp:
+    image: ${GITHUB_MCP_IMAGE:-ghcr.io/github/github-mcp-server:main}
+    container_name: mcp-github
+    restart: unless-stopped
+    command: ["http", "--port", "8082"]
+    environment:
+      GITHUB_PERSONAL_ACCESS_TOKEN: ${GITHUB_PERSONAL_ACCESS_TOKEN}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    # Exposed only within the Docker network; access via mcp-gateway on port 8080.
+    expose:
+      - "8082"
+    networks:
+      - mcp-network
+    healthcheck:
+      disable: true
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.5"
+          memory: 256M
+
+  copilot-review-mcp:
+    image: ${COPILOT_REVIEW_MCP_IMAGE:-ghcr.io/scottlz0310/copilot-review-mcp:main}
+    container_name: copilot-review-mcp
+    restart: unless-stopped
+    # distroless:nonroot UID=65532
+    user: "65532:65532"
+    environment:
+      # copilot-review-mcp validates the Bearer token independently (double-validation).
+      # You may reuse the same GitHub OAuth App as GITHUB_MCP_CLIENT_ID/SECRET.
+      # Note: AUTH_MODE=gateway will make these optional in a future release
+      #       (see https://github.com/scottlz0310/copilot-review-mcp/issues/12).
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET}
+      BASE_URL: ${COPILOT_REVIEW_BASE_URL:-http://localhost:8083}
+      MCP_PORT: ${COPILOT_REVIEW_MCP_PORT:-8083}
+      GITHUB_OAUTH_SCOPES: ${GITHUB_MCP_OAUTH_SCOPES:-repo,user}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      SESSION_TTL_MIN: ${SESSION_TTL_MIN:-10}
+      TOKEN_CACHE_TTL_MIN: ${TOKEN_CACHE_TTL_MIN:-30}
+    # copilot-review-mcp is accessed exclusively through mcp-gateway.
+    # Uncomment to also allow direct host access (standalone backward-compatible mode).
+    # ports:
+    #   - "127.0.0.1:${COPILOT_REVIEW_MCP_PORT:-8083}:${COPILOT_REVIEW_MCP_PORT:-8083}"
+    expose:
+      - "8083"
+    volumes:
+      - copilot-review-data:/data
+    networks:
+      - mcp-network
+    healthcheck:
+      disable: true
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+
+volumes:
+  copilot-review-data:
+    driver: local
+
+networks:
+  mcp-network:
+    driver: bridge

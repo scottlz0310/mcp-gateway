@@ -15,6 +15,9 @@ and versioning follows [Semantic Versioning](https://semver.org/).
   - `internal/auth.Store` に `DeviceSession` 管理（CreateDevice / GetDevice / AuthorizeAndConsumeDevice / DenyDevice）を追加
   - `AuthorizeAndConsumeDevice` による TOCTOU 排除：トークン記録とセッション削除を単一 Lock で atomic に実行
   - GitHub Device Flow では `client_secret` 不要であることを確認済み（`client_id` のみで動作）
+- Multi-upstream example: `examples/copilot-review-routing/` — single mcp-gateway routing both `github-mcp-server` and `copilot-review-mcp` via `ROUTE_GITHUB` / `ROUTE_COPILOT_REVIEW` ([#19](https://github.com/scottlz0310/mcp-gateway/issues/19))
+  - `copilot-review-mcp` requires no code changes; its Go `ServeMux` `/mcp/` subtree handler matches the forwarded path correctly
+  - Includes `docker-compose.yml`, `.env.example`, and a dedicated `README.md`
 
 ### Changed
 
