@@ -17,8 +17,8 @@
 
 | 優先 | ISSUE | 理由 |
 |---|---|---|
-| 1 | **mcp-gateway #19** Compose ルーティング | コード変更ゼロ。Compose 設定だけで copilot-review-mcp の gateway 経由動作を検証 |
-| 2 | **mcp-gateway #18** Copilot API 調査 | curl 数本で方向性が決まる。#19 と並行して進められる |
+| 1 | **mcp-gateway #19** Compose ルーティング | ✅ 完了（PR #20 マージ済み） |
+| 2 | **mcp-gateway #18** Copilot API 調査 | ✅ 完了（PR #21 作成済み） |
 
 ### Phase 2 — #19 動作確認後
 
@@ -57,35 +57,42 @@
 
 ### [#19 feat: copilot-review-mcp を mcp-gateway 経由でルーティングする（Compose 設定 + 動作検証）](https://github.com/scottlz0310/mcp-gateway/issues/19)
 
-**状態**: 未着手
+**状態**: ✅ 完了（2026-04-28、PR #20 マージ済み）
 **依存**: なし
 
 copilot-review-mcp 側のコード変更ゼロで、`ROUTE_COPILOT_REVIEW=/mcp/copilot-review|http://copilot-review-mcp:8083` だけで動作する可能性が高い（Go ServeMux の subtree マッチングによる）。
 
 #### サブタスク
 
-- [ ] mcp-docker 側の Compose 設定変更案作成（`ROUTE_COPILOT_REVIEW` 追加）
-- [ ] MCP クライアント（VS Code / Claude Desktop）での接続テスト
-- [ ] トークン二重検証の影響測定（キャッシュ効果の確認）
-- [ ] copilot-review-mcp への直接接続が壊れないことの確認（後方互換チェック）
-- [ ] README / CHANGELOG への反映
+- [x] mcp-docker 側の Compose 設定変更案作成（`ROUTE_COPILOT_REVIEW` 追加）
+- [x] MCP クライアント（VS Code / Claude Desktop）での接続テスト
+- [x] トークン二重検証の影響測定（キャッシュ効果の確認）
+- [x] copilot-review-mcp への直接接続が壊れないことの確認（後方互換チェック）
+- [x] README / CHANGELOG への反映
 
 ---
 
 ### [#18 spike: https://api.githubcopilot.com/mcp/ を upstream とした際の認証互換性調査](https://github.com/scottlz0310/mcp-gateway/issues/18)
 
-**状態**: 未着手
+**状態**: ✅ 完了（2026-04-28、PR #21）
 **依存**: なし
+**調査結果ドキュメント**: [`docs/spike-18-copilot-api-auth.md`](docs/spike-18-copilot-api-auth.md)
 
-copilot-cli での直接認証失敗の根本原因特定。`gho_...` トークンが Copilot API を通るかが最重要分岐点。
+#### 主な発見
+
+- `gho_` トークン（標準 GitHub OAuth）で MCP initialize 200 OK を確認
+- upstream URL は `https://api.githubcopilot.com`（パスなし）と設定すること（`/mcp/` を含めると二重化）
+- 複数ルートとの共存: `ROUTE_COPILOT=/mcp|https://api.githubcopilot.com` + `ROUTE_COPILOT_REVIEW=/mcp/copilot-review|http://copilot-review-mcp:8083`
+- `WWW-Authenticate` ヘッダは、今回検証したクライアント/設定では書き換え不要だったが、401 時の `resource_metadata` は upstream URL を指すため将来的な書き換え検討余地あり
+- copilot-cli の直接接続失敗はトークン形式の問題ではなく、OAuth App スコープ or MCP client 設定の問題
 
 #### サブタスク
 
-- [ ] `https://api.githubcopilot.com/.well-known/oauth-authorization-server` の確認
-- [ ] `gho_...` トークンでの直接アクセステスト（`curl -H "Authorization: Bearer gho_..."`)
-- [ ] 必要なトークン形式・OAuth スコープの特定
-- [ ] per-upstream 認証設定の必要性評価
-- [ ] 調査結果を Issue 本文に記録 → 続行 or 別設計を判断
+- [x] `https://api.githubcopilot.com/.well-known/oauth-authorization-server` の確認
+- [x] `gho_...` トークンでの直接アクセステスト（`curl -H "Authorization: Bearer gho_..."`)
+- [x] 必要なトークン形式・OAuth スコープの特定
+- [x] per-upstream 認証設定の必要性評価
+- [x] 調査結果を `docs/spike-18-copilot-api-auth.md` に記録
 
 ---
 
