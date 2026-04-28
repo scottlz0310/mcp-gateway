@@ -12,6 +12,7 @@ import (
 type Mock struct {
 	NameValue        string
 	ClientIDValue    string
+	ScopesValue      string
 	AuthorizeURLFunc func(state, codeChallenge string) string
 	ExchangeCodeFunc func(ctx context.Context, code string) (string, []string, error)
 	ValidateFunc     func(ctx context.Context, token string) (Identity, error)
@@ -25,6 +26,7 @@ func (m *Mock) Name() string {
 }
 
 func (m *Mock) ClientID() string { return m.ClientIDValue }
+func (m *Mock) Scopes() string   { return m.ScopesValue }
 
 func (m *Mock) AuthorizeURL(state, codeChallenge string) string {
 	if m.AuthorizeURLFunc != nil {

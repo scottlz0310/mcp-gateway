@@ -17,6 +17,10 @@ type Provider interface {
 	// Used by the pseudo dynamic client registration endpoint (RFC 7591).
 	ClientID() string
 
+	// Scopes returns the comma-separated OAuth scopes configured for this provider.
+	// Used by Device Authorization Grant to enforce least-privilege scope.
+	Scopes() string
+
 	// AuthorizeURL builds the redirect URL to the provider's authorization
 	// endpoint. The state and (optional) PKCE code_challenge are forwarded.
 	AuthorizeURL(state, codeChallenge string) string

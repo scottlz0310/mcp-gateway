@@ -116,6 +116,69 @@ func TestStorePKCEInvalidVerifierLength(t *testing.T) {
 	}
 }
 
+func TestStoreDeviceLifecycle(t *testing.T) {
+	s := NewStore(10*time.Minute, 5*time.Minute)
+	expiresAt := time.Now().Add(15 * time.Minute)
+
+	code, err := s.CreateDevice("gh-dev-code", "ABCD-1234", "https://github.com/login/device", expiresAt, 5)
+	if err != nil {
+		t.Fatalf("CreateDevice: %v", err)
+	}
+	if code == "" {
+		t.Fatal("expected non-empty internal device code")
+	}
+
+	d, ok := s.GetDevice(code)
+	if !ok {
+		t.Fatal("expected device session to exist")
+	}
+	if d.UserCode != "ABCD-1234" {
+		t.Errorf("user_code: got %q, want %q", d.UserCode, "ABCD-1234")
+	}
+	if d.Status != devicePending {
+		t.Errorf("status: got %v, want pending", d.Status)
+	}
+
+	consumed, ok := s.AuthorizeAndConsumeDevice(code, "gha_token", "repo,user")
+	if !ok {
+		t.Fatal("expected AuthorizeAndConsumeDevice to succeed")
+	}
+	if consumed.AccessToken != "gha_token" {
+		t.Errorf("access_token: got %q", consumed.AccessToken)
+	}
+	if _, ok := s.GetDevice(code); ok {
+		t.Error("expected device session to be removed after consuming")
+	}
+}
+
+func TestStoreDeviceDeny(t *testing.T) {
+	s := NewStore(10*time.Minute, 5*time.Minute)
+	expiresAt := time.Now().Add(15 * time.Minute)
+
+	code, err := s.CreateDevice("gh-dev", "WXYZ-5678", "https://github.com/login/device", expiresAt, 5)
+	if err != nil {
+		t.Fatalf("CreateDevice: %v", err)
+	}
+	s.DenyDevice(code)
+
+	d, ok := s.GetDevice(code)
+	if !ok {
+		t.Fatal("expected device session after denial")
+	}
+	if d.Status != deviceDenied {
+		t.Errorf("status: got %v, want denied", d.Status)
+	}
+}
+
+func TestStoreDeviceNotFound(t *testing.T) {
+	s := NewStore(10*time.Minute, 5*time.Minute)
+
+	_, ok := s.GetDevice("nonexistent-code")
+	if ok {
+		t.Fatal("expected no session for unknown code")
+	}
+}
+
 func TestTokenCache(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute)
 

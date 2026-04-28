@@ -68,6 +68,7 @@ func NewGitHub(cfg GitHubConfig) Provider {
 
 func (p *githubProvider) Name() string     { return "github" }
 func (p *githubProvider) ClientID() string { return p.cfg.ClientID }
+func (p *githubProvider) Scopes() string   { return p.cfg.Scopes }
 
 func (p *githubProvider) AuthorizeURL(state, codeChallenge string) string {
 	u := *p.authorizeURL // shallow copy to avoid mutating the stored URL
