@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 
 	"github.com/scottlz0310/mcp-gateway/internal/middleware"
 )
@@ -16,10 +17,11 @@ type TokenInvalidator interface {
 	InvalidateCachedToken(token string)
 }
 
-// NewHandler returns an HTTP handler that reverse-proxies authenticated requests
-// to the upstream MCP server. It performs header sanitization, injects the
-// verified GitHub login as X-GitHub-Login, and invalidates the token cache
-// when the upstream returns HTTP 401.
+// NewHandler returns an HTTP handler that reverse-proxies authenticated
+// requests to the upstream MCP server. It performs header sanitization,
+// injects the verified user identifier as X-Authenticated-User (and the
+// legacy X-GitHub-Login during the migration window), and invalidates the
+// token cache when the upstream returns HTTP 401.
 func NewHandler(upstream *url.URL, inv TokenInvalidator) http.Handler {
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
@@ -27,6 +29,7 @@ func NewHandler(upstream *url.URL, inv TokenInvalidator) http.Handler {
 
 			pr.Out.Header.Del("X-Forwarded-For")
 			pr.Out.Header.Del("X-Real-Ip")
+			pr.Out.Header.Del("X-Authenticated-User")
 			pr.Out.Header.Del("X-GitHub-Login")
 			pr.Out.Header.Del("X-Forwarded-Host")
 			pr.Out.Header.Del("X-Forwarded-Proto")
@@ -37,12 +40,16 @@ func NewHandler(upstream *url.URL, inv TokenInvalidator) http.Handler {
 				pr.Out.Header.Set("Authorization", "Bearer "+token)
 			}
 
-			if login := middleware.LoginFromContext(pr.In.Context()); login != "" {
-				pr.Out.Header.Set("X-GitHub-Login", login)
+			if subject := middleware.IdentityFromContext(pr.In.Context()); subject != "" {
+				pr.Out.Header.Set("X-Authenticated-User", sanitizeHeaderValue(subject))
+				// Legacy header retained during the migration window so that
+				// upstream MCP services (github-mcp, copilot-review-mcp) keep
+				// working until they migrate to X-Authenticated-User.
+				pr.Out.Header.Set("X-GitHub-Login", sanitizeHeaderValue(subject))
 			}
 
 			slog.Info("proxy request",
-				"login", middleware.LoginFromContext(pr.In.Context()),
+				"user", middleware.IdentityFromContext(pr.In.Context()),
 				"method", pr.Out.Method,
 				"path", pr.Out.URL.Path,
 				"token_hash", tokenHash(middleware.TokenFromContext(pr.In.Context())),
@@ -77,6 +84,14 @@ func extractBearer(req *http.Request) string {
 		return auth[len(prefix):]
 	}
 	return ""
+}
+
+// headerSanitizer is a package-level replacer reused on every proxied request.
+var headerSanitizer = strings.NewReplacer("\r", "", "\n", "")
+
+// sanitizeHeaderValue strips CR and LF to prevent HTTP header injection.
+func sanitizeHeaderValue(s string) string {
+	return headerSanitizer.Replace(s)
 }
 
 // tokenHash returns the first 8 hex characters of SHA-256(token) for log correlation.

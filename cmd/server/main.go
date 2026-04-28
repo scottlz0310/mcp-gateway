@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/scottlz0310/mcp-gateway/internal/auth"
+	"github.com/scottlz0310/mcp-gateway/internal/auth/provider"
 	"github.com/scottlz0310/mcp-gateway/internal/middleware"
 	"github.com/scottlz0310/mcp-gateway/internal/proxy"
 	"github.com/scottlz0310/mcp-gateway/internal/router"
@@ -54,15 +55,24 @@ func main() {
 		os.Exit(1)
 	}
 
-	oauthHandler := auth.NewHandler(auth.Config{
-		GitHubClientID:     cfg.githubClientID,
-		GitHubClientSecret: cfg.githubClientSecret,
-		BaseURL:            cfg.baseURL,
-		Scopes:             cfg.oauthScopes,
-		SessionTTL:         time.Duration(cfg.sessionTTLMin) * time.Minute,
-		CacheTTL:           time.Duration(cfg.tokenCacheTTLMin) * time.Minute,
-		ExpiresIn:          time.Duration(cfg.tokenExpiresInSec) * time.Second,
+	prov, err := provider.New(provider.Config{
+		Kind:         "github",
+		ClientID:     cfg.githubClientID,
+		ClientSecret: cfg.githubClientSecret,
+		RedirectURI:  strings.TrimRight(cfg.baseURL, "/") + "/callback",
+		Scopes:       cfg.oauthScopes,
 	})
+	if err != nil {
+		slog.Error("provider init failed", "err", err)
+		os.Exit(1)
+	}
+
+	oauthHandler := auth.NewHandler(auth.Config{
+		BaseURL:    cfg.baseURL,
+		SessionTTL: time.Duration(cfg.sessionTTLMin) * time.Minute,
+		CacheTTL:   time.Duration(cfg.tokenCacheTTLMin) * time.Minute,
+		ExpiresIn:  time.Duration(cfg.tokenExpiresInSec) * time.Second,
+	}, prov)
 
 	authMiddleware := middleware.Auth(oauthHandler)
 
@@ -98,6 +108,7 @@ func main() {
 	slog.Info("mcp-gateway starting",
 		"addr", addr,
 		"base_url", cfg.baseURL,
+		"provider", prov.Name(),
 		"routes", len(routes),
 	)
 
