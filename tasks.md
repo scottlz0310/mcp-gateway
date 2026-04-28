@@ -11,127 +11,137 @@
 
 ---
 
+## 推奨消化順（2026-04-28 更新）
+
+### Phase 1 — 今すぐ着手（コード変更不要）
+
+| 優先 | ISSUE | 理由 |
+|---|---|---|
+| 1 | **mcp-gateway #19** Compose ルーティング | コード変更ゼロ。Compose 設定だけで copilot-review-mcp の gateway 経由動作を検証 |
+| 2 | **mcp-gateway #18** Copilot API 調査 | curl 数本で方向性が決まる。#19 と並行して進められる |
+
+### Phase 2 — #19 動作確認後
+
+| 優先 | ISSUE | 理由 |
+|---|---|---|
+| 3 | **mcp-gateway #16** Device Flow 直列化 | PR レビュー指摘済みの技術的負債。セキュリティ/品質に直結 |
+| 4 | **copilot-review-mcp #12** AUTH_MODE=gateway | #19 で二重検証が問題になる場合に対処。変更量は小 |
+| 5 | **mcp-gateway #15** ユーザーホワイトリスト | 運用上の需要が出たタイミングで |
+
+### Phase 3 — インフラ整備（長期）
+
+| 優先 | ISSUE | 理由 |
+|---|---|---|
+| 6 | **mcp-gateway #11** Config Persistence | 大きめ。Phase 2 が安定してから |
+| 7 | **mcp-gateway #12** Setup Wizard | #11 完了が前提 |
+
+### 保留維持
+
+| ISSUE | 保留理由 |
+|---|---|
+| **#10** Device Authorization Grant 調査 | #11 依存・優先度低 |
+| **#6** 汎用 OIDC | #18 結果次第で再評価 |
+| **#5** env var 移行 | 追加プロバイダ確定まで YAGNI |
+| **#4** fly.io OAuth | fly.io と直接調整が必要 |
+| **#3** fly.io 調査 | 調査完了済み・保留 |
+
+---
+
 ## Issue 一覧
 
-### [#2 refactor: OAuth プロバイダ抽象化（Provider インターフェース導入・GitHub 実装の移植）](https://github.com/scottlz0310/mcp-gateway/issues/2)
+---
 
-**状態**: 実装完了・PR レビュー中
-**ブランチ**: `refactor/oauth-provider-abstraction`
-**依存**: なし
-
-GitHub 固定の OAuth フローを `Provider` インターフェースに抽象化。本 issue は **GitHub-only リファクタ**に限定し、外部 IF（環境変数・エンドポイント・OAuth フロー）は 100% 維持する。
-
-#### サブタスク
-
-- [x] `internal/auth/provider/provider.go` — `Provider` IF + `Identity` 構造体
-- [x] `internal/auth/provider/errors.go` — `UpstreamError` 移設
-- [x] `internal/auth/provider/github.go` — GitHub 実装（既存ロジック移植）
-- [x] `internal/auth/provider/factory.go` — `New(cfg) (Provider, error)`
-- [x] `internal/auth/provider/mock.go` — テスト用 Mock
-- [x] `internal/auth/provider/github_test.go` — GitHub 実装の単体テスト
-- [x] `internal/auth/handler.go` — Provider 委譲、Config から GitHub 専用フィールド除去
-- [x] `internal/middleware/auth.go` — `ContextKeyIdentity` へ rename
-- [x] `internal/proxy/handler.go` — `X-Authenticated-User` 注入（`X-GitHub-Login` も互換併存）
-- [x] `cmd/server/main.go` — Provider factory 経由で生成
-- [x] `README.md` — 内部設計の補足
-- [x] `CHANGELOG.md` — 変更履歴記載
-- [x] テスト緑（`go test ./...`）
+### Phase 1
 
 ---
 
-### [#3 spike: fly.io 認証方式の調査（OAuth Provider vs Macaroon Tokens）](https://github.com/scottlz0310/mcp-gateway/issues/3)
-
-**状態**: 調査完了（2026-04-27）
-**依存**: なし
-
-**結論**: Sign in with Fly（OAuth 2.0）を Issue #4 で採用。Macaroon は Provider IF 不適合のため対象外。Provider IF（#2 で確定）に変更不要。詳細は Issue #3 本文参照。
-
-#### サブタスク
-
-- [x] fly.io OAuth Provider の `authorize` / `token` / userinfo エンドポイント仕様確認
-- [x] fly.io OAuth App 登録手段の確認（self-service 不可・fly.io と直接調整）
-- [x] Fly Tokens（Macaroon）検証手段の確認（`superfly/macaroon` + tkdb・外部利用非推奨）
-- [x] mcp-gateway のユースケースに必要な系統の確定（Sign in with Fly）
-- [-] 調査メモ作成（`docs/spikes/flyio-auth.md`）→ Issue #3 本文に集約
-- [x] Issue #2 / #4 へのフィードバック（IF 変更不要・#4 前提条件を本文に記載）
-
----
-
-### [#4 feat: fly.io OAuth プロバイダ実装](https://github.com/scottlz0310/mcp-gateway/issues/4)
-
-**状態**: 保留（2026-04-27）
-**依存**: #2, #3
-**保留理由**: fly.io OAuth（Sign in with Fly）は Extensions Provider 専用であり、開発用 client_id/client_secret の self-service 登録手段がない。fly.io と直接調整が必要なため、プロダクト品質が整うまで後回し。代替 OAuth プロバイダの検討を優先する。
-
-#### サブタスク
-
-- [-] `internal/auth/provider/flyio.go` 実装（保留）
-- [-] `internal/auth/provider/factory.go` の `flyio` 分岐追加（保留）
-- [-] 単体テスト追加（保留）
-- [-] README に fly.io 設定例追記（保留）
-
----
-
-### [#5 refactor: 環境変数を OAUTH_* 系に移行・GITHUB_MCP_* を deprecate](https://github.com/scottlz0310/mcp-gateway/issues/5)
-
-**状態**: 保留（2026-04-27）
-**依存**: #2
-**保留理由**: 追加プロバイダがすべて保留・クローズとなったため優先度低下。プロバイダ追加が確定した時点で再開。
-
-#### サブタスク
-
-- [-] `OAUTH_PROVIDER` / `OAUTH_CLIENT_ID` / `OAUTH_CLIENT_SECRET` / `OAUTH_SCOPES` を導入（保留）
-- [-] `GITHUB_MCP_*` の後方互換ロジック追加（warning 付き）（保留）
-- [-] README 環境変数表の更新（保留）
-- [-] CHANGELOG に移行ガイド記載（保留）
-
----
-
-### [#8 feat: Google OAuth 2.0 プロバイダ実装](https://github.com/scottlz0310/mcp-gateway/issues/8)
-
-**状態**: クローズ（2026-04-27・YAGNI）
-**理由**: Google 公式 MCP サーバーは OAuth + Streamable HTTP を既に内包。対象 MCP サーバーが具体的に決まるまで見送り。
-
----
-
-### [#6 feat: 汎用 OIDC（OpenID Connect）プロバイダサポート](https://github.com/scottlz0310/mcp-gateway/issues/6)
-
-**状態**: 保留（2026-04-27）
-**依存**: #2
-**保留理由**: Entra ID は DCR 未サポートで MCP OAuth 2.1 仕様と不適合。対象 MCP サーバーが具体的に決まるまで見送り（YAGNI）。
-
-#### サブタスク
-
-- [-] `internal/auth/provider/oidc.go` 実装（保留）
-- [-] OIDC Discovery + JWKS フェッチ（保留）
-- [-] ID Token 検証（署名・クレーム）（保留）
-- [-] 環境変数追加（`OAUTH_ISSUER_URL`, `OAUTH_AUDIENCE` 等）（保留）
-- [-] Auth0 / Keycloak での結合テスト（保留）
-
----
-
-### [#10 spike: Device Authorization Grant を gateway レイヤーで実装する可能性調査](https://github.com/scottlz0310/mcp-gateway/issues/10)
+### [#19 feat: copilot-review-mcp を mcp-gateway 経由でルーティングする（Compose 設定 + 動作検証）](https://github.com/scottlz0310/mcp-gateway/issues/19)
 
 **状態**: 未着手
-**依存**: #2（完了済み）、#11（config persistence）
+**依存**: なし
 
-"OAuthログインで全認証完了" を実現するための前調査。Device Grant は **gateway が実行する**アーキテクチャを採用する。
-
-**確定アーキテクチャ:**
-```
-MCP Client → mcp-gateway（Device Grant 実行）→ GitHub
-```
-
-MCPクライアント直の Device Grant（gateway は validation のみ）は**採用しない**（トークン分散・セッション非共有・refresh管理破綻のため）。
+copilot-review-mcp 側のコード変更ゼロで、`ROUTE_COPILOT_REVIEW=/mcp/copilot-review|http://copilot-review-mcp:8083` だけで動作する可能性が高い（Go ServeMux の subtree マッチングによる）。
 
 #### サブタスク
 
-- [ ] GitHub Device Grant エンドポイント（`client_secret` 要否）の確認
-- [ ] gateway 内 Device Grant フロー設計（`POST /auth/device`・`GET /auth/device/poll`）
-- [ ] MCP Authorization Server Metadata への `device_authorization_endpoint` 追加検討
-- [ ] VS Code Copilot 拡張が Device Grant を実際に利用するか動作確認
-- [ ] 既存 Authorization Code Flow との共存設計
-- [ ] 後続実装 ISSUE のスコープ・前提条件確定
+- [ ] mcp-docker 側の Compose 設定変更案作成（`ROUTE_COPILOT_REVIEW` 追加）
+- [ ] MCP クライアント（VS Code / Claude Desktop）での接続テスト
+- [ ] トークン二重検証の影響測定（キャッシュ効果の確認）
+- [ ] copilot-review-mcp への直接接続が壊れないことの確認（後方互換チェック）
+- [ ] README / CHANGELOG への反映
+
+---
+
+### [#18 spike: https://api.githubcopilot.com/mcp/ を upstream とした際の認証互換性調査](https://github.com/scottlz0310/mcp-gateway/issues/18)
+
+**状態**: 未着手
+**依存**: なし
+
+copilot-cli での直接認証失敗の根本原因特定。`gho_...` トークンが Copilot API を通るかが最重要分岐点。
+
+#### サブタスク
+
+- [ ] `https://api.githubcopilot.com/.well-known/oauth-authorization-server` の確認
+- [ ] `gho_...` トークンでの直接アクセステスト（`curl -H "Authorization: Bearer gho_..."`)
+- [ ] 必要なトークン形式・OAuth スコープの特定
+- [ ] per-upstream 認証設定の必要性評価
+- [ ] 調査結果を Issue 本文に記録 → 続行 or 別設計を判断
+
+---
+
+### Phase 2
+
+---
+
+### [#16 feat(auth): Device Flow の同時ポーリングを per-device で直列化して GitHub レート制限を回避](https://github.com/scottlz0310/mcp-gateway/issues/16)
+
+**状態**: 未着手（PR #14 Copilot レビュー指摘：スレッド PRRT_kwDOSNXuJs59--1H）
+**依存**: なし
+
+同一 `device_code` への並列リクエストが GitHub を同時 polling → `slow_down` / レート制限を誘発する問題。
+
+#### サブタスク
+
+- [ ] per-device mutex（または singleflight）の実装
+- [ ] 既存 `AuthorizeAndConsumeDevice` との整合性確認
+- [ ] テスト追加（並列リクエストのシミュレーション）
+- [ ] PR #14 のレビューコメント（PRRT_kwDOSNXuJs59--1H）への対応・スレッドクローズ
+
+---
+
+#### [copilot-review-mcp #12 feat: AUTH_MODE=gateway 対応（mcp-gateway 経由モード・二重検証の排除）](https://github.com/scottlz0310/copilot-review-mcp/issues/12)
+
+**状態**: 未着手（#19 動作確認後に着手）
+**リポジトリ**: `scottlz0310/copilot-review-mcp`
+**依存**: mcp-gateway #19
+
+`AUTH_MODE=gateway` 環境変数で `X-Authenticated-User` ヘッダーを信頼するモードを追加。`GITHUB_CLIENT_ID/SECRET` を任意化。デフォルト（`standalone`）は後方互換維持。
+
+#### サブタスク
+
+- [ ] `internal/middleware/auth.go` に `AuthMode` 分岐追加（+20〜30行）
+- [ ] `cmd/server/main.go` の `AUTH_MODE` 読み込みと条件分岐（+20行）
+- [ ] `AUTH_MODE=gateway` 時の `GITHUB_CLIENT_ID/SECRET` を optional に変更
+- [ ] テスト追加（gateway モード単体テスト）
+- [ ] README / CHANGELOG 更新
+
+---
+
+### [#15 feat: ホワイトリストによるアクセス制限（認証済みユーザーのフィルタリング）](https://github.com/scottlz0310/mcp-gateway/issues/15)
+
+**状態**: 未着手
+**依存**: なし（独立着手可能）
+
+#### サブタスク
+
+- [ ] 環境変数 `ALLOWED_USERS` の設計（カンマ区切り GitHub ログイン名）
+- [ ] middleware でのフィルタリング実装
+- [ ] テスト追加
+- [ ] README 更新
+
+---
+
+### Phase 3
 
 ---
 
@@ -175,3 +185,133 @@ MCPクライアント直の Device Grant（gateway は validation のみ）は**
 - [ ] 未 setup 状態での通常ルートのレスポンス
 - [ ] HTTPS チェック（production 判定）
 - [ ] テスト / README.md（first-run guide 書き換え） / CHANGELOG.md 更新
+
+---
+
+### 保留中
+
+---
+
+### [#10 spike: Device Authorization Grant を gateway レイヤーで実装する可能性調査](https://github.com/scottlz0310/mcp-gateway/issues/10)
+
+**状態**: 未着手
+**依存**: #2（完了済み）、#11（config persistence）
+
+"OAuthログインで全認証完了" を実現するための前調査。Device Grant は **gateway が実行する**アーキテクチャを採用する。
+
+**確定アーキテクチャ:**
+```
+MCP Client → mcp-gateway（Device Grant 実行）→ GitHub
+```
+
+MCPクライアント直の Device Grant（gateway は validation のみ）は**採用しない**（トークン分散・セッション非共有・refresh管理破綻のため）。
+
+#### サブタスク
+
+- [ ] GitHub Device Grant エンドポイント（`client_secret` 要否）の確認
+- [ ] gateway 内 Device Grant フロー設計（`POST /auth/device`・`GET /auth/device/poll`）
+- [ ] MCP Authorization Server Metadata への `device_authorization_endpoint` 追加検討
+- [ ] VS Code Copilot 拡張が Device Grant を実際に利用するか動作確認
+- [ ] 既存 Authorization Code Flow との共存設計
+- [ ] 後続実装 ISSUE のスコープ・前提条件確定
+
+---
+
+### [#6 feat: 汎用 OIDC（OpenID Connect）プロバイダサポート](https://github.com/scottlz0310/mcp-gateway/issues/6)
+
+**状態**: 保留（2026-04-27）
+**依存**: #2
+**保留理由**: Entra ID は DCR 未サポートで MCP OAuth 2.1 仕様と不適合。対象 MCP サーバーが具体的に決まるまで見送り（YAGNI）。**#18 の結果次第で再評価**。
+
+#### サブタスク
+
+- [-] `internal/auth/provider/oidc.go` 実装（保留）
+- [-] OIDC Discovery + JWKS フェッチ（保留）
+- [-] ID Token 検証（署名・クレーム）（保留）
+- [-] 環境変数追加（`OAUTH_ISSUER_URL`, `OAUTH_AUDIENCE` 等）（保留）
+- [-] Auth0 / Keycloak での結合テスト（保留）
+
+---
+
+### [#5 refactor: 環境変数を OAUTH_* 系に移行・GITHUB_MCP_* を deprecate](https://github.com/scottlz0310/mcp-gateway/issues/5)
+
+**状態**: 保留（2026-04-27）
+**依存**: #2
+**保留理由**: 追加プロバイダがすべて保留・クローズとなったため優先度低下。プロバイダ追加が確定した時点で再開。
+
+#### サブタスク
+
+- [-] `OAUTH_PROVIDER` / `OAUTH_CLIENT_ID` / `OAUTH_CLIENT_SECRET` / `OAUTH_SCOPES` を導入（保留）
+- [-] `GITHUB_MCP_*` の後方互換ロジック追加（warning 付き）（保留）
+- [-] README 環境変数表の更新（保留）
+- [-] CHANGELOG に移行ガイド記載（保留）
+
+---
+
+### [#4 feat: fly.io OAuth プロバイダ実装](https://github.com/scottlz0310/mcp-gateway/issues/4)
+
+**状態**: 保留（2026-04-27）
+**依存**: #2, #3
+**保留理由**: fly.io OAuth（Sign in with Fly）は Extensions Provider 専用であり、開発用 client_id/client_secret の self-service 登録手段がない。fly.io と直接調整が必要なため、プロダクト品質が整うまで後回し。代替 OAuth プロバイダの検討を優先する。
+
+#### サブタスク
+
+- [-] `internal/auth/provider/flyio.go` 実装（保留）
+- [-] `internal/auth/provider/factory.go` の `flyio` 分岐追加（保留）
+- [-] 単体テスト追加（保留）
+- [-] README に fly.io 設定例追記（保留）
+
+---
+
+### [#3 spike: fly.io 認証方式の調査（OAuth Provider vs Macaroon Tokens）](https://github.com/scottlz0310/mcp-gateway/issues/3)
+
+**状態**: 調査完了（2026-04-27）
+**依存**: なし
+
+**結論**: Sign in with Fly（OAuth 2.0）を Issue #4 で採用。Macaroon は Provider IF 不適合のため対象外。Provider IF（#2 で確定）に変更不要。詳細は Issue #3 本文参照。
+
+#### サブタスク
+
+- [x] fly.io OAuth Provider の `authorize` / `token` / userinfo エンドポイント仕様確認
+- [x] fly.io OAuth App 登録手段の確認（self-service 不可・fly.io と直接調整）
+- [x] Fly Tokens（Macaroon）検証手段の確認（`superfly/macaroon` + tkdb・外部利用非推奨）
+- [x] mcp-gateway のユースケースに必要な系統の確定（Sign in with Fly）
+- [-] 調査メモ作成（`docs/spikes/flyio-auth.md`）→ Issue #3 本文に集約
+- [x] Issue #2 / #4 へのフィードバック（IF 変更不要・#4 前提条件を本文に記載）
+
+---
+
+### 完了 / クローズ
+
+---
+
+### [#2 refactor: OAuth プロバイダ抽象化（Provider インターフェース導入・GitHub 実装の移植）](https://github.com/scottlz0310/mcp-gateway/issues/2)
+
+**状態**: 実装完了・PR レビュー中
+**ブランチ**: `refactor/oauth-provider-abstraction`
+**依存**: なし
+
+GitHub 固定の OAuth フローを `Provider` インターフェースに抽象化。本 issue は **GitHub-only リファクタ**に限定し、外部 IF（環境変数・エンドポイント・OAuth フロー）は 100% 維持する。
+
+#### サブタスク
+
+- [x] `internal/auth/provider/provider.go` — `Provider` IF + `Identity` 構造体
+- [x] `internal/auth/provider/errors.go` — `UpstreamError` 移設
+- [x] `internal/auth/provider/github.go` — GitHub 実装（既存ロジック移植）
+- [x] `internal/auth/provider/factory.go` — `New(cfg) (Provider, error)`
+- [x] `internal/auth/provider/mock.go` — テスト用 Mock
+- [x] `internal/auth/provider/github_test.go` — GitHub 実装の単体テスト
+- [x] `internal/auth/handler.go` — Provider 委譲、Config から GitHub 専用フィールド除去
+- [x] `internal/middleware/auth.go` — `ContextKeyIdentity` へ rename
+- [x] `internal/proxy/handler.go` — `X-Authenticated-User` 注入（`X-GitHub-Login` も互換併存）
+- [x] `cmd/server/main.go` — Provider factory 経由で生成
+- [x] `README.md` — 内部設計の補足
+- [x] `CHANGELOG.md` — 変更履歴記載
+- [x] テスト緑（`go test ./...`）
+
+---
+
+### [#8 feat: Google OAuth 2.0 プロバイダ実装](https://github.com/scottlz0310/mcp-gateway/issues/8)
+
+**状態**: クローズ（2026-04-27・YAGNI）
+**理由**: Google 公式 MCP サーバーは OAuth + Streamable HTTP を既に内包。対象 MCP サーバーが具体的に決まるまで見送り。

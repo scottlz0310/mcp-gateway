@@ -65,6 +65,75 @@ ROUTE_COPILOT_REVIEW=/mcp/copilot-review|http://copilot-review-mcp:8083
 | `/health` | GET | ヘルスチェック |
 | `/<prefix>` | ANY | Bearer 検証後、対応アップストリームへリバースプロキシ |
 
+## クイックスタート
+
+### 1. GitHub OAuth App の作成
+
+**GitHub → Settings → Developer settings → OAuth Apps → New OAuth App** から:
+
+- **Authorization callback URL**: `http://localhost:8080/callback` (または `MCP_GATEWAY_BASE_URL` + `/callback`)
+
+### 2. Docker Compose で起動
+
+```yaml
+services:
+  mcp-gateway:
+    image: ghcr.io/scottlz0310/mcp-gateway:latest
+    ports:
+      - "8080:8080"
+    environment:
+      GITHUB_MCP_CLIENT_ID: <your-client-id>
+      GITHUB_MCP_CLIENT_SECRET: <your-client-secret>
+      MCP_GATEWAY_BASE_URL: http://localhost:8080
+      ROUTE_GITHUB: /mcp/github|http://github-mcp:8082
+    depends_on:
+      - github-mcp
+```
+
+### 2a. マルチアップストリーム: github-mcp + copilot-review-mcp
+
+`ROUTE_*` を複数設定することで、単一ゲートウェイから複数の MCP サービスをルーティングできます。
+`copilot-review-mcp` を含む完全な例は [`examples/copilot-review-routing/`](examples/copilot-review-routing/) を参照してください。
+
+```yaml
+services:
+  mcp-gateway:
+    image: ghcr.io/scottlz0310/mcp-gateway:latest
+    ports:
+      - "8080:8080"
+    environment:
+      GITHUB_MCP_CLIENT_ID: <your-client-id>
+      GITHUB_MCP_CLIENT_SECRET: <your-client-secret>
+      MCP_GATEWAY_BASE_URL: http://localhost:8080
+      ROUTE_GITHUB: /mcp/github|http://github-mcp:8082
+      ROUTE_COPILOT_REVIEW: /mcp/copilot-review|http://copilot-review-mcp:8083
+    depends_on:
+      - github-mcp
+      - copilot-review-mcp
+```
+
+> **動作原理**: `copilot-review-mcp` は Go の `ServeMux` サブツリーハンドラ (`/mcp/`) を使用しているため、
+> mcp-gateway が転送する `/mcp/copilot-review` パスは **`copilot-review-mcp` のコード変更なし** で正しくハンドルされます。
+
+### 3. MCP クライアントの設定
+
+MCP クライアント設定ファイル（例: `claude_desktop_config.json`）に追加してください:
+
+```json
+{
+  "mcpServers": {
+    "github": {
+      "url": "http://localhost:8080/mcp/github",
+      "transport": "http"
+    },
+    "copilot-review": {
+      "url": "http://localhost:8080/mcp/copilot-review",
+      "transport": "http"
+    }
+  }
+}
+```
+
 ## 開発
 
 ```bash
@@ -76,10 +145,4 @@ go build ./cmd/server
 
 # Docker ビルド
 docker build -t mcp-gateway .
-```
-
-## Docker Image
-
-```
-ghcr.io/scottlz0310/mcp-gateway:latest
 ```
