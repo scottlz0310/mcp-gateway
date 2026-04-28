@@ -96,10 +96,10 @@ data: {"jsonrpc":"2.0","id":1,"result":{
 
 ## 重要な発見：パスルーティングの挙動
 
-### `httputil.ReverseProxy.SetURL` のパス結合動作
+### `(*httputil.ProxyRequest).SetURL` のパス結合動作
 
-mcp-gateway は `httputil.ReverseProxy` の `SetURL(upstream)` を使用している。
-`SetURL` は upstream URL のパスとリクエストパスを `singleJoiningSlash` で結合する。
+mcp-gateway は `Rewrite` 内で `pr.SetURL(upstream)` を使用している。
+`(*httputil.ProxyRequest).SetURL` は upstream URL のパスとリクエストパスを `singleJoiningSlash` で結合する。
 
 | upstream URL | リクエストパス | 転送先パス | 結果 |
 |---|---|---|---|
@@ -127,12 +127,12 @@ Copilot API と他の MCP サービスを同時に運用可能：
 # ゲートウェイの /mcp/ → Copilot API
 ROUTE_COPILOT=/mcp|https://api.githubcopilot.com
 
-# ゲートウェイの /mcp/review/ → 自前 MCP サービス（より長いプレフィックスが優先）
-ROUTE_REVIEW=/mcp/review|http://copilot-review-mcp:3000
+# ゲートウェイの /mcp/copilot-review/ → 自前 MCP サービス（より長いプレフィックスが優先）
+ROUTE_COPILOT_REVIEW=/mcp/copilot-review|http://copilot-review-mcp:8083
 ```
 
 クライアントからのリクエスト分岐：
-- `POST /mcp/review/` → `/mcp/review/` が `/mcp/` より長いため `copilot-review-mcp` へ
+- `POST /mcp/copilot-review/` → `/mcp/copilot-review/` が `/mcp/` より長いため `copilot-review-mcp` へ
 - `POST /mcp/` → `/mcp/` が Copilot API へ
 
 ---
@@ -143,7 +143,7 @@ ROUTE_REVIEW=/mcp/review|http://copilot-review-mcp:3000
 |---|---|---|
 | MCP Protocol Version | `2024-11-05` | ✅ |
 | Transport | SSE (`text/event-stream`) | ✅ (`httputil.ReverseProxy` はストリーミング対応) |
-| Session管理 | `Mcp-Session-Id` ヘッダ | ✅ (proxy が透過転送) |
+| Session管理 | `mcp-session-id` ヘッダ | ✅ (proxy が透過転送) |
 | 認証方式 | Bearer token (header) | ✅ (proxy が `Authorization: Bearer <token>` を注入) |
 
 ---
@@ -153,7 +153,7 @@ ROUTE_REVIEW=/mcp/review|http://copilot-review-mcp:3000
 ### A. `X-Authenticated-User` / `X-GitHub-Login` ヘッダ注入
 
 proxy ハンドラは upstream への全リクエストに `X-Authenticated-User` および
-`X-GitHub-Login` ヘッダを注入する（`internal/proxy/handler.go:44-48`）。
+`X-GitHub-Login` ヘッダを注入する（`internal/proxy/handler.go` の `proxy.NewHandler` における upstream リクエスト生成時のヘッダ設定処理）。
 Copilot API はこれらのヘッダを無視するが、予期しない動作の原因になる可能性は低い。
 
 ### B. 401 時の `WWW-Authenticate` ヘッダ
@@ -202,7 +202,7 @@ services:
   mcp-gateway:
     environment:
       ROUTE_COPILOT: /mcp|https://api.githubcopilot.com
-      ROUTE_REVIEW: /mcp/review|http://copilot-review-mcp:3000
+      ROUTE_COPILOT_REVIEW: /mcp/copilot-review|http://copilot-review-mcp:8083
 ```
 
 ### 中長期的な改善事項

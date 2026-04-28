@@ -82,8 +82,8 @@ copilot-review-mcp 側のコード変更ゼロで、`ROUTE_COPILOT_REVIEW=/mcp/c
 
 - `gho_` トークン（標準 GitHub OAuth）で MCP initialize 200 OK を確認
 - upstream URL は `https://api.githubcopilot.com`（パスなし）と設定すること（`/mcp/` を含めると二重化）
-- 複数ルートとの共存: `ROUTE_COPILOT=/mcp|https://api.githubcopilot.com` + `ROUTE_REVIEW=/mcp/review|http://...`
-- `WWW-Authenticate` ヘッダの書き換え不要（クライアント側で処理）
+- 複数ルートとの共存: `ROUTE_COPILOT=/mcp|https://api.githubcopilot.com` + `ROUTE_COPILOT_REVIEW=/mcp/copilot-review|http://copilot-review-mcp:8083`
+- `WWW-Authenticate` ヘッダは、今回検証したクライアント/設定では書き換え不要だったが、401 時の `resource_metadata` は upstream URL を指すため将来的な書き換え検討余地あり
 - copilot-cli の直接接続失敗はトークン形式の問題ではなく、OAuth App スコープ or MCP client 設定の問題
 
 #### サブタスク
