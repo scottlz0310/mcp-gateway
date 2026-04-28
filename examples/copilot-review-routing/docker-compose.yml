@@ -3,7 +3,8 @@
 # Copy .env.example to .env and fill in your credentials, then run:
 #   docker compose up -d
 #
-# MCP client endpoints (single gateway, no per-service auth):
+# MCP client endpoints (single OAuth façade via the gateway; backend services still
+# require their own credentials/configuration in this Compose setup):
 #   github-mcp:      http://localhost:8080/mcp/github
 #   copilot-review:  http://localhost:8080/mcp/copilot-review
 

@@ -60,7 +60,7 @@
 **状態**: 未着手
 **依存**: なし
 
-copilot-review-mcp 側のコード変更ゼロで、`ROUTE_COPILOT_REVIEW=/mcp/review|http://copilot-review-mcp:8083` だけで動作する可能性が高い（Go ServeMux の subtree マッチングによる）。
+copilot-review-mcp 側のコード変更ゼロで、`ROUTE_COPILOT_REVIEW=/mcp/copilot-review|http://copilot-review-mcp:8083` だけで動作する可能性が高い（Go ServeMux の subtree マッチングによる）。
 
 #### サブタスク
 
