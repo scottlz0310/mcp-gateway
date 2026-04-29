@@ -179,6 +179,40 @@ func TestFileTokenStoreMissingFileOK(t *testing.T) {
 	}
 }
 
+// TestFileTokenStoreParentIsFile verifies that NewFileTokenStore returns an
+// error when the parent path is a regular file rather than a directory.
+func TestFileTokenStoreParentIsFile(t *testing.T) {
+	// Create a regular file and use it as the "directory" component.
+	dir := t.TempDir()
+	notADir := filepath.Join(dir, "file.txt")
+	if err := os.WriteFile(notADir, []byte("x"), 0600); err != nil {
+		t.Fatalf("setup: WriteFile: %v", err)
+	}
+	path := filepath.Join(notADir, "tokens.json")
+	if _, err := NewFileTokenStore(path); err == nil {
+		t.Fatal("expected error when parent path is a file, got nil")
+	}
+}
+
+// TestFileTokenStoreParentNotWritable verifies that NewFileTokenStore returns
+// an error when the parent directory exists but is not writable.
+// Skipped on Windows where removing write bits via chmod is not reliable.
+func TestFileTokenStoreParentNotWritable(t *testing.T) {
+	if isWindows() {
+		t.Skip("Unix-only: chmod write-bit removal not reliable on Windows")
+	}
+	dir := t.TempDir()
+	roDir := filepath.Join(dir, "readonly")
+	if err := os.Mkdir(roDir, 0500); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(roDir, 0700) }) // allow cleanup
+	path := filepath.Join(roDir, "tokens.json")
+	if _, err := NewFileTokenStore(path); err == nil {
+		t.Fatal("expected error for unwritable parent directory, got nil")
+	}
+}
+
 // TestFileTokenStoreSweepWritesToDisk verifies that Sweep flushes the pruned
 // state to disk.
 func TestFileTokenStoreSweepWritesToDisk(t *testing.T) {

@@ -22,3 +22,7 @@ Thumbs.db
 
 # Claude Code CLI agent
 .claude/
+
+# coverage artifacts
+*.out
+coverage

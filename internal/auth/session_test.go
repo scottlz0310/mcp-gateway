@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
@@ -196,4 +197,40 @@ func TestTokenCache(t *testing.T) {
 	if ok {
 		t.Fatal("expected cache miss after invalidation")
 	}
+}
+
+// errTokenStore always returns an error from Save and Delete to exercise
+// the error-logging paths in CacheToken and InvalidateCachedToken.
+type errTokenStore struct{ mem *memTokenStore }
+
+func (e *errTokenStore) Save(_, _ string, _ time.Time) error { return fmt.Errorf("injected save error") }
+func (e *errTokenStore) Lookup(token string) (string, bool)  { return e.mem.Lookup(token) }
+func (e *errTokenStore) Delete(_ string) error               { return fmt.Errorf("injected delete error") }
+func (e *errTokenStore) Sweep() error                        { return e.mem.Sweep() }
+
+// TestNewStoreNilTokenStore verifies that a nil TokenStore defaults to memTokenStore.
+func TestNewStoreNilTokenStore(t *testing.T) {
+s := NewStore(10*time.Minute, 5*time.Minute, nil)
+s.CacheToken("tok-nil", "niluser")
+if _, ok := s.LookupToken("tok-nil"); !ok {
+t.Fatal("expected cache hit: nil TokenStore should default to mem store")
+}
+}
+
+// TestCacheTokenSaveError verifies that CacheToken logs (does not panic) when the
+// underlying store returns a Save error.
+func TestCacheTokenSaveError(t *testing.T) {
+ts := &errTokenStore{mem: NewMemTokenStore().(*memTokenStore)}
+s := NewStore(10*time.Minute, 5*time.Minute, ts)
+// Must not panic; error is logged via slog.Warn.
+s.CacheToken("tok-err", "user")
+}
+
+// TestInvalidateCachedTokenDeleteError verifies that InvalidateCachedToken logs
+// (does not panic) when the underlying store returns a Delete error.
+func TestInvalidateCachedTokenDeleteError(t *testing.T) {
+ts := &errTokenStore{mem: NewMemTokenStore().(*memTokenStore)}
+s := NewStore(10*time.Minute, 5*time.Minute, ts)
+// Must not panic; error is logged via slog.Warn.
+s.InvalidateCachedToken("tok-err")
 }
