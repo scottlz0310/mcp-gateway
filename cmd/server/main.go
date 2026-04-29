@@ -92,15 +92,22 @@ func main() {
 		_, _ = fmt.Fprintln(w, `{"status":"ok"}`)
 	})
 
-	// Authenticated proxy routes.
+	// Proxy routes — apply auth middleware unless the route opts out.
 	for _, route := range routes {
 		h := proxy.NewHandler(route.Upstream, oauthHandler)
-		mux.Handle(route.Prefix, authMiddleware(h))
-		mux.Handle(route.Prefix+"/", authMiddleware(h))
+		var wrapped http.Handler
+		if route.NoAuth {
+			wrapped = h
+		} else {
+			wrapped = authMiddleware(h)
+		}
+		mux.Handle(route.Prefix, wrapped)
+		mux.Handle(route.Prefix+"/", wrapped)
 		slog.Info("registered route",
 			"name", route.Name,
 			"prefix", route.Prefix,
 			"upstream", route.Upstream.String(),
+			"auth_required", !route.NoAuth,
 		)
 	}
 

@@ -168,3 +168,76 @@ func TestParseRoutesDuplicatePrefix(t *testing.T) {
 		t.Fatal("expected error for duplicate prefix")
 	}
 }
+
+func TestParseRoutesAuthNone(t *testing.T) {
+	env := []string{"ROUTE_PLAY=/mcp/playwright|http://playwright:8931|auth=none"}
+	routes, err := parseRoutes(env)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(routes))
+	}
+	if !routes[0].NoAuth {
+		t.Error("expected NoAuth=true for auth=none")
+	}
+}
+
+func TestParseRoutesAuthOAuth(t *testing.T) {
+	env := []string{"ROUTE_GH=/mcp/github|http://github-mcp:8082|auth=oauth"}
+	routes, err := parseRoutes(env)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(routes))
+	}
+	if routes[0].NoAuth {
+		t.Error("expected NoAuth=false for auth=oauth")
+	}
+}
+
+func TestParseRoutesAuthDefault(t *testing.T) {
+	env := []string{"ROUTE_GH=/mcp/github|http://github-mcp:8082"}
+	routes, err := parseRoutes(env)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(routes))
+	}
+	if routes[0].NoAuth {
+		t.Error("expected NoAuth=false when auth option is omitted")
+	}
+}
+
+func TestParseRoutesAuthInvalid(t *testing.T) {
+	env := []string{"ROUTE_BAD=/mcp/bad|http://bad:9000|auth=magic"}
+	_, err := parseRoutes(env)
+	if err == nil {
+		t.Fatal("expected error for unknown auth option")
+	}
+}
+
+func TestParseRoutesMixedAuth(t *testing.T) {
+	env := []string{
+		"ROUTE_GH=/mcp/github|http://github-mcp:8082",
+		"ROUTE_PLAY=/mcp/playwright|http://playwright:8931|auth=none",
+	}
+	routes, err := parseRoutes(env)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, r := range routes {
+		switch r.Name {
+		case "gh":
+			if r.NoAuth {
+				t.Errorf("github route should require auth")
+			}
+		case "play":
+			if !r.NoAuth {
+				t.Errorf("playwright route should skip auth")
+			}
+		}
+	}
+}
