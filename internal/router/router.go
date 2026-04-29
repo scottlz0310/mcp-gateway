@@ -13,6 +13,7 @@ type Route struct {
 	Name     string
 	Prefix   string
 	Upstream *url.URL
+	NoAuth   bool // true when auth=none is specified; skips OAuth middleware
 }
 
 // ParseEnv reads ROUTE_<NAME>=<prefix>|<upstream_url> environment variables
@@ -33,9 +34,21 @@ func parseRoutes(env []string) ([]Route, error) {
 		if name == "" {
 			return nil, fmt.Errorf("%s: route name must not be empty (use ROUTE_<NAME>=...)", key)
 		}
-		prefix, upstreamRaw, found := strings.Cut(val, "|")
+		prefix, rest, found := strings.Cut(val, "|")
 		if !found {
 			return nil, fmt.Errorf("%s: expected <prefix>|<upstream_url>, got %q", key, val)
+		}
+		upstreamRaw, authOpt, hasAuthOpt := strings.Cut(rest, "|")
+		var noAuth bool
+		if hasAuthOpt {
+			switch authOpt {
+			case "auth=none":
+				noAuth = true
+			case "auth=oauth":
+				noAuth = false
+			default:
+				return nil, fmt.Errorf("%s: unknown auth option %q (use auth=none or auth=oauth)", key, authOpt)
+			}
 		}
 		// Strip trailing slash(es) only when it won't erase the root prefix.
 		if prefix != "/" {
@@ -64,7 +77,7 @@ func parseRoutes(env []string) ([]Route, error) {
 			return nil, fmt.Errorf("%s: duplicate prefix %q", key, prefix)
 		}
 		seen[prefix] = struct{}{}
-		routes = append(routes, Route{Name: name, Prefix: prefix, Upstream: u})
+		routes = append(routes, Route{Name: name, Prefix: prefix, Upstream: u, NoAuth: noAuth})
 	}
 	// Longest prefix first for correct matching order.
 	sort.Slice(routes, func(i, j int) bool {
