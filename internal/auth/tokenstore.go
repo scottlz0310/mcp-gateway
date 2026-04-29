@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -110,11 +111,24 @@ func NewFileTokenStore(path string) (TokenStore, error) {
 		path:    path,
 		entries: make(map[string]fileEntry),
 	}
-	if err := s.load(); err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("loading token store %q: %w", path, err)
+	if err := s.load(); err != nil {
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("loading token store %q: %w", path, err)
+		}
+		// File doesn't exist yet — verify the parent directory is accessible so
+		// later Save calls don't silently fail.
+		if dir := filepath.Dir(path); dir != "." {
+			if _, statErr := os.Stat(dir); statErr != nil {
+				return nil, fmt.Errorf("token store parent directory inaccessible %q: %w", dir, statErr)
+			}
+		}
 	}
-	// Sweep stale entries immediately after load so the first Lookup is clean.
-	_ = s.sweepLocked()
+	// Sweep stale entries immediately after load; flush to disk when any were removed.
+	if changed := s.sweepLocked(); changed {
+		if err := s.flush(); err != nil {
+			slog.Warn("token store startup sweep flush failed", "path", path, "err", err)
+		}
+	}
 	count := len(s.entries)
 	slog.Info("token store loaded", "path", path, "entries", count)
 	return s, nil
@@ -174,6 +188,9 @@ func (f *fileTokenStore) load() error {
 	if err != nil {
 		return err
 	}
+	if len(data) == 0 {
+		return nil // empty or pre-created file — treat as empty store
+	}
 	return json.Unmarshal(data, &f.entries)
 }
 
@@ -189,7 +206,12 @@ func (f *fileTokenStore) flush() error {
 		return fmt.Errorf("writing token store temp file: %w", err)
 	}
 	if err := os.Rename(tmp, f.path); err != nil {
-		return fmt.Errorf("renaming token store: %w", err)
+		// On some Windows configurations rename fails when the destination exists.
+		// Fall back to an explicit remove-then-rename so the store works cross-platform.
+		_ = os.Remove(f.path)
+		if err2 := os.Rename(tmp, f.path); err2 != nil {
+			return fmt.Errorf("renaming token store: %w", err2)
+		}
 	}
 	return nil
 }

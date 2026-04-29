@@ -149,10 +149,6 @@ func TestFileTokenStoreExpiredNotLoaded(t *testing.T) {
 // TestFileTokenStoreFilePermissions verifies that the store file is written
 // with mode 0600 on Unix systems. Skipped on Windows where ACLs govern access.
 func TestFileTokenStoreFilePermissions(t *testing.T) {
-	if os.Getenv("GOOS") == "windows" {
-		t.Skip("file permission bits not enforced on Windows")
-	}
-	// Also skip at runtime on Windows regardless of GOOS env var.
 	if isWindows() {
 		t.Skip("file permission bits not enforced on Windows")
 	}
@@ -193,9 +189,15 @@ func TestFileTokenStoreSweepWritesToDisk(t *testing.T) {
 		t.Fatalf("NewFileTokenStore: %v", err)
 	}
 	// One valid, one expired.
-	_ = ts1.Save("valid-tok", "grace", time.Now().Add(time.Hour))
-	_ = ts1.Save("stale-tok", "harry", time.Now().Add(-time.Second))
-	_ = ts1.Sweep()
+	if err := ts1.Save("valid-tok", "grace", time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("Save valid token: %v", err)
+	}
+	if err := ts1.Save("stale-tok", "harry", time.Now().Add(-time.Second)); err != nil {
+		t.Fatalf("Save stale token: %v", err)
+	}
+	if err := ts1.Sweep(); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
 
 	// Reload: only valid-tok should be present.
 	ts2, err := NewFileTokenStore(path)

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -206,8 +207,8 @@ func (s *Store) DenyDevice(internalCode string) {
 // TokenStore is configured.
 func (s *Store) CacheToken(token, subject string) {
 	if err := s.tokens.Save(token, subject, time.Now().Add(s.tokensTTL)); err != nil {
-		// Non-fatal: the next request will re-validate against the upstream provider.
-		_ = err
+		// Non-fatal: next request will re-validate against the upstream provider.
+		slog.Warn("token store save failed", "err", err)
 	}
 }
 
@@ -249,7 +250,7 @@ func (s *Store) janitor() {
 			s.mu.Unlock()
 
 			if err := s.tokens.Sweep(); err != nil {
-				_ = err // non-fatal; log suppressed to avoid noise
+				slog.Warn("token store sweep failed", "err", err)
 			}
 		}
 	}
