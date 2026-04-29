@@ -124,12 +124,27 @@ func NewFileTokenStore(path string) (TokenStore, error) {
 		}
 	}
 	// Sweep stale entries immediately after load; flush to disk when any were removed.
+	// Hold the write lock to satisfy flush()'s locking contract even though the store
+	// is not yet shared across goroutines.
+	s.mu.Lock()
 	if changed := s.sweepLocked(); changed {
 		if err := s.flush(); err != nil {
+			s.mu.Unlock()
 			slog.Warn("token store startup sweep flush failed", "path", path, "err", err)
+			// Non-fatal: the store is still usable; stale entries will be removed
+			// by the next periodic Sweep.
+			count := len(s.entries)
+			slog.Info("token store loaded", "path", path, "entries", count)
+			return s, nil
 		}
 	}
 	count := len(s.entries)
+	s.mu.Unlock()
+	// Best-effort: enforce owner-only permissions on an existing file so the
+	// security property holds even when the file was pre-created with looser perms.
+	if err := os.Chmod(path, 0o600); err != nil && !os.IsNotExist(err) {
+		slog.Warn("token store chmod failed", "path", path, "err", err)
+	}
 	slog.Info("token store loaded", "path", path, "entries", count)
 	return s, nil
 }
@@ -205,13 +220,34 @@ func (f *fileTokenStore) flush() error {
 	if err := os.WriteFile(tmp, data, 0600); err != nil {
 		return fmt.Errorf("writing token store temp file: %w", err)
 	}
-	if err := os.Rename(tmp, f.path); err != nil {
-		// On some Windows configurations rename fails when the destination exists.
-		// Fall back to an explicit remove-then-rename so the store works cross-platform.
-		_ = os.Remove(f.path)
-		if err2 := os.Rename(tmp, f.path); err2 != nil {
-			return fmt.Errorf("renaming token store: %w", err2)
+	if err := os.Rename(tmp, f.path); err == nil {
+		return nil
+	}
+	// On some Windows configurations rename fails when the destination exists.
+	// Use a backup-based strategy: rename the existing store aside first, promote
+	// the temp file, then remove the backup. On any failure we can restore.
+	backup := f.path + ".bak"
+	_ = os.Remove(backup)
+
+	hadOriginal := false
+	if err2 := os.Rename(f.path, backup); err2 == nil {
+		hadOriginal = true
+	} else if !os.IsNotExist(err2) {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("backing up token store: %w", err2)
+	}
+
+	if err2 := os.Rename(tmp, f.path); err2 != nil {
+		if hadOriginal {
+			if restoreErr := os.Rename(backup, f.path); restoreErr != nil {
+				return fmt.Errorf("renaming token store: %w (restore failed: %v)", err2, restoreErr)
+			}
 		}
+		_ = os.Remove(tmp)
+		return fmt.Errorf("renaming token store: %w", err2)
+	}
+	if hadOriginal {
+		_ = os.Remove(backup)
 	}
 	return nil
 }

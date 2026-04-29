@@ -219,7 +219,11 @@ func (s *Store) LookupToken(token string) (string, bool) {
 
 // InvalidateCachedToken removes a token from the store immediately.
 func (s *Store) InvalidateCachedToken(token string) {
-	_ = s.tokens.Delete(token)
+	if err := s.tokens.Delete(token); err != nil {
+		// Non-fatal: the token will expire naturally, but operators should know
+		// if the store is unwritable.
+		slog.Warn("token store delete failed", "err", err)
+	}
 }
 
 func (s *Store) janitor() {
