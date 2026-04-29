@@ -129,11 +129,11 @@ func NewFileTokenStore(path string) (TokenStore, error) {
 	s.mu.Lock()
 	if changed := s.sweepLocked(); changed {
 		if err := s.flush(); err != nil {
+			count := len(s.entries)
 			s.mu.Unlock()
 			slog.Warn("token store startup sweep flush failed", "path", path, "err", err)
 			// Non-fatal: the store is still usable; stale entries will be removed
 			// by the next periodic Sweep.
-			count := len(s.entries)
 			slog.Info("token store loaded", "path", path, "entries", count)
 			return s, nil
 		}

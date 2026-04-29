@@ -59,6 +59,9 @@ type Store struct {
 // NewStore creates a Store with the given session TTL and TokenStore, then
 // starts a background janitor.
 func NewStore(sessionTTL, tokensTTL time.Duration, ts TokenStore) *Store {
+	if ts == nil {
+		ts = NewMemTokenStore()
+	}
 	s := &Store{
 		sessions:  make(map[string]*Session),
 		codes:     make(map[string]*Session),
