@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -40,18 +41,8 @@ type DeviceSession struct {
 	Status          deviceStatus
 }
 
-type tokenEntry struct {
-	login     string
-	expiresAt time.Time
-}
-
-// TokenCache caches validated GitHub tokens to reduce API calls.
-type TokenCache struct {
-	mu      sync.RWMutex
-	entries map[string]tokenEntry
-}
-
-// Store holds OAuth sessions and the token validation cache.
+// Store holds OAuth flow state (sessions, codes, devices) and delegates token
+// validation persistence to a TokenStore.
 type Store struct {
 	mu       sync.RWMutex
 	sessions map[string]*Session
@@ -59,22 +50,26 @@ type Store struct {
 	devices  map[string]*DeviceSession // keyed by gateway-internal device code
 	ttl      time.Duration
 
-	cache    *TokenCache
-	cacheTTL time.Duration
+	tokens    TokenStore
+	tokensTTL time.Duration // TTL applied when saving a validated token
 
 	stopCh chan struct{}
 }
 
-// NewStore creates a Store with the given TTLs and starts a background janitor.
-func NewStore(sessionTTL, cacheTTL time.Duration) *Store {
+// NewStore creates a Store with the given session TTL and TokenStore, then
+// starts a background janitor.
+func NewStore(sessionTTL, tokensTTL time.Duration, ts TokenStore) *Store {
+	if ts == nil {
+		ts = NewMemTokenStore()
+	}
 	s := &Store{
-		sessions: make(map[string]*Session),
-		codes:    make(map[string]*Session),
-		devices:  make(map[string]*DeviceSession),
-		ttl:      sessionTTL,
-		cache:    &TokenCache{entries: make(map[string]tokenEntry)},
-		cacheTTL: cacheTTL,
-		stopCh:   make(chan struct{}),
+		sessions:  make(map[string]*Session),
+		codes:     make(map[string]*Session),
+		devices:   make(map[string]*DeviceSession),
+		ttl:       sessionTTL,
+		tokens:    ts,
+		tokensTTL: tokensTTL,
+		stopCh:    make(chan struct{}),
 	}
 	go s.janitor()
 	return s
@@ -210,29 +205,28 @@ func (s *Store) DenyDevice(internalCode string) {
 	}
 }
 
-// CacheToken stores a validated login for a token.
-func (s *Store) CacheToken(token, login string) {
-	s.cache.mu.Lock()
-	defer s.cache.mu.Unlock()
-	s.cache.entries[token] = tokenEntry{login: login, expiresAt: time.Now().Add(s.cacheTTL)}
-}
-
-// LookupToken returns (login, true) if token is cached and not expired.
-func (s *Store) LookupToken(token string) (string, bool) {
-	s.cache.mu.RLock()
-	defer s.cache.mu.RUnlock()
-	e, ok := s.cache.entries[token]
-	if !ok || time.Now().After(e.expiresAt) {
-		return "", false
+// CacheToken records that token maps to subject (e.g. GitHub login) and is valid
+// for tokensTTL from now. The entry survives process restarts when a persistent
+// TokenStore is configured.
+func (s *Store) CacheToken(token, subject string) {
+	if err := s.tokens.Save(token, subject, time.Now().Add(s.tokensTTL)); err != nil {
+		// Non-fatal: next request will re-validate against the upstream provider.
+		slog.Warn("token store save failed", "err", err)
 	}
-	return e.login, true
 }
 
-// InvalidateCachedToken removes a token from the cache immediately.
+// LookupToken returns (subject, true) if token is cached and not expired.
+func (s *Store) LookupToken(token string) (string, bool) {
+	return s.tokens.Lookup(token)
+}
+
+// InvalidateCachedToken removes a token from the store immediately.
 func (s *Store) InvalidateCachedToken(token string) {
-	s.cache.mu.Lock()
-	defer s.cache.mu.Unlock()
-	delete(s.cache.entries, token)
+	if err := s.tokens.Delete(token); err != nil {
+		// Non-fatal: the token will expire naturally, but operators should know
+		// if the store is unwritable.
+		slog.Warn("token store delete failed", "err", err)
+	}
 }
 
 func (s *Store) janitor() {
@@ -262,13 +256,9 @@ func (s *Store) janitor() {
 			}
 			s.mu.Unlock()
 
-			s.cache.mu.Lock()
-			for k, v := range s.cache.entries {
-				if now.After(v.expiresAt) {
-					delete(s.cache.entries, k)
-				}
+			if err := s.tokens.Sweep(); err != nil {
+				slog.Warn("token store sweep failed", "err", err)
 			}
-			s.cache.mu.Unlock()
 		}
 	}
 }

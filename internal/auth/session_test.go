@@ -1,12 +1,13 @@
 package auth
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
 
 func TestStoreSessionLifecycle(t *testing.T) {
-	s := NewStore(10*time.Minute, 5*time.Minute)
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 
 	s.SaveSession("state1", "http://localhost/cb", "")
 	if !s.HasSession("state1") {
@@ -18,7 +19,7 @@ func TestStoreSessionLifecycle(t *testing.T) {
 }
 
 func TestStoreCompleteCallback(t *testing.T) {
-	s := NewStore(10*time.Minute, 5*time.Minute)
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	s.SaveSession("state2", "http://localhost/cb", "")
 
 	code, err := s.CompleteCallback("state2", "token123", "repo,user")
@@ -43,7 +44,7 @@ func TestStoreCompleteCallback(t *testing.T) {
 }
 
 func TestStoreCompleteCallbackUnknownState(t *testing.T) {
-	s := NewStore(10*time.Minute, 5*time.Minute)
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	_, err := s.CompleteCallback("nosuchstate", "tok", "")
 	if err == nil {
 		t.Fatal("expected error for unknown state")
@@ -51,7 +52,7 @@ func TestStoreCompleteCallbackUnknownState(t *testing.T) {
 }
 
 func TestStoreExchangeCodeOneTimeUse(t *testing.T) {
-	s := NewStore(10*time.Minute, 5*time.Minute)
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	s.SaveSession("state3", "http://localhost/cb", "")
 
 	code, _ := s.CompleteCallback("state3", "tok", "")
@@ -70,7 +71,7 @@ func TestStoreExchangeCodeOneTimeUse(t *testing.T) {
 }
 
 func TestStoreExchangeCodeRedirectURIMismatch(t *testing.T) {
-	s := NewStore(10*time.Minute, 5*time.Minute)
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	s.SaveSession("state4", "http://localhost/cb", "")
 
 	code, _ := s.CompleteCallback("state4", "tok", "")
@@ -85,7 +86,7 @@ func TestStorePKCE(t *testing.T) {
 	verifier := "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
 	challenge := "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
 
-	s := NewStore(10*time.Minute, 5*time.Minute)
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	s.SaveSession("state5", "http://localhost/cb", challenge)
 	code, _ := s.CompleteCallback("state5", "tok", "")
 
@@ -106,7 +107,7 @@ func TestStorePKCE(t *testing.T) {
 func TestStorePKCEInvalidVerifierLength(t *testing.T) {
 	challenge := "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
 
-	s := NewStore(10*time.Minute, 5*time.Minute)
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	s.SaveSession("state6", "http://localhost/cb", challenge)
 	code, _ := s.CompleteCallback("state6", "tok", "")
 
@@ -117,7 +118,7 @@ func TestStorePKCEInvalidVerifierLength(t *testing.T) {
 }
 
 func TestStoreDeviceLifecycle(t *testing.T) {
-	s := NewStore(10*time.Minute, 5*time.Minute)
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	expiresAt := time.Now().Add(15 * time.Minute)
 
 	code, err := s.CreateDevice("gh-dev-code", "ABCD-1234", "https://github.com/login/device", expiresAt, 5)
@@ -152,7 +153,7 @@ func TestStoreDeviceLifecycle(t *testing.T) {
 }
 
 func TestStoreDeviceDeny(t *testing.T) {
-	s := NewStore(10*time.Minute, 5*time.Minute)
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	expiresAt := time.Now().Add(15 * time.Minute)
 
 	code, err := s.CreateDevice("gh-dev", "WXYZ-5678", "https://github.com/login/device", expiresAt, 5)
@@ -171,7 +172,7 @@ func TestStoreDeviceDeny(t *testing.T) {
 }
 
 func TestStoreDeviceNotFound(t *testing.T) {
-	s := NewStore(10*time.Minute, 5*time.Minute)
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 
 	_, ok := s.GetDevice("nonexistent-code")
 	if ok {
@@ -180,7 +181,7 @@ func TestStoreDeviceNotFound(t *testing.T) {
 }
 
 func TestTokenCache(t *testing.T) {
-	s := NewStore(10*time.Minute, 5*time.Minute)
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 
 	s.CacheToken("tok1", "alice")
 	login, ok := s.LookupToken("tok1")
@@ -196,4 +197,40 @@ func TestTokenCache(t *testing.T) {
 	if ok {
 		t.Fatal("expected cache miss after invalidation")
 	}
+}
+
+// errTokenStore always returns an error from Save and Delete to exercise
+// the error-logging paths in CacheToken and InvalidateCachedToken.
+type errTokenStore struct{ mem *memTokenStore }
+
+func (e *errTokenStore) Save(_, _ string, _ time.Time) error { return fmt.Errorf("injected save error") }
+func (e *errTokenStore) Lookup(token string) (string, bool)  { return e.mem.Lookup(token) }
+func (e *errTokenStore) Delete(_ string) error               { return fmt.Errorf("injected delete error") }
+func (e *errTokenStore) Sweep() error                        { return e.mem.Sweep() }
+
+// TestNewStoreNilTokenStore verifies that a nil TokenStore defaults to memTokenStore.
+func TestNewStoreNilTokenStore(t *testing.T) {
+s := NewStore(10*time.Minute, 5*time.Minute, nil)
+s.CacheToken("tok-nil", "niluser")
+if _, ok := s.LookupToken("tok-nil"); !ok {
+t.Fatal("expected cache hit: nil TokenStore should default to mem store")
+}
+}
+
+// TestCacheTokenSaveError verifies that CacheToken logs (does not panic) when the
+// underlying store returns a Save error.
+func TestCacheTokenSaveError(t *testing.T) {
+ts := &errTokenStore{mem: NewMemTokenStore().(*memTokenStore)}
+s := NewStore(10*time.Minute, 5*time.Minute, ts)
+// Must not panic; error is logged via slog.Warn.
+s.CacheToken("tok-err", "user")
+}
+
+// TestInvalidateCachedTokenDeleteError verifies that InvalidateCachedToken logs
+// (does not panic) when the underlying store returns a Delete error.
+func TestInvalidateCachedTokenDeleteError(t *testing.T) {
+ts := &errTokenStore{mem: NewMemTokenStore().(*memTokenStore)}
+s := NewStore(10*time.Minute, 5*time.Minute, ts)
+// Must not panic; error is logged via slog.Warn.
+s.InvalidateCachedToken("tok-err")
 }

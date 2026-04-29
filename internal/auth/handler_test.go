@@ -13,23 +13,28 @@ import (
 	"github.com/scottlz0310/mcp-gateway/internal/auth/provider"
 )
 
-func newTestHandler() *Handler {
+func newTestHandler(t *testing.T) *Handler {
+	t.Helper()
 	p := provider.NewGitHub(provider.GitHubConfig{
 		ClientID:     "test-client-id",
 		ClientSecret: "test-client-secret",
 		RedirectURI:  "http://localhost:8080/callback",
 		Scopes:       "repo,user",
 	})
-	return NewHandler(Config{
+	h, err := NewHandler(Config{
 		BaseURL:    "http://localhost:8080",
 		SessionTTL: 10 * time.Minute,
 		CacheTTL:   5 * time.Minute,
 		ExpiresIn:  90 * 24 * time.Hour,
 	}, p)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	return h
 }
 
 func TestDiscovery(t *testing.T) {
-	h := newTestHandler()
+	h := newTestHandler(t)
 	r := httptest.NewRequest(http.MethodGet, "/.well-known/oauth-authorization-server", nil)
 	w := httptest.NewRecorder()
 
@@ -54,7 +59,7 @@ func TestDiscovery(t *testing.T) {
 }
 
 func TestRegisterReturnsClientID(t *testing.T) {
-	h := newTestHandler()
+	h := newTestHandler(t)
 	body := `{"redirect_uris":["http://localhost/cb"],"client_name":"test"}`
 	r := httptest.NewRequest(http.MethodPost, "/register", strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/json")
@@ -78,7 +83,7 @@ func TestRegisterReturnsClientID(t *testing.T) {
 }
 
 func TestRegisterInvalidJSON(t *testing.T) {
-	h := newTestHandler()
+	h := newTestHandler(t)
 	r := httptest.NewRequest(http.MethodPost, "/register", strings.NewReader("not json"))
 	w := httptest.NewRecorder()
 
@@ -90,7 +95,7 @@ func TestRegisterInvalidJSON(t *testing.T) {
 }
 
 func TestAuthorizeMissingParams(t *testing.T) {
-	h := newTestHandler()
+	h := newTestHandler(t)
 	r := httptest.NewRequest(http.MethodGet, "/authorize?response_type=code", nil)
 	w := httptest.NewRecorder()
 
@@ -102,7 +107,7 @@ func TestAuthorizeMissingParams(t *testing.T) {
 }
 
 func TestAuthorizeInvalidResponseType(t *testing.T) {
-	h := newTestHandler()
+	h := newTestHandler(t)
 	r := httptest.NewRequest(http.MethodGet,
 		"/authorize?response_type=token&state=s&redirect_uri=http://localhost/cb", nil)
 	w := httptest.NewRecorder()
@@ -115,7 +120,7 @@ func TestAuthorizeInvalidResponseType(t *testing.T) {
 }
 
 func TestAuthorizeDisallowedRedirectHost(t *testing.T) {
-	h := newTestHandler()
+	h := newTestHandler(t)
 	r := httptest.NewRequest(http.MethodGet,
 		"/authorize?response_type=code&state=s&redirect_uri=http://evil.example.com/cb", nil)
 	w := httptest.NewRecorder()
@@ -127,17 +132,15 @@ func TestAuthorizeDisallowedRedirectHost(t *testing.T) {
 	}
 }
 
-func TestNewHandlerPanicsOnNilProvider(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("expected panic for nil provider")
-		}
-	}()
-	NewHandler(Config{}, nil)
+func TestNewHandlerErrorsOnNilProvider(t *testing.T) {
+	_, err := NewHandler(Config{}, nil)
+	if err == nil {
+		t.Error("expected error for nil provider")
+	}
 }
 
 func TestAuthorizeRedirectsToGitHub(t *testing.T) {
-	h := newTestHandler()
+	h := newTestHandler(t)
 	r := httptest.NewRequest(http.MethodGet,
 		"/authorize?response_type=code&state=abc123&redirect_uri=http://localhost/cb", nil)
 	w := httptest.NewRecorder()
@@ -157,7 +160,7 @@ func TestAuthorizeRedirectsToGitHub(t *testing.T) {
 }
 
 func TestDiscoveryIncludesDeviceEndpoints(t *testing.T) {
-	h := newTestHandler()
+	h := newTestHandler(t)
 	r := httptest.NewRequest(http.MethodGet, "/.well-known/oauth-authorization-server", nil)
 	w := httptest.NewRecorder()
 
@@ -208,7 +211,7 @@ func TestDeviceAuthorizeSuccess(t *testing.T) {
 	githubClient = ghServer.Client()
 	defer func() { githubClient = origClient }()
 
-	h := newTestHandler()
+	h := newTestHandler(t)
 
 	// Override the GitHub device endpoint URL by monkey-patching startGitHubDeviceFlow
 	// via a local httptest transport. We can't easily override the URL, so instead we
@@ -256,7 +259,7 @@ func TestTokenDeviceGrantPending(t *testing.T) {
 	defer func() { githubClient.Transport = originalTransport }()
 	githubClient.Transport = rewriteHostTransport{target: ghServer.URL, inner: ghServer.Client().Transport}
 
-	h := newTestHandler()
+	h := newTestHandler(t)
 
 	// Create a pending device session directly in the store.
 	expiresAt := time.Now().Add(15 * time.Minute)
@@ -296,7 +299,7 @@ func TestTokenDeviceGrantSuccess(t *testing.T) {
 	defer func() { githubClient.Transport = originalTransport }()
 	githubClient.Transport = rewriteHostTransport{target: ghServer.URL, inner: ghServer.Client().Transport}
 
-	h := newTestHandler()
+	h := newTestHandler(t)
 
 	expiresAt := time.Now().Add(15 * time.Minute)
 	internalCode, err := h.store.CreateDevice("gh-dev-code", "WDJB-MJHT", "https://github.com/login/device", expiresAt, 5)

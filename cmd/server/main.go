@@ -67,12 +67,17 @@ func main() {
 		os.Exit(1)
 	}
 
-	oauthHandler := auth.NewHandler(auth.Config{
-		BaseURL:    cfg.baseURL,
-		SessionTTL: time.Duration(cfg.sessionTTLMin) * time.Minute,
-		CacheTTL:   time.Duration(cfg.tokenCacheTTLMin) * time.Minute,
-		ExpiresIn:  time.Duration(cfg.tokenExpiresInSec) * time.Second,
+	oauthHandler, err := auth.NewHandler(auth.Config{
+		BaseURL:        cfg.baseURL,
+		SessionTTL:     time.Duration(cfg.sessionTTLMin) * time.Minute,
+		CacheTTL:       time.Duration(cfg.tokenCacheTTLMin) * time.Minute,
+		ExpiresIn:      time.Duration(cfg.tokenExpiresInSec) * time.Second,
+		TokenStorePath: cfg.tokenStorePath,
 	}, prov)
+	if err != nil {
+		slog.Error("auth handler init failed", "err", err)
+		os.Exit(1)
+	}
 
 	authMiddleware := middleware.Auth(oauthHandler)
 
@@ -144,6 +149,7 @@ type config struct {
 	sessionTTLMin      int
 	tokenCacheTTLMin   int
 	tokenExpiresInSec  int
+	tokenStorePath     string
 }
 
 func loadConfig() config {
@@ -158,6 +164,7 @@ func loadConfig() config {
 		sessionTTLMin:      getEnvInt("SESSION_TTL_MIN", 10),
 		tokenCacheTTLMin:   getEnvInt("TOKEN_CACHE_TTL_MIN", 30),
 		tokenExpiresInSec:  getEnvInt("TOKEN_EXPIRES_IN_SEC", 7776000), // 90 days
+		tokenStorePath:     getEnv("MCP_GATEWAY_TOKEN_STORE_PATH", ""),
 	}
 }
 
