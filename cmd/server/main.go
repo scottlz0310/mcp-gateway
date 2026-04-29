@@ -107,7 +107,7 @@ func main() {
 			"name", route.Name,
 			"prefix", route.Prefix,
 			"upstream", route.Upstream.String(),
-			"auth", !route.NoAuth,
+			"auth_required", !route.NoAuth,
 		)
 	}
 

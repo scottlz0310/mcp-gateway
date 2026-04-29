@@ -175,6 +175,9 @@ func TestParseRoutesAuthNone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if len(routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(routes))
+	}
 	if !routes[0].NoAuth {
 		t.Error("expected NoAuth=true for auth=none")
 	}
@@ -186,6 +189,9 @@ func TestParseRoutesAuthOAuth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if len(routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(routes))
+	}
 	if routes[0].NoAuth {
 		t.Error("expected NoAuth=false for auth=oauth")
 	}
@@ -196,6 +202,9 @@ func TestParseRoutesAuthDefault(t *testing.T) {
 	routes, err := parseRoutes(env)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(routes))
 	}
 	if routes[0].NoAuth {
 		t.Error("expected NoAuth=false when auth option is omitted")
