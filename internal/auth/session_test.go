@@ -6,7 +6,7 @@ import (
 )
 
 func TestStoreSessionLifecycle(t *testing.T) {
-	s := NewStore(10*time.Minute, 5*time.Minute)
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 
 	s.SaveSession("state1", "http://localhost/cb", "")
 	if !s.HasSession("state1") {
@@ -18,7 +18,7 @@ func TestStoreSessionLifecycle(t *testing.T) {
 }
 
 func TestStoreCompleteCallback(t *testing.T) {
-	s := NewStore(10*time.Minute, 5*time.Minute)
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	s.SaveSession("state2", "http://localhost/cb", "")
 
 	code, err := s.CompleteCallback("state2", "token123", "repo,user")
@@ -43,7 +43,7 @@ func TestStoreCompleteCallback(t *testing.T) {
 }
 
 func TestStoreCompleteCallbackUnknownState(t *testing.T) {
-	s := NewStore(10*time.Minute, 5*time.Minute)
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	_, err := s.CompleteCallback("nosuchstate", "tok", "")
 	if err == nil {
 		t.Fatal("expected error for unknown state")
@@ -51,7 +51,7 @@ func TestStoreCompleteCallbackUnknownState(t *testing.T) {
 }
 
 func TestStoreExchangeCodeOneTimeUse(t *testing.T) {
-	s := NewStore(10*time.Minute, 5*time.Minute)
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	s.SaveSession("state3", "http://localhost/cb", "")
 
 	code, _ := s.CompleteCallback("state3", "tok", "")
@@ -70,7 +70,7 @@ func TestStoreExchangeCodeOneTimeUse(t *testing.T) {
 }
 
 func TestStoreExchangeCodeRedirectURIMismatch(t *testing.T) {
-	s := NewStore(10*time.Minute, 5*time.Minute)
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	s.SaveSession("state4", "http://localhost/cb", "")
 
 	code, _ := s.CompleteCallback("state4", "tok", "")
@@ -85,7 +85,7 @@ func TestStorePKCE(t *testing.T) {
 	verifier := "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
 	challenge := "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
 
-	s := NewStore(10*time.Minute, 5*time.Minute)
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	s.SaveSession("state5", "http://localhost/cb", challenge)
 	code, _ := s.CompleteCallback("state5", "tok", "")
 
@@ -106,7 +106,7 @@ func TestStorePKCE(t *testing.T) {
 func TestStorePKCEInvalidVerifierLength(t *testing.T) {
 	challenge := "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
 
-	s := NewStore(10*time.Minute, 5*time.Minute)
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	s.SaveSession("state6", "http://localhost/cb", challenge)
 	code, _ := s.CompleteCallback("state6", "tok", "")
 
@@ -117,7 +117,7 @@ func TestStorePKCEInvalidVerifierLength(t *testing.T) {
 }
 
 func TestStoreDeviceLifecycle(t *testing.T) {
-	s := NewStore(10*time.Minute, 5*time.Minute)
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	expiresAt := time.Now().Add(15 * time.Minute)
 
 	code, err := s.CreateDevice("gh-dev-code", "ABCD-1234", "https://github.com/login/device", expiresAt, 5)
@@ -152,7 +152,7 @@ func TestStoreDeviceLifecycle(t *testing.T) {
 }
 
 func TestStoreDeviceDeny(t *testing.T) {
-	s := NewStore(10*time.Minute, 5*time.Minute)
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	expiresAt := time.Now().Add(15 * time.Minute)
 
 	code, err := s.CreateDevice("gh-dev", "WXYZ-5678", "https://github.com/login/device", expiresAt, 5)
@@ -171,7 +171,7 @@ func TestStoreDeviceDeny(t *testing.T) {
 }
 
 func TestStoreDeviceNotFound(t *testing.T) {
-	s := NewStore(10*time.Minute, 5*time.Minute)
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 
 	_, ok := s.GetDevice("nonexistent-code")
 	if ok {
@@ -180,7 +180,7 @@ func TestStoreDeviceNotFound(t *testing.T) {
 }
 
 func TestTokenCache(t *testing.T) {
-	s := NewStore(10*time.Minute, 5*time.Minute)
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 
 	s.CacheToken("tok1", "alice")
 	login, ok := s.LookupToken("tok1")

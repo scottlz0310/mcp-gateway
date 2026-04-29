@@ -46,12 +46,36 @@ ROUTE_COPILOT_REVIEW=/mcp/copilot-review|http://copilot-review-mcp:8083
 |------|-----------|------|
 | `MCP_GATEWAY_BASE_URL` | `http://localhost:8080` | OAuth コールバック等に使用するベース URL |
 | `MCP_GATEWAY_PORT` | `8080` | リスンポート |
+| `MCP_GATEWAY_TOKEN_STORE_PATH` | *(空)* | 永続トークンストアのファイルパス（[認証状態の永続化](#認証状態の永続化) 参照） |
 | `GITHUB_MCP_OAUTH_SCOPES` | `repo,user` | GitHub OAuth スコープ |
 | `LOG_LEVEL` | `info` | ログレベル (`debug`/`info`/`warn`/`error`) |
 | `SESSION_TTL_MIN` | `10` | OAuth セッション有効期間（分） |
-| `TOKEN_CACHE_TTL_MIN` | `30` | トークンキャッシュ有効期間（分） |
-| `TOKEN_EXPIRES_IN_SEC` | `7776000` | クライアントへ通知するトークン有効期限（秒、デフォルト 90 日） |
+| `TOKEN_CACHE_TTL_MIN` | `30` | トークン検証キャッシュ TTL（分）— `MCP_GATEWAY_TOKEN_STORE_PATH` 未設定時のみ使用 |
+| `TOKEN_EXPIRES_IN_SEC` | `7776000` | クライアントへ通知するトークン有効期限（秒、デフォルト 90 日）。永続ストアのエントリ TTL にも使用 |
 | `GITHUB_MCP_UPSTREAM_URL` | — | **非推奨**: 単一アップストリーム（`ROUTE_*` 未設定時のフォールバック） |
+
+### 認証状態の永続化
+
+デフォルトでは、検証済みトークンの状態はプロセスメモリにのみ保持されます。そのため、gateway を再起動するたびに MCP クライアント（VS Code、Claude Desktop など）はブラウザの OAuth フローをやり直す必要があります。
+
+これを防ぐには `MCP_GATEWAY_TOKEN_STORE_PATH` に書き込み可能なファイルパスを設定します：
+
+```bash
+MCP_GATEWAY_TOKEN_STORE_PATH=/data/tokens.json
+```
+
+設定すると gateway は以下を行います：
+
+- 起動時にファイルから検証済みトークン ↔ ユーザー識別子のマッピングを読み込む
+- 認証成功のたびにファイルへ保存（期限は `TOKEN_EXPIRES_IN_SEC`、デフォルト 90 日）
+- 毎分、期限切れエントリを自動削除
+- ファイルパーミッション `0600`（所有者のみ読み書き）で書き込む
+- SHA-256 ハッシュ済みのキーのみ保存（生のトークン値はディスクに書き込まれない）
+
+> **Docker ユーザー:** ストアパスに named volume をマウントしてコンテナ入れ替え後もデータを保持してください。
+> 推奨の `docker-compose.yml` スニペットは [mcp-docker](https://github.com/scottlz0310/Mcp-Docker) の関連 Issue を参照してください。
+
+全クライアントの認証状態をリセット（再認証を強制）したい場合は、ストアファイルを削除して gateway を再起動してください。
 
 ## エンドポイント
 

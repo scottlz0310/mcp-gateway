@@ -32,6 +32,11 @@ type Config struct {
 	// GitHub classic OAuth tokens do not expire on GitHub's side; this only
 	// controls how long the MCP client trusts its cached copy. Defaults to 90 days.
 	ExpiresIn time.Duration
+	// TokenStorePath is the path to the JSON file used for persistent token storage.
+	// When empty, an in-memory store is used (default; data lost on restart).
+	// When set, validated tokens survive container restarts; the file is written
+	// with mode 0600 and only hashed token keys are stored.
+	TokenStorePath string
 }
 
 // Handler implements the OAuth façade endpoints, delegating provider-specific
@@ -43,10 +48,16 @@ type Handler struct {
 }
 
 // NewHandler creates a new OAuth Handler with the given configuration and provider.
-// It panics if p is nil, because all handler methods dereference the provider.
-func NewHandler(cfg Config, p provider.Provider) *Handler {
+// It returns an error if the provider is nil or if the persistent token store
+// cannot be initialized.
+//
+// When cfg.TokenStorePath is non-empty, validated tokens are stored durably in a
+// JSON file so that MCP clients do not need to re-authenticate after gateway
+// restarts. Tokens are stored with TTL equal to cfg.ExpiresIn (default 90 days).
+// When cfg.TokenStorePath is empty, an in-memory store is used (TTL = cfg.CacheTTL).
+func NewHandler(cfg Config, p provider.Provider) (*Handler, error) {
 	if p == nil {
-		panic("auth.NewHandler: provider must not be nil")
+		return nil, fmt.Errorf("auth.NewHandler: provider must not be nil")
 	}
 	cfg.BaseURL = strings.TrimRight(cfg.BaseURL, "/")
 	if len(cfg.AllowedRedirectHosts) == 0 {
@@ -55,11 +66,26 @@ func NewHandler(cfg Config, p provider.Provider) *Handler {
 	if cfg.ExpiresIn <= 0 {
 		cfg.ExpiresIn = 90 * 24 * time.Hour
 	}
+
+	var ts TokenStore
+	var tokensTTL time.Duration
+	if cfg.TokenStorePath != "" {
+		fileStore, err := NewFileTokenStore(cfg.TokenStorePath)
+		if err != nil {
+			return nil, fmt.Errorf("auth.NewHandler: token store: %w", err)
+		}
+		ts = fileStore
+		tokensTTL = cfg.ExpiresIn
+	} else {
+		ts = NewMemTokenStore()
+		tokensTTL = cfg.CacheTTL
+	}
+
 	return &Handler{
 		cfg:      cfg,
 		provider: p,
-		store:    NewStore(cfg.SessionTTL, cfg.CacheTTL),
-	}
+		store:    NewStore(cfg.SessionTTL, tokensTTL, ts),
+	}, nil
 }
 
 // Discovery returns RFC 8414 authorization server metadata.

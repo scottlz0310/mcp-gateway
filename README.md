@@ -62,12 +62,35 @@ ROUTE_COPILOT_REVIEW=/mcp/copilot-review|http://copilot-review-mcp:8083
 |----------|---------|-------------|
 | `MCP_GATEWAY_BASE_URL` | `http://localhost:8080` | Base URL used for OAuth callback and discovery metadata |
 | `MCP_GATEWAY_PORT` | `8080` | Listen port |
+| `MCP_GATEWAY_TOKEN_STORE_PATH` | *(empty)* | Path to the persistent token store file (see [Persistent Auth State](#persistent-auth-state)) |
 | `GITHUB_MCP_OAUTH_SCOPES` | `repo,user` | GitHub OAuth scopes |
 | `LOG_LEVEL` | `info` | Log level: `debug` / `info` / `warn` / `error` |
 | `SESSION_TTL_MIN` | `10` | OAuth session lifetime (minutes) |
-| `TOKEN_CACHE_TTL_MIN` | `30` | Token validation cache TTL (minutes) |
-| `TOKEN_EXPIRES_IN_SEC` | `7776000` | Token lifetime advertised to clients (seconds; default 90 days) |
+| `TOKEN_CACHE_TTL_MIN` | `30` | Token validation cache TTL in minutes — used only when `MCP_GATEWAY_TOKEN_STORE_PATH` is **not** set |
+| `TOKEN_EXPIRES_IN_SEC` | `7776000` | Token lifetime advertised to clients (seconds; default 90 days). Also used as the TTL for persistent token entries |
 | `GITHUB_MCP_UPSTREAM_URL` | — | **Deprecated** — single upstream fallback when no `ROUTE_*` is set |
+
+### Persistent Auth State
+
+By default, validated token state is held only in process memory. This means that every time the gateway restarts, MCP clients (VS Code, Claude Desktop, etc.) must go through the browser OAuth flow again.
+
+To avoid this, set `MCP_GATEWAY_TOKEN_STORE_PATH` to a writable file path:
+
+```bash
+MCP_GATEWAY_TOKEN_STORE_PATH=/data/tokens.json
+```
+
+The gateway will:
+- Load previously validated token ↔ identity mappings on startup
+- Save new mappings on each successful authentication
+- Automatically sweep expired entries every minute
+- Write the file with mode `0600` (owner read/write only)
+- Store only SHA-256-hashed token keys — raw token values never appear on disk
+
+> **Docker users:** mount a named volume at the store path so data survives container replacement.
+> See the companion issue in [mcp-docker](https://github.com/scottlz0310/Mcp-Docker) for the recommended `docker-compose.yml` snippet.
+
+To reset all authentication state (force re-auth for all clients), delete the store file and restart the gateway.
 
 ## Endpoints
 

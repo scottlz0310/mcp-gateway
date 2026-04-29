@@ -20,12 +20,16 @@ func newTestHandler() *Handler {
 		RedirectURI:  "http://localhost:8080/callback",
 		Scopes:       "repo,user",
 	})
-	return NewHandler(Config{
+	h, err := NewHandler(Config{
 		BaseURL:    "http://localhost:8080",
 		SessionTTL: 10 * time.Minute,
 		CacheTTL:   5 * time.Minute,
 		ExpiresIn:  90 * 24 * time.Hour,
 	}, p)
+	if err != nil {
+		panic(err)
+	}
+	return h
 }
 
 func TestDiscovery(t *testing.T) {
@@ -127,13 +131,11 @@ func TestAuthorizeDisallowedRedirectHost(t *testing.T) {
 	}
 }
 
-func TestNewHandlerPanicsOnNilProvider(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("expected panic for nil provider")
-		}
-	}()
-	NewHandler(Config{}, nil)
+func TestNewHandlerErrorsOnNilProvider(t *testing.T) {
+	_, err := NewHandler(Config{}, nil)
+	if err == nil {
+		t.Error("expected error for nil provider")
+	}
 }
 
 func TestAuthorizeRedirectsToGitHub(t *testing.T) {
