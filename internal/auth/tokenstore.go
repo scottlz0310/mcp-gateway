@@ -115,12 +115,28 @@ func NewFileTokenStore(path string) (TokenStore, error) {
 		if !os.IsNotExist(err) {
 			return nil, fmt.Errorf("loading token store %q: %w", path, err)
 		}
-		// File doesn't exist yet — verify the parent directory is accessible so
-		// later Save calls don't silently fail.
-		if dir := filepath.Dir(path); dir != "." {
-			if _, statErr := os.Stat(dir); statErr != nil {
-				return nil, fmt.Errorf("token store parent directory inaccessible %q: %w", dir, statErr)
-			}
+		// File doesn't exist yet — verify the parent directory exists, is a
+		// directory, and is writable so later Save calls don't fail due to a
+		// startup-time misconfiguration.
+		dir := filepath.Dir(path)
+		info, statErr := os.Stat(dir)
+		if statErr != nil {
+			return nil, fmt.Errorf("token store parent directory inaccessible %q: %w", dir, statErr)
+		}
+		if !info.IsDir() {
+			return nil, fmt.Errorf("token store parent path is not a directory %q", dir)
+		}
+		f, createErr := os.CreateTemp(dir, ".tokenstore-writecheck-*")
+		if createErr != nil {
+			return nil, fmt.Errorf("token store parent directory not writable %q: %w", dir, createErr)
+		}
+		name := f.Name()
+		if closeErr := f.Close(); closeErr != nil {
+			_ = os.Remove(name)
+			return nil, fmt.Errorf("closing token store parent directory probe file in %q: %w", dir, closeErr)
+		}
+		if removeErr := os.Remove(name); removeErr != nil {
+			return nil, fmt.Errorf("removing token store parent directory probe file %q: %w", name, removeErr)
 		}
 	}
 	// Sweep stale entries immediately after load; flush to disk when any were removed.
