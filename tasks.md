@@ -22,7 +22,7 @@
 
 ### Phase 2 — #19 動作確認後
 
-| 優先 | ISSUE | 理由 |
+| 優先 | ISSUE | 状態/理由 |
 |---|---|---|
 | 3 | **mcp-gateway #16** Device Flow 直列化 | ✅ 完了（PR #31 マージ済み） |
 | 4 | **copilot-review-mcp #12** AUTH_MODE=gateway | #19 で二重検証が問題になる場合に対処。変更量は小 |
@@ -136,7 +136,7 @@ copilot-review-mcp 側のコード変更ゼロで、`ROUTE_COPILOT_REVIEW=/mcp/c
 ### [#15 feat: ホワイトリストによるアクセス制限（認証済みユーザーのフィルタリング）](https://github.com/scottlz0310/mcp-gateway/issues/15)
 
 **状態**: 保留
-**依存**: なし（独立着手可能）
+**依存**: #11（Config Persistence）
 
 > **保留理由（2026-04-30）**: env var 設計か YAML config 設計かで方針が未確定。
 > #11（Config Persistence）の方向性が固まってから実装する。Docker 運用継続中は緊急度低。
