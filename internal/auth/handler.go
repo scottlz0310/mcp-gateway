@@ -297,10 +297,26 @@ func (h *Handler) tokenDeviceGrant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Serialize concurrent GitHub polls for the same device_code. If another
-	// goroutine is already polling GitHub, return authorization_pending
-	// immediately to avoid triggering rate-limiting or slow_down responses.
+	// Serialize concurrent GitHub polls for the same device_code. AcquireDevicePolling
+	// returns false in two cases: (1) another goroutine is already polling, or (2) the
+	// session was consumed/removed between GetDevice and this point.
+	// Re-check the session state to return the most accurate OAuth error.
 	if !h.store.AcquireDevicePolling(deviceCode) {
+		current, ok := h.store.GetDevice(deviceCode)
+		if !ok {
+			// Session consumed by a concurrent winner.
+			oauthError(w, "invalid_grant", "device code already consumed", http.StatusBadRequest)
+			return
+		}
+		if time.Now().After(current.ExpiresAt) {
+			oauthError(w, "expired_token", "device code expired", http.StatusBadRequest)
+			return
+		}
+		if current.Status == deviceDenied {
+			oauthError(w, "access_denied", "user denied authorization", http.StatusBadRequest)
+			return
+		}
+		// Another goroutine is actively polling; client should retry.
 		oauthError(w, "authorization_pending", "polling in progress, please retry", http.StatusBadRequest)
 		return
 	}

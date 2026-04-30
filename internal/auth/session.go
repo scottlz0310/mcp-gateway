@@ -216,9 +216,15 @@ func (s *Store) DenyDevice(internalCode string) {
 
 // AcquireDevicePolling atomically marks the device session as in-flight for
 // GitHub polling. It returns true when the caller wins the race and must call
-// ReleaseDevicePolling when done. It returns false when another goroutine is
-// already polling for the same device code; the caller should return
-// authorization_pending immediately without contacting GitHub.
+// ReleaseDevicePolling when done. It returns false in two cases:
+//
+//  1. Another goroutine is already polling GitHub for the same device code
+//     (pollingInFlight is true).
+//  2. The device session no longer exists (e.g. it was already consumed or
+//     expired and cleaned up by the janitor).
+//
+// Callers should distinguish these cases by re-reading the session state when
+// false is returned.
 func (s *Store) AcquireDevicePolling(internalCode string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()

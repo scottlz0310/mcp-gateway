@@ -2,6 +2,7 @@ package auth
 
 import (
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 )
@@ -433,16 +434,26 @@ func TestAcquireDevicePollingConcurrent(t *testing.T) {
 	}
 
 	const goroutines = 20
+	start := make(chan struct{})
+	release := make(chan struct{})
 	wins := make(chan bool, goroutines)
+	var wg sync.WaitGroup
+
 	for range goroutines {
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
+			<-start // wait for all goroutines to be ready before racing
 			acquired := s.AcquireDevicePolling(code)
 			wins <- acquired
 			if acquired {
+				<-release // hold the flag until the test says to release
 				s.ReleaseDevicePolling(code)
 			}
 		}()
 	}
+
+	close(start) // release all goroutines simultaneously
 
 	var acquired int
 	for range goroutines {
@@ -450,15 +461,19 @@ func TestAcquireDevicePollingConcurrent(t *testing.T) {
 			acquired++
 		}
 	}
-	if acquired != goroutines {
-		// All goroutines run sequentially (each releases before the next wins),
-		// so total wins must equal goroutines.
-		// A stricter requirement would be acquired == 1, but that is timing-
-		// dependent. What we can assert is at least one won, and no more than
-		// goroutines won (which is trivially true). The real assertion is that
-		// the store never panics and all goroutines complete cleanly.
-		t.Logf("concurrent wins: %d/%d (serialization working correctly)", acquired, goroutines)
+
+	if acquired != 1 {
+		t.Fatalf("expected exactly 1 successful acquire during contention, got %d/%d", acquired, goroutines)
 	}
+
+	close(release) // allow the winner to release
+	wg.Wait()      // ensure winner goroutine has called ReleaseDevicePolling before proceeding
+
+	// After the winner releases, the next caller must be able to acquire again.
+	if !s.AcquireDevicePolling(code) {
+		t.Fatal("expected AcquireDevicePolling to succeed after contention winner released")
+	}
+	s.ReleaseDevicePolling(code)
 }
 
 func TestAcquireDevicePollingUnknownCode(t *testing.T) {
