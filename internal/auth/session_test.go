@@ -2,6 +2,7 @@ package auth
 
 import (
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 )
@@ -394,4 +395,96 @@ func TestRestoreRefreshToken(t *testing.T) {
 	if got != "tok-restore" {
 		t.Errorf("access token after restore: got %q, want %q", got, "tok-restore")
 	}
+}
+
+func TestAcquireDevicePollingSerializes(t *testing.T) {
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
+	expiresAt := time.Now().Add(15 * time.Minute)
+
+	code, err := s.CreateDevice("gh-dev", "ABCD-9999", "https://github.com/login/device", expiresAt, 5)
+	if err != nil {
+		t.Fatalf("CreateDevice: %v", err)
+	}
+
+	// First acquire must succeed.
+	if !s.AcquireDevicePolling(code) {
+		t.Fatal("expected AcquireDevicePolling to return true for first caller")
+	}
+	// While the first is held, concurrent callers must be rejected.
+	if s.AcquireDevicePolling(code) {
+		t.Fatal("expected AcquireDevicePolling to return false when in-flight")
+	}
+
+	s.ReleaseDevicePolling(code)
+
+	// After release, next caller must succeed again.
+	if !s.AcquireDevicePolling(code) {
+		t.Fatal("expected AcquireDevicePolling to return true after release")
+	}
+	s.ReleaseDevicePolling(code)
+}
+
+func TestAcquireDevicePollingConcurrent(t *testing.T) {
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
+	expiresAt := time.Now().Add(15 * time.Minute)
+
+	code, err := s.CreateDevice("gh-dev-concurrent", "EFGH-0001", "https://github.com/login/device", expiresAt, 5)
+	if err != nil {
+		t.Fatalf("CreateDevice: %v", err)
+	}
+
+	const goroutines = 20
+	start := make(chan struct{})
+	release := make(chan struct{})
+	wins := make(chan bool, goroutines)
+	var wg sync.WaitGroup
+
+	for range goroutines {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start // wait for all goroutines to be ready before racing
+			acquired := s.AcquireDevicePolling(code)
+			wins <- acquired
+			if acquired {
+				<-release // hold the flag until the test says to release
+				s.ReleaseDevicePolling(code)
+			}
+		}()
+	}
+
+	close(start) // release all goroutines simultaneously
+
+	var acquired int
+	for range goroutines {
+		if <-wins {
+			acquired++
+		}
+	}
+
+	if acquired != 1 {
+		t.Fatalf("expected exactly 1 successful acquire during contention, got %d/%d", acquired, goroutines)
+	}
+
+	close(release) // allow the winner to release
+	wg.Wait()      // ensure winner goroutine has called ReleaseDevicePolling before proceeding
+
+	// After the winner releases, the next caller must be able to acquire again.
+	if !s.AcquireDevicePolling(code) {
+		t.Fatal("expected AcquireDevicePolling to succeed after contention winner released")
+	}
+	s.ReleaseDevicePolling(code)
+}
+
+func TestAcquireDevicePollingUnknownCode(t *testing.T) {
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
+	if s.AcquireDevicePolling("no-such-code") {
+		t.Fatal("expected AcquireDevicePolling to return false for unknown code")
+	}
+}
+
+func TestReleaseDevicePollingNoOp(t *testing.T) {
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
+	// Must not panic when session does not exist.
+	s.ReleaseDevicePolling("no-such-code")
 }
