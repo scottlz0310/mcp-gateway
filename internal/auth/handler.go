@@ -354,9 +354,10 @@ func (h *Handler) writeTokenResponse(w http.ResponseWriter, token, scope, refres
 // tokenRefresh handles grant_type=refresh_token (RFC 6749 §6).
 // It validates the presented refresh token, re-checks the underlying access
 // token against the provider, rotates the refresh token, and returns a fresh
-// token response.  The original refresh token is only consumed after all
-// operations succeed; transient upstream errors leave it intact so clients
-// can retry without full re-authentication.
+// token response.  The original refresh token is atomically reserved at the
+// start, preventing concurrent requests from double-rotating the same token.
+// On transient upstream errors or rotation failures the token is restored so
+// clients can retry without full re-authentication.
 func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 	rt := r.FormValue("refresh_token")
 	if rt == "" {
@@ -364,8 +365,9 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Peek (validate expiry) without consuming; we only delete after success.
-	accessToken, err := h.store.PeekRefreshToken(rt)
+	// Atomically reserve (remove) the token. Concurrent callers presenting the
+	// same token will fail here, preventing double-rotation.
+	accessToken, rtExpiresAt, err := h.store.ReserveRefreshToken(rt)
 	if err != nil {
 		slog.Warn("refresh token rejected", "err", err)
 		oauthError(w, "invalid_grant", "refresh token not found or expired", http.StatusBadRequest)
@@ -378,26 +380,26 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 		var upstreamErr *provider.UpstreamError
 		if errors.As(valErr, &upstreamErr) {
 			slog.Warn("refresh rejected: transient upstream error", "err", valErr)
-			// Do NOT consume the refresh token; client must retry later.
+			// Restore the token so the client can retry later.
+			h.store.RestoreRefreshToken(rt, accessToken, rtExpiresAt)
 			oauthError(w, "temporarily_unavailable", "upstream provider unreachable, retry later", http.StatusServiceUnavailable)
 		} else {
 			slog.Warn("refresh rejected: underlying token invalid", "err", valErr)
+			// Token genuinely invalid; do not restore.
 			oauthError(w, "invalid_grant", "underlying token no longer valid", http.StatusBadRequest)
 		}
 		return
 	}
 
-	// Rotate: issue a new refresh token before consuming the old one.
+	// Issue the rotated refresh token. The original is already consumed (reserved).
 	newRT, rtErr := h.store.CreateRefreshToken(accessToken, h.refreshTokenTTL())
 	if rtErr != nil {
 		slog.Error("failed to rotate refresh token", "err", rtErr)
-		// Do NOT consume the old refresh token; client must retry later.
+		// Restore the original token so the client can retry later.
+		h.store.RestoreRefreshToken(rt, accessToken, rtExpiresAt)
 		oauthError(w, "server_error", "internal error", http.StatusInternalServerError)
 		return
 	}
-
-	// Only now consume the original refresh token (rotation complete).
-	h.store.ConsumeRefreshToken(rt)
 
 	h.writeTokenResponse(w, accessToken, "", newRT)
 }

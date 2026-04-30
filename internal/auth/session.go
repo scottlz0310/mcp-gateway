@@ -270,6 +270,33 @@ func (s *Store) ConsumeRefreshToken(refreshToken string) {
 	delete(s.refreshTokens, refreshToken)
 }
 
+// ReserveRefreshToken atomically removes a refresh token from the store and
+// returns the associated access token and expiry time.  Because the token is
+// deleted immediately, concurrent callers presenting the same token will
+// receive an error here, preventing double-rotation.  On any subsequent
+// failure in the rotation flow, call RestoreRefreshToken to put the token
+// back so the client can retry.
+func (s *Store) ReserveRefreshToken(refreshToken string) (string, time.Time, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.refreshTokens[refreshToken]
+	if !ok || time.Now().After(e.ExpiresAt) {
+		delete(s.refreshTokens, refreshToken)
+		return "", time.Time{}, fmt.Errorf("refresh token not found or expired")
+	}
+	delete(s.refreshTokens, refreshToken)
+	return e.AccessToken, e.ExpiresAt, nil
+}
+
+// RestoreRefreshToken puts a previously reserved refresh token back into the
+// store.  Call this when the rotation flow fails after ReserveRefreshToken so
+// that the client can retry without full re-authentication.
+func (s *Store) RestoreRefreshToken(refreshToken, accessToken string, expiresAt time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.refreshTokens[refreshToken] = refreshEntry{AccessToken: accessToken, ExpiresAt: expiresAt}
+}
+
 // CacheToken records that token maps to subject (e.g. GitHub login) and is valid
 // for tokensTTL from now. The entry survives process restarts when a persistent
 // TokenStore is configured.

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -329,8 +330,8 @@ func TestTokenDeviceGrantSuccess(t *testing.T) {
 	}
 }
 
-// TestTokenRefreshSuccess verifies that a valid refresh token issues a new
-// access token and a rotated refresh token.
+// TestTokenRefreshSuccess verifies that a valid refresh token returns the
+// underlying access token and a rotated refresh token.
 func TestTokenRefreshSuccess(t *testing.T) {
 	// Mock GitHub user API so ValidateToken succeeds.
 	ghServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -481,6 +482,66 @@ func TestTokenRefreshUpstreamErrorPreservesToken(t *testing.T) {
 	// Refresh token must still be valid for retry.
 	if _, err := h.store.PeekRefreshToken(rt); err != nil {
 		t.Errorf("refresh token must be preserved on upstream error: %v", err)
+	}
+}
+
+// TestTokenRefreshConcurrentSameToken verifies that two concurrent requests
+// presenting the same refresh token result in exactly one success and one
+// invalid_grant, enforcing atomic one-time-use / rotation semantics.
+func TestTokenRefreshConcurrentSameToken(t *testing.T) {
+	ghServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"login":"alice","name":"Alice"}`)
+	}))
+	defer ghServer.Close()
+
+	p := provider.NewGitHub(provider.GitHubConfig{
+		ClientID:     "test-client-id",
+		ClientSecret: "test-client-secret",
+		RedirectURI:  "http://localhost:8080/callback",
+		Scopes:       "repo,user",
+		UserAPI:      ghServer.URL + "/user",
+		HTTPClient:   ghServer.Client(),
+	})
+	h, err := NewHandler(Config{
+		BaseURL:    "http://localhost:8080",
+		SessionTTL: 10 * time.Minute,
+		CacheTTL:   5 * time.Minute,
+		ExpiresIn:  90 * 24 * time.Hour,
+	}, p)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	rt, _ := h.store.CreateRefreshToken("gha_concurrent_token", h.refreshTokenTTL())
+
+	var wg sync.WaitGroup
+	results := make([]int, 2)
+	for i := range results {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			body := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(rt)
+			req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			rec := httptest.NewRecorder()
+			h.Token(rec, req)
+			results[idx] = rec.Code
+		}(i)
+	}
+	wg.Wait()
+
+	okCount, badCount := 0, 0
+	for _, code := range results {
+		switch code {
+		case http.StatusOK:
+			okCount++
+		case http.StatusBadRequest:
+			badCount++
+		}
+	}
+	if okCount != 1 || badCount != 1 {
+		t.Errorf("expected 1 success and 1 invalid_grant; got status codes %v", results)
 	}
 }
 
