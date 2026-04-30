@@ -11,14 +11,14 @@
 
 ---
 
-## 推奨消化順（2026-04-28 更新）
+## 推奨消化順（2026-04-30 更新）
 
 ### Phase 1 — 今すぐ着手（コード変更不要）
 
 | 優先 | ISSUE | 理由 |
 |---|---|---|
 | 1 | **mcp-gateway #19** Compose ルーティング | ✅ 完了（PR #20 マージ済み） |
-| 2 | **mcp-gateway #18** Copilot API 調査 | ✅ 完了（PR #21 作成済み） |
+| 2 | **mcp-gateway #18** Copilot API 調査 | ✅ 完了（PR #21 マージ済み） |
 
 ### Phase 2 — #19 動作確認後
 
@@ -39,7 +39,6 @@
 
 | ISSUE | 保留理由 |
 |---|---|
-| **#10** Device Authorization Grant 調査 | #11 依存・優先度低 |
 | **#6** 汎用 OIDC | #18 結果次第で再評価 |
 | **#5** env var 移行 | 追加プロバイダ確定まで YAGNI |
 | **#4** fly.io OAuth | fly.io と直接調整が必要 |
@@ -74,7 +73,7 @@ copilot-review-mcp 側のコード変更ゼロで、`ROUTE_COPILOT_REVIEW=/mcp/c
 
 ### [#18 spike: https://api.githubcopilot.com/mcp/ を upstream とした際の認証互換性調査](https://github.com/scottlz0310/mcp-gateway/issues/18)
 
-**状態**: ✅ 完了（2026-04-28、PR #21）
+**状態**: ✅ 完了（2026-04-28、PR #21 マージ済み）
 **依存**: なし
 **調査結果ドキュメント**: [`docs/spike-18-copilot-api-auth.md`](docs/spike-18-copilot-api-auth.md)
 
@@ -199,31 +198,6 @@ copilot-review-mcp 側のコード変更ゼロで、`ROUTE_COPILOT_REVIEW=/mcp/c
 
 ---
 
-### [#10 spike: Device Authorization Grant を gateway レイヤーで実装する可能性調査](https://github.com/scottlz0310/mcp-gateway/issues/10)
-
-**状態**: 未着手
-**依存**: #2（完了済み）、#11（config persistence）
-
-"OAuthログインで全認証完了" を実現するための前調査。Device Grant は **gateway が実行する**アーキテクチャを採用する。
-
-**確定アーキテクチャ:**
-```
-MCP Client → mcp-gateway（Device Grant 実行）→ GitHub
-```
-
-MCPクライアント直の Device Grant（gateway は validation のみ）は**採用しない**（トークン分散・セッション非共有・refresh管理破綻のため）。
-
-#### サブタスク
-
-- [ ] GitHub Device Grant エンドポイント（`client_secret` 要否）の確認
-- [ ] gateway 内 Device Grant フロー設計（`POST /auth/device`・`GET /auth/device/poll`）
-- [ ] MCP Authorization Server Metadata への `device_authorization_endpoint` 追加検討
-- [ ] VS Code Copilot 拡張が Device Grant を実際に利用するか動作確認
-- [ ] 既存 Authorization Code Flow との共存設計
-- [ ] 後続実装 ISSUE のスコープ・前提条件確定
-
----
-
 ### [#6 feat: 汎用 OIDC（OpenID Connect）プロバイダサポート](https://github.com/scottlz0310/mcp-gateway/issues/6)
 
 **状態**: 保留（2026-04-27）
@@ -294,8 +268,7 @@ MCPクライアント直の Device Grant（gateway は validation のみ）は**
 
 ### [#2 refactor: OAuth プロバイダ抽象化（Provider インターフェース導入・GitHub 実装の移植）](https://github.com/scottlz0310/mcp-gateway/issues/2)
 
-**状態**: 実装完了・PR レビュー中
-**ブランチ**: `refactor/oauth-provider-abstraction`
+**状態**: ✅ 完了（2026-04-28、PR #7 マージ済み）
 **依存**: なし
 
 GitHub 固定の OAuth フローを `Provider` インターフェースに抽象化。本 issue は **GitHub-only リファクタ**に限定し、外部 IF（環境変数・エンドポイント・OAuth フロー）は 100% 維持する。
@@ -322,3 +295,55 @@ GitHub 固定の OAuth フローを `Provider` インターフェースに抽象
 
 **状態**: クローズ（2026-04-27・YAGNI）
 **理由**: Google 公式 MCP サーバーは OAuth + Streamable HTTP を既に内包。対象 MCP サーバーが具体的に決まるまで見送り。
+
+---
+
+### [#22 feat: per-route auth bypass via ROUTE_<NAME>=<prefix>|<upstream>|auth=none](https://github.com/scottlz0310/mcp-gateway/issues/22)
+
+**状態**: ✅ 完了（2026-04-28、PR #23 マージ済み）
+**依存**: なし
+
+`ROUTE_<NAME>` 環境変数の第3セグメントに `auth=none` を指定すると、そのルートで認証ミドルウェアをスキップする。Copilot API の like public upstream に使用。
+
+---
+
+### [#24 feat: OAuth トークン/セッション状態の永続化（再認証スキップ）](https://github.com/scottlz0310/mcp-gateway/issues/24)
+
+**状態**: ✅ 完了（2026-04-28、PR #25 マージ済み）
+**依存**: なし
+
+`MCP_GATEWAY_TOKEN_STORE_PATH` 環境変数でJSON ファイルベースのトークンストアを有効化。ゲートウェイ再起動後もMCPクライアントの再認証不要。
+
+---
+
+### [#26 fix: リフレッシュトークン切れによる「session not found」エラー調査と対処](https://github.com/scottlz0310/mcp-gateway/issues/26)
+
+**状態**: ✅ 完了（2026-04-30、PR #27 マージ済み）
+**依存**: なし
+
+RFC 6749 §6 の `grant_type=refresh_token` を実装。アクセストークン期限切れ時にリフレッシュトークンで再発行できるようにした（ローテーション付き・並列リクエスト対応）。
+
+---
+
+### [#28 fix: Dockerfile `/data` ディレクトリを nonroot 所有で作成](https://github.com/scottlz0310/mcp-gateway/issues/28)
+
+**状態**: ✅ 完了（2026-04-30、PR #29 マージ済み）
+**依存**: なし
+
+builder ステージで `/data` を `nonroot:nonroot` 所有で作成し、init コンテナなしで永続ストアが書き込み可能になった。
+
+---
+
+### [#10 spike: Device Authorization Grant を gateway レイヤーで実装する可能性調査](https://github.com/scottlz0310/mcp-gateway/issues/10)
+
+**状態**: ✅ 完了（2026-04-28、PR #14 マージ済み）
+**依存**: #2（完了済み）
+
+`POST /device_authorization` + `/token` の device_code grant を実装済み。アーキテクチャは **gateway が Device Grant を実行する**方式（MCP Client → mcp-gateway → GitHub）。
+
+#### サブタスク
+
+- [x] GitHub Device Grant エンドポイント（`client_secret` 要否）の確認
+- [x] gateway 内 Device Grant フロー設計（`POST /device_authorization`・`POST /token` `grant_type=urn:ietf:params:oauth:grant-type:device_code`）
+- [x] MCP Authorization Server Metadata への `device_authorization_endpoint` 追加
+- [x] 既存 Authorization Code Flow との共存設計・実装
