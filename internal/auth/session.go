@@ -41,14 +41,21 @@ type DeviceSession struct {
 	Status          deviceStatus
 }
 
+// refreshEntry stores the underlying access token for a gateway-issued refresh token.
+type refreshEntry struct {
+	AccessToken string
+	ExpiresAt   time.Time
+}
+
 // Store holds OAuth flow state (sessions, codes, devices) and delegates token
 // validation persistence to a TokenStore.
 type Store struct {
-	mu       sync.RWMutex
-	sessions map[string]*Session
-	codes    map[string]*Session
-	devices  map[string]*DeviceSession // keyed by gateway-internal device code
-	ttl      time.Duration
+	mu            sync.RWMutex
+	sessions      map[string]*Session
+	codes         map[string]*Session
+	devices       map[string]*DeviceSession // keyed by gateway-internal device code
+	refreshTokens map[string]refreshEntry   // keyed by gateway-internal refresh token
+	ttl           time.Duration
 
 	tokens    TokenStore
 	tokensTTL time.Duration // TTL applied when saving a validated token
@@ -63,13 +70,14 @@ func NewStore(sessionTTL, tokensTTL time.Duration, ts TokenStore) *Store {
 		ts = NewMemTokenStore()
 	}
 	s := &Store{
-		sessions:  make(map[string]*Session),
-		codes:     make(map[string]*Session),
-		devices:   make(map[string]*DeviceSession),
-		ttl:       sessionTTL,
-		tokens:    ts,
-		tokensTTL: tokensTTL,
-		stopCh:    make(chan struct{}),
+		sessions:      make(map[string]*Session),
+		codes:         make(map[string]*Session),
+		devices:       make(map[string]*DeviceSession),
+		refreshTokens: make(map[string]refreshEntry),
+		ttl:           sessionTTL,
+		tokens:        ts,
+		tokensTTL:     tokensTTL,
+		stopCh:        make(chan struct{}),
 	}
 	go s.janitor()
 	return s
@@ -205,6 +213,90 @@ func (s *Store) DenyDevice(internalCode string) {
 	}
 }
 
+// CreateRefreshToken generates a gateway-issued refresh token for the given
+// accessToken and stores it with the supplied TTL.  The refresh token is an
+// opaque random string; the raw access token is never written to persistent
+// storage via this path.
+func (s *Store) CreateRefreshToken(accessToken string, ttl time.Duration) (string, error) {
+	code, err := generateCode()
+	if err != nil {
+		return "", fmt.Errorf("generating refresh token: %w", err)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.refreshTokens[code] = refreshEntry{
+		AccessToken: accessToken,
+		ExpiresAt:   time.Now().Add(ttl),
+	}
+	return code, nil
+}
+
+// UseRefreshToken atomically looks up and removes a refresh token.
+// Returns the associated access token on success, or an error when the token
+// is unknown or has expired.  Callers must issue a replacement refresh token
+// (rotation) before returning a token response.
+func (s *Store) UseRefreshToken(refreshToken string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.refreshTokens[refreshToken]
+	if !ok || time.Now().After(e.ExpiresAt) {
+		delete(s.refreshTokens, refreshToken)
+		return "", fmt.Errorf("refresh token not found or expired")
+	}
+	delete(s.refreshTokens, refreshToken)
+	return e.AccessToken, nil
+}
+
+// PeekRefreshToken looks up a refresh token and validates its expiry without
+// consuming it.  Returns the associated access token on success, or an error
+// when the token is unknown or has expired.  Use ConsumeRefreshToken to
+// delete the token only after the full rotation has succeeded.
+func (s *Store) PeekRefreshToken(refreshToken string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.refreshTokens[refreshToken]
+	if !ok || time.Now().After(e.ExpiresAt) {
+		delete(s.refreshTokens, refreshToken)
+		return "", fmt.Errorf("refresh token not found or expired")
+	}
+	return e.AccessToken, nil
+}
+
+// ConsumeRefreshToken removes a refresh token from the store.
+// It is a no-op when the token is not present.
+func (s *Store) ConsumeRefreshToken(refreshToken string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.refreshTokens, refreshToken)
+}
+
+// ReserveRefreshToken atomically removes a refresh token from the store and
+// returns the associated access token and expiry time.  Because the token is
+// deleted immediately, concurrent callers presenting the same token will
+// receive an error here, preventing double-rotation.  On any subsequent
+// failure in the rotation flow, call RestoreRefreshToken to put the token
+// back so the client can retry.
+func (s *Store) ReserveRefreshToken(refreshToken string) (string, time.Time, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.refreshTokens[refreshToken]
+	if !ok || time.Now().After(e.ExpiresAt) {
+		delete(s.refreshTokens, refreshToken)
+		return "", time.Time{}, fmt.Errorf("refresh token not found or expired")
+	}
+	delete(s.refreshTokens, refreshToken)
+	return e.AccessToken, e.ExpiresAt, nil
+}
+
+// RestoreRefreshToken puts a previously reserved refresh token back into the
+// store.  Call this when the rotation flow fails after ReserveRefreshToken so
+// that the client can retry without full re-authentication.
+func (s *Store) RestoreRefreshToken(refreshToken, accessToken string, expiresAt time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.refreshTokens[refreshToken] = refreshEntry{AccessToken: accessToken, ExpiresAt: expiresAt}
+}
+
 // CacheToken records that token maps to subject (e.g. GitHub login) and is valid
 // for tokensTTL from now. The entry survives process restarts when a persistent
 // TokenStore is configured.
@@ -252,6 +344,11 @@ func (s *Store) janitor() {
 			for k, v := range s.devices {
 				if now.After(v.ExpiresAt) {
 					delete(s.devices, k)
+				}
+			}
+			for k, v := range s.refreshTokens {
+				if now.After(v.ExpiresAt) {
+					delete(s.refreshTokens, k)
 				}
 			}
 			s.mu.Unlock()

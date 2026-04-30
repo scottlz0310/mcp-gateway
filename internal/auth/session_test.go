@@ -234,3 +234,164 @@ s := NewStore(10*time.Minute, 5*time.Minute, ts)
 // Must not panic; error is logged via slog.Warn.
 s.InvalidateCachedToken("tok-err")
 }
+
+func TestCreateAndUseRefreshToken(t *testing.T) {
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
+
+	rt, err := s.CreateRefreshToken("access-token-abc", time.Hour)
+	if err != nil {
+		t.Fatalf("CreateRefreshToken: %v", err)
+	}
+	if rt == "" {
+		t.Fatal("expected non-empty refresh token")
+	}
+
+	got, err := s.UseRefreshToken(rt)
+	if err != nil {
+		t.Fatalf("UseRefreshToken: %v", err)
+	}
+	if got != "access-token-abc" {
+		t.Errorf("access token: got %q, want %q", got, "access-token-abc")
+	}
+}
+
+func TestUseRefreshTokenIsOneTimeUse(t *testing.T) {
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
+
+	rt, err := s.CreateRefreshToken("tok", time.Hour)
+	if err != nil {
+		t.Fatalf("CreateRefreshToken: %v", err)
+	}
+
+	if _, err := s.UseRefreshToken(rt); err != nil {
+		t.Fatalf("first use: %v", err)
+	}
+	if _, err := s.UseRefreshToken(rt); err == nil {
+		t.Fatal("expected error on second use (one-time use)")
+	}
+}
+
+func TestUseRefreshTokenExpired(t *testing.T) {
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
+
+	rt, err := s.CreateRefreshToken("tok", -time.Second) // already expired
+	if err != nil {
+		t.Fatalf("CreateRefreshToken: %v", err)
+	}
+
+	if _, err := s.UseRefreshToken(rt); err == nil {
+		t.Fatal("expected error for expired refresh token")
+	}
+}
+
+func TestUseRefreshTokenUnknown(t *testing.T) {
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
+
+	if _, err := s.UseRefreshToken("does-not-exist"); err == nil {
+		t.Fatal("expected error for unknown refresh token")
+	}
+}
+
+func TestPeekRefreshTokenDoesNotConsume(t *testing.T) {
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
+
+	rt, err := s.CreateRefreshToken("tok", time.Hour)
+	if err != nil {
+		t.Fatalf("CreateRefreshToken: %v", err)
+	}
+
+	got1, err := s.PeekRefreshToken(rt)
+	if err != nil {
+		t.Fatalf("PeekRefreshToken: %v", err)
+	}
+	if got1 != "tok" {
+		t.Errorf("access token: got %q", got1)
+	}
+	// Peek must be idempotent: token still present.
+	got2, err := s.PeekRefreshToken(rt)
+	if err != nil {
+		t.Fatalf("second PeekRefreshToken: %v", err)
+	}
+	if got2 != "tok" {
+		t.Errorf("access token after second peek: got %q", got2)
+	}
+}
+
+func TestConsumeRefreshToken(t *testing.T) {
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
+
+	rt, err := s.CreateRefreshToken("tok", time.Hour)
+	if err != nil {
+		t.Fatalf("CreateRefreshToken: %v", err)
+	}
+	s.ConsumeRefreshToken(rt)
+
+	// Token must be gone after consumption.
+	if _, err := s.PeekRefreshToken(rt); err == nil {
+		t.Fatal("expected error after ConsumeRefreshToken")
+	}
+}
+
+func TestConsumeRefreshTokenNoOp(t *testing.T) {
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
+	// Must not panic on unknown token.
+	s.ConsumeRefreshToken("does-not-exist")
+}
+
+func TestReserveRefreshToken(t *testing.T) {
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
+
+	rt, err := s.CreateRefreshToken("access-tok", time.Hour)
+	if err != nil {
+		t.Fatalf("CreateRefreshToken: %v", err)
+	}
+
+	got, _, err := s.ReserveRefreshToken(rt)
+	if err != nil {
+		t.Fatalf("ReserveRefreshToken: %v", err)
+	}
+	if got != "access-tok" {
+		t.Errorf("access token: got %q, want %q", got, "access-tok")
+	}
+	// Token must be gone after reservation (concurrent callers must fail).
+	if _, _, err2 := s.ReserveRefreshToken(rt); err2 == nil {
+		t.Fatal("expected error on second ReserveRefreshToken (atomic one-time removal)")
+	}
+}
+
+func TestReserveRefreshTokenExpired(t *testing.T) {
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
+
+	rt, err := s.CreateRefreshToken("tok", -time.Second) // already expired
+	if err != nil {
+		t.Fatalf("CreateRefreshToken: %v", err)
+	}
+	if _, _, err := s.ReserveRefreshToken(rt); err == nil {
+		t.Fatal("expected error for expired refresh token")
+	}
+}
+
+func TestRestoreRefreshToken(t *testing.T) {
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
+
+	rt, err := s.CreateRefreshToken("tok-restore", time.Hour)
+	if err != nil {
+		t.Fatalf("CreateRefreshToken: %v", err)
+	}
+
+	_, expiresAt, err := s.ReserveRefreshToken(rt)
+	if err != nil {
+		t.Fatalf("ReserveRefreshToken: %v", err)
+	}
+	// Simulate rotation failure: restore the token.
+	s.RestoreRefreshToken(rt, "tok-restore", expiresAt)
+
+	// Token must be accessible again via Peek after restoration.
+	got, err := s.PeekRefreshToken(rt)
+	if err != nil {
+		t.Fatalf("PeekRefreshToken after restore: %v", err)
+	}
+	if got != "tok-restore" {
+		t.Errorf("access token after restore: got %q, want %q", got, "tok-restore")
+	}
+}

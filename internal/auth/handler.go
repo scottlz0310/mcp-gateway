@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +16,11 @@ import (
 
 	"github.com/scottlz0310/mcp-gateway/internal/auth/provider"
 )
+
+// refreshTokenGracePeriod is the extra lifetime added to refresh tokens beyond
+// the access token ExpiresIn, allowing clients to refresh shortly after access
+// token expiry without requiring full re-authentication.
+const refreshTokenGracePeriod = 30 * 24 * time.Hour
 
 // githubClient is the HTTP client used for GitHub Device Flow API calls.
 // Exposed as a package-level var so tests can substitute a test server transport.
@@ -88,6 +94,11 @@ func NewHandler(cfg Config, p provider.Provider) (*Handler, error) {
 	}, nil
 }
 
+// refreshTokenTTL returns the lifetime for gateway-issued refresh tokens.
+func (h *Handler) refreshTokenTTL() time.Duration {
+	return h.cfg.ExpiresIn + refreshTokenGracePeriod
+}
+
 // Discovery returns RFC 8414 authorization server metadata.
 func (h *Handler) Discovery(w http.ResponseWriter, r *http.Request) {
 	doc := map[string]any{
@@ -97,7 +108,7 @@ func (h *Handler) Discovery(w http.ResponseWriter, r *http.Request) {
 		"registration_endpoint":            h.cfg.BaseURL + "/register",
 		"device_authorization_endpoint":    h.cfg.BaseURL + "/device_authorization",
 		"response_types_supported":         []string{"code"},
-		"grant_types_supported":            []string{"authorization_code", "urn:ietf:params:oauth:grant-type:device_code"},
+		"grant_types_supported":            []string{"authorization_code", "urn:ietf:params:oauth:grant-type:device_code", "refresh_token"},
 		"code_challenge_methods_supported": []string{"S256"},
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -126,7 +137,7 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 		"client_id_issued_at":        time.Now().Unix(),
 		"client_secret_expires_at":   0,
 		"token_endpoint_auth_method": "none",
-		"grant_types":                []string{"authorization_code", "urn:ietf:params:oauth:grant-type:device_code"},
+		"grant_types":                []string{"authorization_code", "urn:ietf:params:oauth:grant-type:device_code", "refresh_token"},
 		"response_types":             []string{"code"},
 	}
 	for _, field := range []string{"redirect_uris", "client_name", "scope"} {
@@ -238,6 +249,8 @@ func (h *Handler) Token(w http.ResponseWriter, r *http.Request) {
 		h.tokenAuthCode(w, r)
 	case "urn:ietf:params:oauth:grant-type:device_code":
 		h.tokenDeviceGrant(w, r)
+	case "refresh_token":
+		h.tokenRefresh(w, r)
 	default:
 		oauthError(w, "unsupported_grant_type", "unsupported grant_type", http.StatusBadRequest)
 	}
@@ -254,7 +267,11 @@ func (h *Handler) tokenAuthCode(w http.ResponseWriter, r *http.Request) {
 		oauthError(w, "invalid_grant", err.Error(), http.StatusBadRequest)
 		return
 	}
-	h.writeTokenResponse(w, token, grantedScope)
+	refreshToken, rtErr := h.store.CreateRefreshToken(token, h.refreshTokenTTL())
+	if rtErr != nil {
+		slog.Warn("failed to create refresh token", "err", rtErr)
+	}
+	h.writeTokenResponse(w, token, grantedScope, refreshToken)
 }
 
 func (h *Handler) tokenDeviceGrant(w http.ResponseWriter, r *http.Request) {
@@ -294,7 +311,11 @@ func (h *Handler) tokenDeviceGrant(w http.ResponseWriter, r *http.Request) {
 			oauthError(w, "invalid_grant", "device code already consumed", http.StatusBadRequest)
 			return
 		}
-		h.writeTokenResponse(w, result.AccessToken, result.Scope)
+		refreshToken, rtErr := h.store.CreateRefreshToken(result.AccessToken, h.refreshTokenTTL())
+		if rtErr != nil {
+			slog.Warn("failed to create refresh token", "err", rtErr)
+		}
+		h.writeTokenResponse(w, result.AccessToken, result.Scope, refreshToken)
 	case "authorization_pending":
 		oauthError(w, "authorization_pending", "user has not yet authorized the device", http.StatusBadRequest)
 	case "slow_down":
@@ -311,7 +332,7 @@ func (h *Handler) tokenDeviceGrant(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *Handler) writeTokenResponse(w http.ResponseWriter, token, scope string) {
+func (h *Handler) writeTokenResponse(w http.ResponseWriter, token, scope, refreshToken string) {
 	expiresIn := max(int64(h.cfg.ExpiresIn/time.Second), 1)
 	resp := map[string]any{
 		"access_token": token,
@@ -321,10 +342,70 @@ func (h *Handler) writeTokenResponse(w http.ResponseWriter, token, scope string)
 	if scope != "" {
 		resp["scope"] = scope
 	}
+	if refreshToken != "" {
+		resp["refresh_token"] = refreshToken
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Pragma", "no-cache")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// tokenRefresh handles grant_type=refresh_token (RFC 6749 §6).
+// It validates the presented refresh token, re-checks the underlying access
+// token against the provider, rotates the refresh token, and returns a fresh
+// token response.  The original refresh token is atomically reserved at the
+// start, preventing concurrent requests from double-rotating the same token.
+// On transient upstream errors or rotation failures the token is restored so
+// clients can retry without full re-authentication.
+func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
+	rt := r.FormValue("refresh_token")
+	if rt == "" {
+		oauthError(w, "invalid_request", "missing refresh_token", http.StatusBadRequest)
+		return
+	}
+
+	// Atomically reserve (remove) the token. Concurrent callers presenting the
+	// same token will fail here, preventing double-rotation.
+	accessToken, rtExpiresAt, err := h.store.ReserveRefreshToken(rt)
+	if err != nil {
+		slog.Warn("refresh token rejected", "err", err)
+		oauthError(w, "invalid_grant", "refresh token not found or expired", http.StatusBadRequest)
+		return
+	}
+
+	// Re-validate the underlying token directly against the upstream provider,
+	// bypassing the local cache. Using the cache here could allow refresh to
+	// succeed for a revoked token until cache expiry.
+	id, valErr := h.provider.ValidateToken(r.Context(), accessToken)
+	if valErr != nil {
+		var upstreamErr *provider.UpstreamError
+		if errors.As(valErr, &upstreamErr) {
+			slog.Warn("refresh rejected: transient upstream error", "err", valErr)
+			// Restore the token so the client can retry later.
+			h.store.RestoreRefreshToken(rt, accessToken, rtExpiresAt)
+			oauthError(w, "temporarily_unavailable", "upstream provider unreachable, retry later", http.StatusServiceUnavailable)
+		} else {
+			slog.Warn("refresh rejected: underlying token invalid", "err", valErr)
+			// Token genuinely invalid; do not restore.
+			oauthError(w, "invalid_grant", "underlying token no longer valid", http.StatusBadRequest)
+		}
+		return
+	}
+	// Re-cache the freshly validated token.
+	h.store.CacheToken(accessToken, id.Subject)
+
+	// Issue the rotated refresh token. The original is already consumed (reserved).
+	newRT, rtErr := h.store.CreateRefreshToken(accessToken, h.refreshTokenTTL())
+	if rtErr != nil {
+		slog.Error("failed to rotate refresh token", "err", rtErr)
+		// Restore the original token so the client can retry later.
+		h.store.RestoreRefreshToken(rt, accessToken, rtExpiresAt)
+		oauthError(w, "server_error", "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	h.writeTokenResponse(w, accessToken, "", newRT)
 }
 
 // DeviceAuthorize handles POST /device_authorization (RFC 8628).
