@@ -55,6 +55,11 @@ ROUTE_COPILOT_REVIEW=/mcp/copilot-review|http://copilot-review-mcp:8083
 - Prefixes **must** start with `/`
 - Upstream URLs must be absolute `http` or `https`
 - When multiple routes match, the **longest prefix wins**
+- Append `|auth=none` as a third segment to disable Bearer validation for a specific route (e.g., for public or pre-auth endpoints):
+
+  ```bash
+  ROUTE_PUBLIC=/public|http://public-svc:8083|auth=none
+  ```
 
 ### Optional Environment Variables
 
@@ -99,7 +104,8 @@ To reset all authentication state (force re-auth for all clients), delete the st
 | `/.well-known/oauth-authorization-server` | GET | RFC 8414 authorization server metadata |
 | `/authorize` | GET | OAuth 2.0 authorization endpoint |
 | `/callback` | GET | GitHub OAuth callback |
-| `/token` | POST | Token endpoint (authorization code + PKCE) |
+| `/device_authorization` | POST | Device Authorization Grant endpoint (RFC 8628) |
+| `/token` | POST | Token endpoint — supports `authorization_code` + PKCE, `urn:ietf:params:oauth:grant-type:device_code`, and `refresh_token` grants |
 | `/register` | POST | RFC 7591 dynamic client registration (pseudo) |
 | `/health` | GET | Health check — returns `{"status":"ok"}` |
 | `/<prefix>` | ANY | Bearer-validated reverse proxy to the matched upstream |

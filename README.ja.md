@@ -40,6 +40,12 @@ ROUTE_COPILOT_REVIEW=/mcp/copilot-review|http://copilot-review-mcp:8083
 
 複数のルートを設定した場合、**最長プレフィックスが優先**されます。
 
+特定のルートで Bearer 検証を無効にするには、第3セグメントとして `|auth=none` を追加します（公開エンドポイントや認証前のパスに使用）:
+
+```bash
+ROUTE_PUBLIC=/public|http://public-svc:8083|auth=none
+```
+
 ### オプション環境変数
 
 | 変数 | デフォルト | 説明 |
@@ -84,7 +90,8 @@ MCP_GATEWAY_TOKEN_STORE_PATH=/data/tokens.json
 | `/.well-known/oauth-authorization-server` | GET | RFC 8414 メタデータ |
 | `/authorize` | GET | OAuth 認可エンドポイント |
 | `/callback` | GET | GitHub OAuth コールバック |
-| `/token` | POST | トークンエンドポイント（PKCE 対応） |
+| `/device_authorization` | POST | Device Authorization Grant エンドポイント（RFC 8628） |
+| `/token` | POST | トークンエンドポイント（`authorization_code` + PKCE、`device_code`、`refresh_token` グラント対応） |
 | `/register` | POST | RFC 7591 動的クライアント登録（疑似） |
 | `/health` | GET | ヘルスチェック |
 | `/<prefix>` | ANY | Bearer 検証後、対応アップストリームへリバースプロキシ |
