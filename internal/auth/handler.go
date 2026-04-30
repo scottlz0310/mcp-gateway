@@ -297,6 +297,15 @@ func (h *Handler) tokenDeviceGrant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Serialize concurrent GitHub polls for the same device_code. If another
+	// goroutine is already polling GitHub, return authorization_pending
+	// immediately to avoid triggering rate-limiting or slow_down responses.
+	if !h.store.AcquireDevicePolling(deviceCode) {
+		oauthError(w, "authorization_pending", "polling in progress, please retry", http.StatusBadRequest)
+		return
+	}
+	defer h.store.ReleaseDevicePolling(deviceCode)
+
 	// Status is pending: poll GitHub on behalf of the client.
 	result, err := h.pollGitHubDeviceToken(r.Context(), pending.GitHubDevCode)
 	if err != nil {

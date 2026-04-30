@@ -101,17 +101,17 @@ copilot-review-mcp 側のコード変更ゼロで、`ROUTE_COPILOT_REVIEW=/mcp/c
 
 ### [#16 feat(auth): Device Flow の同時ポーリングを per-device で直列化して GitHub レート制限を回避](https://github.com/scottlz0310/mcp-gateway/issues/16)
 
-**状態**: 未着手（PR #14 Copilot レビュー指摘：スレッド PRRT_kwDOSNXuJs59--1H）
+**状態**: 実装済み・PR 作成中
 **依存**: なし
 
 同一 `device_code` への並列リクエストが GitHub を同時 polling → `slow_down` / レート制限を誘発する問題。
 
 #### サブタスク
 
-- [ ] per-device mutex（または singleflight）の実装
-- [ ] 既存 `AuthorizeAndConsumeDevice` との整合性確認
-- [ ] テスト追加（並列リクエストのシミュレーション）
-- [ ] PR #14 のレビューコメント（PRRT_kwDOSNXuJs59--1H）への対応・スレッドクローズ
+- [x] per-device mutex（または singleflight）の実装 → `AcquireDevicePolling` / `ReleaseDevicePolling`
+- [x] 既存 `AuthorizeAndConsumeDevice` との整合性確認
+- [x] テスト追加（並列リクエストのシミュレーション）
+- [ ] PR #14 のレビューコメント（PRRT_kwDOSNXuJs59--1H）への対応・スレッドクローズ（PR マージ後）
 
 ---
 

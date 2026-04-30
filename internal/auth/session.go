@@ -39,6 +39,7 @@ type DeviceSession struct {
 	AccessToken     string
 	Scope           string
 	Status          deviceStatus
+	pollingInFlight bool // true while one request is actively polling GitHub
 }
 
 // refreshEntry stores the underlying access token for a gateway-issued refresh token.
@@ -210,6 +211,35 @@ func (s *Store) DenyDevice(internalCode string) {
 	defer s.mu.Unlock()
 	if d, ok := s.devices[internalCode]; ok {
 		d.Status = deviceDenied
+	}
+}
+
+// AcquireDevicePolling atomically marks the device session as in-flight for
+// GitHub polling. It returns true when the caller wins the race and must call
+// ReleaseDevicePolling when done. It returns false when another goroutine is
+// already polling for the same device code; the caller should return
+// authorization_pending immediately without contacting GitHub.
+func (s *Store) AcquireDevicePolling(internalCode string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d, ok := s.devices[internalCode]
+	if !ok {
+		return false
+	}
+	if d.pollingInFlight {
+		return false
+	}
+	d.pollingInFlight = true
+	return true
+}
+
+// ReleaseDevicePolling clears the in-flight flag set by AcquireDevicePolling.
+// It is a no-op when the device session no longer exists (e.g. consumed).
+func (s *Store) ReleaseDevicePolling(internalCode string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if d, ok := s.devices[internalCode]; ok {
+		d.pollingInFlight = false
 	}
 }
 
