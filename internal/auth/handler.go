@@ -374,9 +374,11 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Re-validate the underlying token against the provider.
-	// Distinguish transient upstream failures from genuine invalidity.
-	if _, valErr := h.ValidateToken(r.Context(), accessToken); valErr != nil {
+	// Re-validate the underlying token directly against the upstream provider,
+	// bypassing the local cache. Using the cache here could allow refresh to
+	// succeed for a revoked token until cache expiry.
+	id, valErr := h.provider.ValidateToken(r.Context(), accessToken)
+	if valErr != nil {
 		var upstreamErr *provider.UpstreamError
 		if errors.As(valErr, &upstreamErr) {
 			slog.Warn("refresh rejected: transient upstream error", "err", valErr)
@@ -390,6 +392,8 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	// Re-cache the freshly validated token.
+	h.store.CacheToken(accessToken, id.Subject)
 
 	// Issue the rotated refresh token. The original is already consumed (reserved).
 	newRT, rtErr := h.store.CreateRefreshToken(accessToken, h.refreshTokenTTL())

@@ -462,7 +462,10 @@ func TestTokenRefreshUpstreamErrorPreservesToken(t *testing.T) {
 		t.Fatalf("NewHandler: %v", err)
 	}
 
-	rt, _ := h.store.CreateRefreshToken("gha_token", h.refreshTokenTTL())
+	rt, err := h.store.CreateRefreshToken("gha_token", h.refreshTokenTTL())
+	if err != nil {
+		t.Fatalf("CreateRefreshToken: %v", err)
+	}
 
 	body := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(rt)
 	r := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
@@ -513,7 +516,10 @@ func TestTokenRefreshConcurrentSameToken(t *testing.T) {
 		t.Fatalf("NewHandler: %v", err)
 	}
 
-	rt, _ := h.store.CreateRefreshToken("gha_concurrent_token", h.refreshTokenTTL())
+	rt, err := h.store.CreateRefreshToken("gha_concurrent_token", h.refreshTokenTTL())
+	if err != nil {
+		t.Fatalf("CreateRefreshToken: %v", err)
+	}
 
 	var wg sync.WaitGroup
 	results := make([]int, 2)
@@ -572,6 +578,8 @@ func TestDiscoveryAdvertisesRefreshTokenGrant(t *testing.T) {
 		t.Error("grant_types_supported must include refresh_token")
 	}
 }
+
+// rewriteHostTransport rewrites the target host of outbound HTTP requests,
 // allowing tests to intercept external HTTP calls.
 type rewriteHostTransport struct {
 	target string

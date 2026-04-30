@@ -258,7 +258,10 @@ func TestCreateAndUseRefreshToken(t *testing.T) {
 func TestUseRefreshTokenIsOneTimeUse(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 
-	rt, _ := s.CreateRefreshToken("tok", time.Hour)
+	rt, err := s.CreateRefreshToken("tok", time.Hour)
+	if err != nil {
+		t.Fatalf("CreateRefreshToken: %v", err)
+	}
 
 	if _, err := s.UseRefreshToken(rt); err != nil {
 		t.Fatalf("first use: %v", err)
@@ -271,7 +274,10 @@ func TestUseRefreshTokenIsOneTimeUse(t *testing.T) {
 func TestUseRefreshTokenExpired(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 
-	rt, _ := s.CreateRefreshToken("tok", -time.Second) // already expired
+	rt, err := s.CreateRefreshToken("tok", -time.Second) // already expired
+	if err != nil {
+		t.Fatalf("CreateRefreshToken: %v", err)
+	}
 
 	if _, err := s.UseRefreshToken(rt); err == nil {
 		t.Fatal("expected error for expired refresh token")
@@ -289,7 +295,10 @@ func TestUseRefreshTokenUnknown(t *testing.T) {
 func TestPeekRefreshTokenDoesNotConsume(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 
-	rt, _ := s.CreateRefreshToken("tok", time.Hour)
+	rt, err := s.CreateRefreshToken("tok", time.Hour)
+	if err != nil {
+		t.Fatalf("CreateRefreshToken: %v", err)
+	}
 
 	got1, err := s.PeekRefreshToken(rt)
 	if err != nil {
@@ -311,7 +320,10 @@ func TestPeekRefreshTokenDoesNotConsume(t *testing.T) {
 func TestConsumeRefreshToken(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 
-	rt, _ := s.CreateRefreshToken("tok", time.Hour)
+	rt, err := s.CreateRefreshToken("tok", time.Hour)
+	if err != nil {
+		t.Fatalf("CreateRefreshToken: %v", err)
+	}
 	s.ConsumeRefreshToken(rt)
 
 	// Token must be gone after consumption.
@@ -329,7 +341,10 @@ func TestConsumeRefreshTokenNoOp(t *testing.T) {
 func TestReserveRefreshToken(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 
-	rt, _ := s.CreateRefreshToken("access-tok", time.Hour)
+	rt, err := s.CreateRefreshToken("access-tok", time.Hour)
+	if err != nil {
+		t.Fatalf("CreateRefreshToken: %v", err)
+	}
 
 	got, _, err := s.ReserveRefreshToken(rt)
 	if err != nil {
@@ -347,7 +362,10 @@ func TestReserveRefreshToken(t *testing.T) {
 func TestReserveRefreshTokenExpired(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 
-	rt, _ := s.CreateRefreshToken("tok", -time.Second) // already expired
+	rt, err := s.CreateRefreshToken("tok", -time.Second) // already expired
+	if err != nil {
+		t.Fatalf("CreateRefreshToken: %v", err)
+	}
 	if _, _, err := s.ReserveRefreshToken(rt); err == nil {
 		t.Fatal("expected error for expired refresh token")
 	}
@@ -356,7 +374,10 @@ func TestReserveRefreshTokenExpired(t *testing.T) {
 func TestRestoreRefreshToken(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 
-	rt, _ := s.CreateRefreshToken("tok-restore", time.Hour)
+	rt, err := s.CreateRefreshToken("tok-restore", time.Hour)
+	if err != nil {
+		t.Fatalf("CreateRefreshToken: %v", err)
+	}
 
 	_, expiresAt, err := s.ReserveRefreshToken(rt)
 	if err != nil {
