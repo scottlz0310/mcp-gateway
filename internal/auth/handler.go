@@ -97,7 +97,7 @@ func (h *Handler) Discovery(w http.ResponseWriter, r *http.Request) {
 		"registration_endpoint":            h.cfg.BaseURL + "/register",
 		"device_authorization_endpoint":    h.cfg.BaseURL + "/device_authorization",
 		"response_types_supported":         []string{"code"},
-		"grant_types_supported":            []string{"authorization_code", "urn:ietf:params:oauth:grant-type:device_code"},
+		"grant_types_supported":            []string{"authorization_code", "urn:ietf:params:oauth:grant-type:device_code", "refresh_token"},
 		"code_challenge_methods_supported": []string{"S256"},
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -238,6 +238,8 @@ func (h *Handler) Token(w http.ResponseWriter, r *http.Request) {
 		h.tokenAuthCode(w, r)
 	case "urn:ietf:params:oauth:grant-type:device_code":
 		h.tokenDeviceGrant(w, r)
+	case "refresh_token":
+		h.tokenRefresh(w, r)
 	default:
 		oauthError(w, "unsupported_grant_type", "unsupported grant_type", http.StatusBadRequest)
 	}
@@ -254,7 +256,11 @@ func (h *Handler) tokenAuthCode(w http.ResponseWriter, r *http.Request) {
 		oauthError(w, "invalid_grant", err.Error(), http.StatusBadRequest)
 		return
 	}
-	h.writeTokenResponse(w, token, grantedScope)
+	refreshToken, rtErr := h.store.CreateRefreshToken(token, h.cfg.ExpiresIn+30*24*time.Hour)
+	if rtErr != nil {
+		slog.Warn("failed to create refresh token", "err", rtErr)
+	}
+	h.writeTokenResponse(w, token, grantedScope, refreshToken)
 }
 
 func (h *Handler) tokenDeviceGrant(w http.ResponseWriter, r *http.Request) {
@@ -294,7 +300,11 @@ func (h *Handler) tokenDeviceGrant(w http.ResponseWriter, r *http.Request) {
 			oauthError(w, "invalid_grant", "device code already consumed", http.StatusBadRequest)
 			return
 		}
-		h.writeTokenResponse(w, result.AccessToken, result.Scope)
+		refreshToken, rtErr := h.store.CreateRefreshToken(result.AccessToken, h.cfg.ExpiresIn+30*24*time.Hour)
+		if rtErr != nil {
+			slog.Warn("failed to create refresh token", "err", rtErr)
+		}
+		h.writeTokenResponse(w, result.AccessToken, result.Scope, refreshToken)
 	case "authorization_pending":
 		oauthError(w, "authorization_pending", "user has not yet authorized the device", http.StatusBadRequest)
 	case "slow_down":
@@ -311,7 +321,7 @@ func (h *Handler) tokenDeviceGrant(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *Handler) writeTokenResponse(w http.ResponseWriter, token, scope string) {
+func (h *Handler) writeTokenResponse(w http.ResponseWriter, token, scope, refreshToken string) {
 	expiresIn := max(int64(h.cfg.ExpiresIn/time.Second), 1)
 	resp := map[string]any{
 		"access_token": token,
@@ -321,10 +331,51 @@ func (h *Handler) writeTokenResponse(w http.ResponseWriter, token, scope string)
 	if scope != "" {
 		resp["scope"] = scope
 	}
+	if refreshToken != "" {
+		resp["refresh_token"] = refreshToken
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Pragma", "no-cache")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// tokenRefresh handles grant_type=refresh_token (RFC 6749 §6).
+// It validates the presented refresh token, re-checks the underlying access
+// token against the provider, rotates the refresh token, and returns a fresh
+// token response.  Rotation prevents replay attacks: each refresh token is
+// single-use and replaced atomically.
+func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
+	rt := r.FormValue("refresh_token")
+	if rt == "" {
+		oauthError(w, "invalid_request", "missing refresh_token", http.StatusBadRequest)
+		return
+	}
+
+	accessToken, err := h.store.UseRefreshToken(rt)
+	if err != nil {
+		slog.Warn("refresh token rejected", "err", err)
+		oauthError(w, "invalid_grant", "refresh token not found or expired", http.StatusBadRequest)
+		return
+	}
+
+	// Re-validate the underlying token; this uses the cache to avoid an
+	// upstream round-trip on every refresh when the token is still warm.
+	if _, valErr := h.ValidateToken(r.Context(), accessToken); valErr != nil {
+		slog.Warn("refresh rejected: underlying token invalid", "err", valErr)
+		oauthError(w, "invalid_grant", "underlying token no longer valid", http.StatusBadRequest)
+		return
+	}
+
+	// Rotate: issue a new refresh token before returning the access token.
+	newRT, rtErr := h.store.CreateRefreshToken(accessToken, h.cfg.ExpiresIn+30*24*time.Hour)
+	if rtErr != nil {
+		slog.Error("failed to rotate refresh token", "err", rtErr)
+		oauthError(w, "server_error", "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	h.writeTokenResponse(w, accessToken, "", newRT)
 }
 
 // DeviceAuthorize handles POST /device_authorization (RFC 8628).

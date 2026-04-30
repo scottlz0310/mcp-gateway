@@ -234,3 +234,54 @@ s := NewStore(10*time.Minute, 5*time.Minute, ts)
 // Must not panic; error is logged via slog.Warn.
 s.InvalidateCachedToken("tok-err")
 }
+
+func TestCreateAndUseRefreshToken(t *testing.T) {
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
+
+	rt, err := s.CreateRefreshToken("access-token-abc", time.Hour)
+	if err != nil {
+		t.Fatalf("CreateRefreshToken: %v", err)
+	}
+	if rt == "" {
+		t.Fatal("expected non-empty refresh token")
+	}
+
+	got, err := s.UseRefreshToken(rt)
+	if err != nil {
+		t.Fatalf("UseRefreshToken: %v", err)
+	}
+	if got != "access-token-abc" {
+		t.Errorf("access token: got %q, want %q", got, "access-token-abc")
+	}
+}
+
+func TestUseRefreshTokenIsOneTimeUse(t *testing.T) {
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
+
+	rt, _ := s.CreateRefreshToken("tok", time.Hour)
+
+	if _, err := s.UseRefreshToken(rt); err != nil {
+		t.Fatalf("first use: %v", err)
+	}
+	if _, err := s.UseRefreshToken(rt); err == nil {
+		t.Fatal("expected error on second use (one-time use)")
+	}
+}
+
+func TestUseRefreshTokenExpired(t *testing.T) {
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
+
+	rt, _ := s.CreateRefreshToken("tok", -time.Second) // already expired
+
+	if _, err := s.UseRefreshToken(rt); err == nil {
+		t.Fatal("expected error for expired refresh token")
+	}
+}
+
+func TestUseRefreshTokenUnknown(t *testing.T) {
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
+
+	if _, err := s.UseRefreshToken("does-not-exist"); err == nil {
+		t.Fatal("expected error for unknown refresh token")
+	}
+}

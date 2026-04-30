@@ -324,9 +324,142 @@ func TestTokenDeviceGrantSuccess(t *testing.T) {
 	if resp["access_token"] != "gha_success_token" {
 		t.Errorf("access_token: got %v", resp["access_token"])
 	}
+	if resp["refresh_token"] == nil || resp["refresh_token"] == "" {
+		t.Error("expected refresh_token in device grant success response")
+	}
 }
 
-// rewriteHostTransport redirects all requests to the given target URL,
+// TestTokenRefreshSuccess verifies that a valid refresh token issues a new
+// access token and a rotated refresh token.
+func TestTokenRefreshSuccess(t *testing.T) {
+	// Mock GitHub user API so ValidateToken succeeds.
+	ghServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"login":"alice","name":"Alice"}`)
+	}))
+	defer ghServer.Close()
+
+	p := provider.NewGitHub(provider.GitHubConfig{
+		ClientID:     "test-client-id",
+		ClientSecret: "test-client-secret",
+		RedirectURI:  "http://localhost:8080/callback",
+		Scopes:       "repo,user",
+		UserAPI:      ghServer.URL + "/user",
+		HTTPClient:   ghServer.Client(),
+	})
+	h, err := NewHandler(Config{
+		BaseURL:    "http://localhost:8080",
+		SessionTTL: 10 * time.Minute,
+		CacheTTL:   5 * time.Minute,
+		ExpiresIn:  90 * 24 * time.Hour,
+	}, p)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	// Seed a refresh token for an existing access token.
+	rt, err := h.store.CreateRefreshToken("gha_existing_token", h.cfg.ExpiresIn+30*24*time.Hour)
+	if err != nil {
+		t.Fatalf("seeding refresh token: %v", err)
+	}
+
+	body := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(rt)
+	r := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+
+	h.Token(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	if resp["access_token"] != "gha_existing_token" {
+		t.Errorf("access_token: got %v", resp["access_token"])
+	}
+	newRT, _ := resp["refresh_token"].(string)
+	if newRT == "" {
+		t.Fatal("expected rotated refresh_token in response")
+	}
+	if newRT == rt {
+		t.Error("rotated refresh_token must differ from original")
+	}
+	// Original refresh token must be consumed (one-time use).
+	if _, err := h.store.UseRefreshToken(rt); err == nil {
+		t.Error("original refresh token must be invalidated after use")
+	}
+}
+
+// TestTokenRefreshMissingToken verifies that omitting refresh_token returns 400.
+func TestTokenRefreshMissingToken(t *testing.T) {
+	h := newTestHandler(t)
+	r := httptest.NewRequest(http.MethodPost, "/token",
+		strings.NewReader("grant_type=refresh_token"))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+
+	h.Token(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status: got %d, want 400", w.Code)
+	}
+	var resp map[string]any
+	_ = json.NewDecoder(w.Body).Decode(&resp)
+	if resp["error"] != "invalid_request" {
+		t.Errorf("error: got %v", resp["error"])
+	}
+}
+
+// TestTokenRefreshUnknown verifies that an unknown refresh_token returns invalid_grant.
+func TestTokenRefreshUnknown(t *testing.T) {
+	h := newTestHandler(t)
+	r := httptest.NewRequest(http.MethodPost, "/token",
+		strings.NewReader("grant_type=refresh_token&refresh_token=bogus"))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+
+	h.Token(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status: got %d, want 400", w.Code)
+	}
+	var resp map[string]any
+	_ = json.NewDecoder(w.Body).Decode(&resp)
+	if resp["error"] != "invalid_grant" {
+		t.Errorf("error: got %v, want invalid_grant", resp["error"])
+	}
+}
+
+// TestDiscoveryAdvertisesRefreshTokenGrant verifies that the Discovery metadata
+// includes refresh_token in grant_types_supported.
+func TestDiscoveryAdvertisesRefreshTokenGrant(t *testing.T) {
+	h := newTestHandler(t)
+	r := httptest.NewRequest(http.MethodGet, "/.well-known/oauth-authorization-server", nil)
+	w := httptest.NewRecorder()
+
+	h.Discovery(w, r)
+
+	var doc map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&doc); err != nil {
+		t.Fatalf("decoding discovery: %v", err)
+	}
+	grants, ok := doc["grant_types_supported"].([]any)
+	if !ok {
+		t.Fatal("grant_types_supported not a slice")
+	}
+	var hasRefresh bool
+	for _, g := range grants {
+		if g == "refresh_token" {
+			hasRefresh = true
+		}
+	}
+	if !hasRefresh {
+		t.Error("grant_types_supported must include refresh_token")
+	}
+}
 // allowing tests to intercept external HTTP calls.
 type rewriteHostTransport struct {
 	target string
