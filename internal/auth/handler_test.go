@@ -358,7 +358,7 @@ func TestTokenRefreshSuccess(t *testing.T) {
 	}
 
 	// Seed a refresh token for an existing access token.
-	rt, err := h.store.CreateRefreshToken("gha_existing_token", h.cfg.ExpiresIn+30*24*time.Hour)
+	rt, err := h.store.CreateRefreshToken("gha_existing_token", h.refreshTokenTTL())
 	if err != nil {
 		t.Fatalf("seeding refresh token: %v", err)
 	}
@@ -430,6 +430,57 @@ func TestTokenRefreshUnknown(t *testing.T) {
 	_ = json.NewDecoder(w.Body).Decode(&resp)
 	if resp["error"] != "invalid_grant" {
 		t.Errorf("error: got %v, want invalid_grant", resp["error"])
+	}
+}
+
+// TestTokenRefreshUpstreamErrorPreservesToken verifies that when the upstream
+// provider returns a transient error, the refresh token is NOT consumed and
+// the response is 503 temporarily_unavailable.
+func TestTokenRefreshUpstreamErrorPreservesToken(t *testing.T) {
+	// Mock GitHub user API returning 503.
+	ghServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "upstream error", http.StatusServiceUnavailable)
+	}))
+	defer ghServer.Close()
+
+	p := provider.NewGitHub(provider.GitHubConfig{
+		ClientID:     "test-client-id",
+		ClientSecret: "test-client-secret",
+		RedirectURI:  "http://localhost:8080/callback",
+		Scopes:       "repo,user",
+		UserAPI:      ghServer.URL + "/user",
+		HTTPClient:   ghServer.Client(),
+	})
+	h, err := NewHandler(Config{
+		BaseURL:    "http://localhost:8080",
+		SessionTTL: 10 * time.Minute,
+		CacheTTL:   5 * time.Minute,
+		ExpiresIn:  90 * 24 * time.Hour,
+	}, p)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	rt, _ := h.store.CreateRefreshToken("gha_token", h.refreshTokenTTL())
+
+	body := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(rt)
+	r := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+
+	h.Token(w, r)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status: got %d, want 503; body: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	_ = json.NewDecoder(w.Body).Decode(&resp)
+	if resp["error"] != "temporarily_unavailable" {
+		t.Errorf("error: got %v, want temporarily_unavailable", resp["error"])
+	}
+	// Refresh token must still be valid for retry.
+	if _, err := h.store.PeekRefreshToken(rt); err != nil {
+		t.Errorf("refresh token must be preserved on upstream error: %v", err)
 	}
 }
 

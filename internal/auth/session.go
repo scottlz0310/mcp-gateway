@@ -247,6 +247,29 @@ func (s *Store) UseRefreshToken(refreshToken string) (string, error) {
 	return e.AccessToken, nil
 }
 
+// PeekRefreshToken looks up a refresh token and validates its expiry without
+// consuming it.  Returns the associated access token on success, or an error
+// when the token is unknown or has expired.  Use ConsumeRefreshToken to
+// delete the token only after the full rotation has succeeded.
+func (s *Store) PeekRefreshToken(refreshToken string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.refreshTokens[refreshToken]
+	if !ok || time.Now().After(e.ExpiresAt) {
+		delete(s.refreshTokens, refreshToken)
+		return "", fmt.Errorf("refresh token not found or expired")
+	}
+	return e.AccessToken, nil
+}
+
+// ConsumeRefreshToken removes a refresh token from the store.
+// It is a no-op when the token is not present.
+func (s *Store) ConsumeRefreshToken(refreshToken string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.refreshTokens, refreshToken)
+}
+
 // CacheToken records that token maps to subject (e.g. GitHub login) and is valid
 // for tokensTTL from now. The entry survives process restarts when a persistent
 // TokenStore is configured.

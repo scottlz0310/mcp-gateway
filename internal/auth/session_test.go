@@ -285,3 +285,43 @@ func TestUseRefreshTokenUnknown(t *testing.T) {
 		t.Fatal("expected error for unknown refresh token")
 	}
 }
+
+func TestPeekRefreshTokenDoesNotConsume(t *testing.T) {
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
+
+	rt, _ := s.CreateRefreshToken("tok", time.Hour)
+
+	got1, err := s.PeekRefreshToken(rt)
+	if err != nil {
+		t.Fatalf("PeekRefreshToken: %v", err)
+	}
+	if got1 != "tok" {
+		t.Errorf("access token: got %q", got1)
+	}
+	// Peek must be idempotent: token still present.
+	got2, err := s.PeekRefreshToken(rt)
+	if err != nil {
+		t.Fatalf("second PeekRefreshToken: %v", err)
+	}
+	if got2 != "tok" {
+		t.Errorf("access token after second peek: got %q", got2)
+	}
+}
+
+func TestConsumeRefreshToken(t *testing.T) {
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
+
+	rt, _ := s.CreateRefreshToken("tok", time.Hour)
+	s.ConsumeRefreshToken(rt)
+
+	// Token must be gone after consumption.
+	if _, err := s.PeekRefreshToken(rt); err == nil {
+		t.Fatal("expected error after ConsumeRefreshToken")
+	}
+}
+
+func TestConsumeRefreshTokenNoOp(t *testing.T) {
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
+	// Must not panic on unknown token.
+	s.ConsumeRefreshToken("does-not-exist")
+}

@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +16,11 @@ import (
 
 	"github.com/scottlz0310/mcp-gateway/internal/auth/provider"
 )
+
+// refreshTokenGracePeriod is the extra lifetime added to refresh tokens beyond
+// the access token ExpiresIn, allowing clients to refresh shortly after access
+// token expiry without requiring full re-authentication.
+const refreshTokenGracePeriod = 30 * 24 * time.Hour
 
 // githubClient is the HTTP client used for GitHub Device Flow API calls.
 // Exposed as a package-level var so tests can substitute a test server transport.
@@ -88,6 +94,11 @@ func NewHandler(cfg Config, p provider.Provider) (*Handler, error) {
 	}, nil
 }
 
+// refreshTokenTTL returns the lifetime for gateway-issued refresh tokens.
+func (h *Handler) refreshTokenTTL() time.Duration {
+	return h.cfg.ExpiresIn + refreshTokenGracePeriod
+}
+
 // Discovery returns RFC 8414 authorization server metadata.
 func (h *Handler) Discovery(w http.ResponseWriter, r *http.Request) {
 	doc := map[string]any{
@@ -126,7 +137,7 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 		"client_id_issued_at":        time.Now().Unix(),
 		"client_secret_expires_at":   0,
 		"token_endpoint_auth_method": "none",
-		"grant_types":                []string{"authorization_code", "urn:ietf:params:oauth:grant-type:device_code"},
+		"grant_types":                []string{"authorization_code", "urn:ietf:params:oauth:grant-type:device_code", "refresh_token"},
 		"response_types":             []string{"code"},
 	}
 	for _, field := range []string{"redirect_uris", "client_name", "scope"} {
@@ -256,7 +267,7 @@ func (h *Handler) tokenAuthCode(w http.ResponseWriter, r *http.Request) {
 		oauthError(w, "invalid_grant", err.Error(), http.StatusBadRequest)
 		return
 	}
-	refreshToken, rtErr := h.store.CreateRefreshToken(token, h.cfg.ExpiresIn+30*24*time.Hour)
+	refreshToken, rtErr := h.store.CreateRefreshToken(token, h.refreshTokenTTL())
 	if rtErr != nil {
 		slog.Warn("failed to create refresh token", "err", rtErr)
 	}
@@ -300,7 +311,7 @@ func (h *Handler) tokenDeviceGrant(w http.ResponseWriter, r *http.Request) {
 			oauthError(w, "invalid_grant", "device code already consumed", http.StatusBadRequest)
 			return
 		}
-		refreshToken, rtErr := h.store.CreateRefreshToken(result.AccessToken, h.cfg.ExpiresIn+30*24*time.Hour)
+		refreshToken, rtErr := h.store.CreateRefreshToken(result.AccessToken, h.refreshTokenTTL())
 		if rtErr != nil {
 			slog.Warn("failed to create refresh token", "err", rtErr)
 		}
@@ -343,8 +354,9 @@ func (h *Handler) writeTokenResponse(w http.ResponseWriter, token, scope, refres
 // tokenRefresh handles grant_type=refresh_token (RFC 6749 §6).
 // It validates the presented refresh token, re-checks the underlying access
 // token against the provider, rotates the refresh token, and returns a fresh
-// token response.  Rotation prevents replay attacks: each refresh token is
-// single-use and replaced atomically.
+// token response.  The original refresh token is only consumed after all
+// operations succeed; transient upstream errors leave it intact so clients
+// can retry without full re-authentication.
 func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 	rt := r.FormValue("refresh_token")
 	if rt == "" {
@@ -352,28 +364,40 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	accessToken, err := h.store.UseRefreshToken(rt)
+	// Peek (validate expiry) without consuming; we only delete after success.
+	accessToken, err := h.store.PeekRefreshToken(rt)
 	if err != nil {
 		slog.Warn("refresh token rejected", "err", err)
 		oauthError(w, "invalid_grant", "refresh token not found or expired", http.StatusBadRequest)
 		return
 	}
 
-	// Re-validate the underlying token; this uses the cache to avoid an
-	// upstream round-trip on every refresh when the token is still warm.
+	// Re-validate the underlying token against the provider.
+	// Distinguish transient upstream failures from genuine invalidity.
 	if _, valErr := h.ValidateToken(r.Context(), accessToken); valErr != nil {
-		slog.Warn("refresh rejected: underlying token invalid", "err", valErr)
-		oauthError(w, "invalid_grant", "underlying token no longer valid", http.StatusBadRequest)
+		var upstreamErr *provider.UpstreamError
+		if errors.As(valErr, &upstreamErr) {
+			slog.Warn("refresh rejected: transient upstream error", "err", valErr)
+			// Do NOT consume the refresh token; client must retry later.
+			oauthError(w, "temporarily_unavailable", "upstream provider unreachable, retry later", http.StatusServiceUnavailable)
+		} else {
+			slog.Warn("refresh rejected: underlying token invalid", "err", valErr)
+			oauthError(w, "invalid_grant", "underlying token no longer valid", http.StatusBadRequest)
+		}
 		return
 	}
 
-	// Rotate: issue a new refresh token before returning the access token.
-	newRT, rtErr := h.store.CreateRefreshToken(accessToken, h.cfg.ExpiresIn+30*24*time.Hour)
+	// Rotate: issue a new refresh token before consuming the old one.
+	newRT, rtErr := h.store.CreateRefreshToken(accessToken, h.refreshTokenTTL())
 	if rtErr != nil {
 		slog.Error("failed to rotate refresh token", "err", rtErr)
+		// Do NOT consume the old refresh token; client must retry later.
 		oauthError(w, "server_error", "internal error", http.StatusInternalServerError)
 		return
 	}
+
+	// Only now consume the original refresh token (rotation complete).
+	h.store.ConsumeRefreshToken(rt)
 
 	h.writeTokenResponse(w, accessToken, "", newRT)
 }
