@@ -344,6 +344,6 @@ builder ステージで `/data` を `nonroot:nonroot` 所有で作成し、init 
 #### サブタスク
 
 - [x] GitHub Device Grant エンドポイント（`client_secret` 要否）の確認
-- [x] gateway 内 Device Grant フロー設計（`POST /device_authorization`・`POST /token` device_code grant）
+- [x] gateway 内 Device Grant フロー設計（`POST /device_authorization`・`POST /token` `grant_type=urn:ietf:params:oauth:grant-type:device_code`）
 - [x] MCP Authorization Server Metadata への `device_authorization_endpoint` 追加
 - [x] 既存 Authorization Code Flow との共存設計・実装
