@@ -6,9 +6,10 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" \
     -o /out/mcp-gateway ./cmd/server
-# Pre-create /data with nonroot ownership so Docker copies it into a new named
-# volume on first mount, giving nonroot write access without an init container.
-RUN mkdir -p /out/data && chown 65532:65532 /out/data
+# Pre-create /out/data; COPY --chown in the final stage sets nonroot ownership
+# so Docker copies it into a new named volume on first mount, giving nonroot
+# write access without an init container.
+RUN mkdir -p /out/data
 
 # distroless: no shell, no package manager
 FROM gcr.io/distroless/static-debian12:nonroot
