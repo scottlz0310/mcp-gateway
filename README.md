@@ -108,7 +108,7 @@ To reset all authentication state (force re-auth for all clients), delete the st
 | `/token` | POST | Token endpoint — supports `authorization_code` + PKCE, `urn:ietf:params:oauth:grant-type:device_code`, and `refresh_token` grants |
 | `/register` | POST | RFC 7591 dynamic client registration (pseudo) |
 | `/health` | GET | Health check — returns `{"status":"ok"}` |
-| `/<prefix>` | ANY | Bearer-validated reverse proxy to the matched upstream |
+| `/<prefix>` | ANY | Reverse proxy to the matched upstream — Bearer-validated unless `auth=none` is set for the matched route |
 
 ## Internal Design
 

@@ -91,10 +91,10 @@ MCP_GATEWAY_TOKEN_STORE_PATH=/data/tokens.json
 | `/authorize` | GET | OAuth 認可エンドポイント |
 | `/callback` | GET | GitHub OAuth コールバック |
 | `/device_authorization` | POST | Device Authorization Grant エンドポイント（RFC 8628） |
-| `/token` | POST | トークンエンドポイント（`authorization_code` + PKCE、`device_code`、`refresh_token` グラント対応） |
+| `/token` | POST | トークンエンドポイント（`authorization_code` + PKCE、`urn:ietf:params:oauth:grant-type:device_code`、`refresh_token` グラント対応） |
 | `/register` | POST | RFC 7591 動的クライアント登録（疑似） |
 | `/health` | GET | ヘルスチェック |
-| `/<prefix>` | ANY | Bearer 検証後、対応アップストリームへリバースプロキシ |
+| `/<prefix>` | ANY | マッチしたルート設定に応じて認証（例: Bearer 検証または `auth=none`）を適用し、対応アップストリームへリバースプロキシ |
 
 ## クイックスタート
 
