@@ -22,9 +22,9 @@
 
 ### Phase 2 — #19 動作確認後
 
-| 優先 | ISSUE | 理由 |
+| 優先 | ISSUE | 状態/理由 |
 |---|---|---|
-| 3 | **mcp-gateway #16** Device Flow 直列化 | PR レビュー指摘済みの技術的負債。セキュリティ/品質に直結 |
+| 3 | **mcp-gateway #16** Device Flow 直列化 | ✅ 完了（PR #31 マージ済み） |
 | 4 | **copilot-review-mcp #12** AUTH_MODE=gateway | #19 で二重検証が問題になる場合に対処。変更量は小 |
 | 5 | **mcp-gateway #15** ユーザーホワイトリスト | 運用上の需要が出たタイミングで |
 
@@ -101,7 +101,7 @@ copilot-review-mcp 側のコード変更ゼロで、`ROUTE_COPILOT_REVIEW=/mcp/c
 
 ### [#16 feat(auth): Device Flow の同時ポーリングを per-device で直列化して GitHub レート制限を回避](https://github.com/scottlz0310/mcp-gateway/issues/16)
 
-**状態**: 実装済み・PR 作成中
+**状態**: ✅ 完了（2026-04-30、PR #31 マージ済み）
 **依存**: なし
 
 同一 `device_code` への並列リクエストが GitHub を同時 polling → `slow_down` / レート制限を誘発する問題。
@@ -111,7 +111,7 @@ copilot-review-mcp 側のコード変更ゼロで、`ROUTE_COPILOT_REVIEW=/mcp/c
 - [x] per-device mutex（または singleflight）の実装 → `AcquireDevicePolling` / `ReleaseDevicePolling`
 - [x] 既存 `AuthorizeAndConsumeDevice` との整合性確認
 - [x] テスト追加（並列リクエストのシミュレーション）
-- [ ] PR #14 のレビューコメント（PRRT_kwDOSNXuJs59--1H）への対応・スレッドクローズ（PR マージ後）
+- [x] PR #31 Copilot レビュー対応・スレッドクローズ
 
 ---
 
@@ -135,12 +135,15 @@ copilot-review-mcp 側のコード変更ゼロで、`ROUTE_COPILOT_REVIEW=/mcp/c
 
 ### [#15 feat: ホワイトリストによるアクセス制限（認証済みユーザーのフィルタリング）](https://github.com/scottlz0310/mcp-gateway/issues/15)
 
-**状態**: 未着手
-**依存**: なし（独立着手可能）
+**状態**: 保留
+**依存**: #11（Config Persistence）
+
+> **保留理由（2026-04-30）**: env var 設計か YAML config 設計かで方針が未確定。
+> #11（Config Persistence）の方向性が固まってから実装する。Docker 運用継続中は緊急度低。
 
 #### サブタスク
 
-- [ ] 環境変数 `ALLOWED_USERS` の設計（カンマ区切り GitHub ログイン名）
+- [ ] 設定方式の決定（env var / YAML config）
 - [ ] middleware でのフィルタリング実装
 - [ ] テスト追加
 - [ ] README 更新
@@ -153,8 +156,12 @@ copilot-review-mcp 側のコード変更ゼロで、`ROUTE_COPILOT_REVIEW=/mcp/c
 
 ### [#11 feat: Config Persistence Layer（env vars → YAML/SQLite 設定ファイル）](https://github.com/scottlz0310/mcp-gateway/issues/11)
 
-**状態**: 未着手
+**状態**: 保留
 **依存**: なし（独立着手可能）
+
+> **保留理由（2026-04-30）**: Docker 運用継続中は env var で十分機能しており YAGNI。
+> ホスティング移行やマルチユーザー運用が現実になったタイミングで再評価する。
+> SQLite・管理画面・Setup Wizard はそれ以降に検討（過剰設計を避ける）。
 
 `mustEnv` によるクラッシュを撤廃し、設定を YAML / SQLite で永続管理する。env vars はオーバーライド手段として維持（12-factor 互換）。
 
