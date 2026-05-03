@@ -428,8 +428,16 @@ func (f *fileRefreshTokenStore) Lookup(refreshToken string) (string, time.Time, 
 func (f *fileRefreshTokenStore) Delete(refreshToken string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	delete(f.entries, tokenKey(refreshToken))
-	return f.flush()
+	key := tokenKey(refreshToken)
+	saved, existed := f.entries[key]
+	delete(f.entries, key)
+	if err := f.flush(); err != nil {
+		if existed {
+			f.entries[key] = saved // restore in-memory on flush failure
+		}
+		return err
+	}
+	return nil
 }
 
 func (f *fileRefreshTokenStore) Sweep() error {

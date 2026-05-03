@@ -4,11 +4,18 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
 	"time"
 )
+
+// ErrRefreshTokenDeleteFailed is returned by ReserveRefreshToken when the
+// refresh token was found but could not be removed from the store (e.g., a
+// file flush failure). The token remains usable so the client can retry.
+// Callers should surface this as a transient server error, not invalid_grant.
+var ErrRefreshTokenDeleteFailed = errors.New("refresh token delete failed")
 
 // Session holds OAuth flow state between /authorize and /token.
 type Session struct {
@@ -289,7 +296,7 @@ func (s *Store) UseRefreshToken(refreshToken string) (string, error) {
 		return "", fmt.Errorf("refresh token not found or expired")
 	}
 	if err := s.refreshStore.Delete(refreshToken); err != nil {
-		slog.Warn("refresh token delete failed after use", "err", err)
+		return "", fmt.Errorf("deleting refresh token: %w", err)
 	}
 	return accessToken, nil
 }
@@ -328,7 +335,7 @@ func (s *Store) ReserveRefreshToken(refreshToken string) (string, time.Time, err
 		return "", time.Time{}, fmt.Errorf("refresh token not found or expired")
 	}
 	if err := s.refreshStore.Delete(refreshToken); err != nil {
-		return "", time.Time{}, fmt.Errorf("deleting refresh token: %w", err)
+		return "", time.Time{}, fmt.Errorf("%w: %w", ErrRefreshTokenDeleteFailed, err)
 	}
 	return accessToken, expiresAt, nil
 }

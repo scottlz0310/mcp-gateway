@@ -401,8 +401,13 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 	// same token will fail here, preventing double-rotation.
 	accessToken, rtExpiresAt, err := h.store.ReserveRefreshToken(rt)
 	if err != nil {
-		slog.Warn("refresh token rejected", "err", err)
-		oauthError(w, "invalid_grant", "refresh token not found or expired", http.StatusBadRequest)
+		if errors.Is(err, ErrRefreshTokenDeleteFailed) {
+			slog.Warn("refresh token store failure", "err", err)
+			oauthError(w, "server_error", "transient store error, please retry", http.StatusServiceUnavailable)
+		} else {
+			slog.Warn("refresh token rejected", "err", err)
+			oauthError(w, "invalid_grant", "refresh token not found or expired", http.StatusBadRequest)
+		}
 		return
 	}
 
