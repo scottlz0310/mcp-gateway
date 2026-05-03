@@ -61,7 +61,7 @@ type Store struct {
 	tokens       TokenStore
 	tokensTTL    time.Duration // TTL applied when saving a validated token
 	refreshStore RefreshTokenStore
-	refreshMu    sync.Mutex // guards atomic lookup+delete in ReserveRefreshToken
+	refreshMu    sync.Mutex // guards atomic lookup+delete in UseRefreshToken and ReserveRefreshToken
 
 	stopCh chan struct{}
 }
