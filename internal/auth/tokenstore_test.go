@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -390,6 +391,65 @@ func TestFileRefreshTokenStoreFilePermissions(t *testing.T) {
 	}
 }
 
+// TestFileRefreshTokenStoreParentComponentIsFile verifies that
+// NewFileRefreshTokenStore returns an error when a path component used as a
+// parent directory is actually a regular file (triggers a non-ErrNotExist load
+// failure).
+func TestFileRefreshTokenStoreParentComponentIsFile(t *testing.T) {
+	dir := t.TempDir()
+	// notADir is a regular file; using it as a directory component produces ENOTDIR.
+	notADir := filepath.Join(dir, "notadir.txt")
+	if err := os.WriteFile(notADir, []byte("x"), 0o600); err != nil {
+		t.Fatalf("setup WriteFile: %v", err)
+	}
+	path := filepath.Join(notADir, "tokens.json.refresh")
+	if _, err := NewFileRefreshTokenStore(path); err == nil {
+		t.Fatal("expected error when parent component is a file, got nil")
+	}
+}
+
+// TestFileRefreshTokenStoreParentDirMissing verifies that
+// NewFileRefreshTokenStore returns an error when the parent directory of the
+// store path does not exist (stat fails after an ErrNotExist load).
+func TestFileRefreshTokenStoreParentDirMissing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nonexistent", "tokens.json.refresh")
+	if _, err := NewFileRefreshTokenStore(path); err == nil {
+		t.Fatal("expected error when parent directory does not exist, got nil")
+	}
+}
+
+// TestFileRefreshTokenStoreParentNotWritable verifies that
+// NewFileRefreshTokenStore returns an error when the parent directory exists
+// but is not writable.
+// Skipped on Windows where chmod write-bit removal is not reliable.
+func TestFileRefreshTokenStoreParentNotWritable(t *testing.T) {
+	if isWindows() {
+		t.Skip("Unix-only: chmod write-bit removal not reliable on Windows")
+	}
+	dir := t.TempDir()
+	roDir := filepath.Join(dir, "readonly")
+	if err := os.Mkdir(roDir, 0o500); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(roDir, 0o700) })
+	path := filepath.Join(roDir, "tokens.json.refresh")
+	if _, err := NewFileRefreshTokenStore(path); err == nil {
+		t.Fatal("expected error for unwritable parent directory, got nil")
+	}
+}
+
+// TestFileRefreshTokenStoreDeleteMissingKey verifies that Delete on a
+// non-existent key returns nil without flushing (the short-circuit path).
+func TestFileRefreshTokenStoreDeleteMissingKey(t *testing.T) {
+	rts, err := NewFileRefreshTokenStore(tempRefreshStorePath(t))
+	if err != nil {
+		t.Fatalf("NewFileRefreshTokenStore: %v", err)
+	}
+	if err := rts.Delete("nonexistent-refresh-token"); err != nil {
+		t.Errorf("Delete of missing key: got %v, want nil", err)
+	}
+}
+
 // TestFileRefreshTokenStoreSweepWritesToDisk verifies that Sweep flushes
 // pruned state to disk so the reload doesn't see stale entries.
 func TestFileRefreshTokenStoreSweepWritesToDisk(t *testing.T) {
@@ -420,4 +480,52 @@ func TestFileRefreshTokenStoreSweepWritesToDisk(t *testing.T) {
 	if _, _, ok := rts2.Lookup("stale-rt"); ok {
 		t.Error("after sweep+reload: stale refresh token should have been removed")
 	}
+}
+
+// ── error-injecting RefreshTokenStore helpers ─────────────────────────────────
+
+// alwaysFailRefreshStore is a RefreshTokenStore whose Save and Delete methods
+// always return an error.  Lookup always misses.  Used to cover error-handling
+// paths in Store.CreateRefreshToken, ConsumeRefreshToken, and
+// RestoreRefreshToken.
+type alwaysFailRefreshStore struct{}
+
+var errInjectedStoreFailure = errors.New("test: injected store failure")
+
+func (f *alwaysFailRefreshStore) Save(_, _ string, _ time.Time) error {
+	return errInjectedStoreFailure
+}
+func (f *alwaysFailRefreshStore) Lookup(_ string) (string, time.Time, bool) {
+	return "", time.Time{}, false
+}
+func (f *alwaysFailRefreshStore) Delete(_ string) error { return errInjectedStoreFailure }
+func (f *alwaysFailRefreshStore) Sweep() error          { return nil }
+
+// TestCreateRefreshTokenSaveError verifies that CreateRefreshToken returns an
+// error when the underlying RefreshTokenStore.Save call fails.
+func TestCreateRefreshTokenSaveError(t *testing.T) {
+	store := NewStore(time.Minute, time.Minute, NewMemTokenStore(),
+		WithRefreshTokenStore(&alwaysFailRefreshStore{}))
+	_, err := store.CreateRefreshToken("access-tok", time.Minute)
+	if err == nil {
+		t.Fatal("expected Save error, got nil")
+	}
+}
+
+// TestConsumeRefreshTokenDeleteError verifies that ConsumeRefreshToken logs a
+// warning and does not panic when the underlying Delete call fails.
+func TestConsumeRefreshTokenDeleteError(t *testing.T) {
+	store := NewStore(time.Minute, time.Minute, NewMemTokenStore(),
+		WithRefreshTokenStore(&alwaysFailRefreshStore{}))
+	// Delete always fails; ConsumeRefreshToken must log and return without panicking.
+	store.ConsumeRefreshToken("refresh-tok")
+}
+
+// TestRestoreRefreshTokenSaveError verifies that RestoreRefreshToken logs a
+// warning and does not panic when the underlying Save call fails.
+func TestRestoreRefreshTokenSaveError(t *testing.T) {
+	store := NewStore(time.Minute, time.Minute, NewMemTokenStore(),
+		WithRefreshTokenStore(&alwaysFailRefreshStore{}))
+	// Save always fails; RestoreRefreshToken must log and return without panicking.
+	store.RestoreRefreshToken("refresh-tok", "access-tok", time.Now().Add(time.Hour))
 }

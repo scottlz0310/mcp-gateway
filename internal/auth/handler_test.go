@@ -655,3 +655,87 @@ func (t rewriteHostTransport) RoundTrip(req *http.Request) (*http.Response, erro
 	}
 	return http.DefaultTransport.RoundTrip(req)
 }
+
+// ── error-injection helpers ───────────────────────────────────────────────────
+
+// deleteFailRefreshStore wraps a real in-memory store for all operations
+// except Delete, which always returns an error.  This causes
+// ReserveRefreshToken to return ErrRefreshTokenDeleteFailed.
+type deleteFailRefreshStore struct {
+	inner *memRefreshTokenStore
+}
+
+func (d *deleteFailRefreshStore) Save(rt, at string, exp time.Time) error {
+	return d.inner.Save(rt, at, exp)
+}
+func (d *deleteFailRefreshStore) Lookup(rt string) (string, time.Time, bool) {
+	return d.inner.Lookup(rt)
+}
+func (d *deleteFailRefreshStore) Delete(_ string) error { return fmt.Errorf("disk I/O error") }
+func (d *deleteFailRefreshStore) Sweep() error          { return d.inner.Sweep() }
+
+// TestTokenRefreshDeleteFailed503 verifies that when the refresh token store
+// fails to delete the token during rotation (ErrRefreshTokenDeleteFailed),
+// the handler returns 503 temporarily_unavailable instead of 400 invalid_grant.
+func TestTokenRefreshDeleteFailed503(t *testing.T) {
+	p := provider.NewGitHub(provider.GitHubConfig{
+		ClientID:     "test-client-id",
+		ClientSecret: "test-client-secret",
+		RedirectURI:  "http://localhost:8080/callback",
+		Scopes:       "repo,user",
+	})
+
+	inner := &memRefreshTokenStore{entries: make(map[string]memRTEntry)}
+	failStore := &deleteFailRefreshStore{inner: inner}
+	_ = inner.Save("test-rt", "test-at", time.Now().Add(time.Hour))
+
+	store := NewStore(time.Minute, 90*24*time.Hour, NewMemTokenStore(),
+		WithRefreshTokenStore(failStore))
+	h := &Handler{
+		cfg:      Config{BaseURL: "http://localhost:8080", ExpiresIn: 90 * 24 * time.Hour},
+		provider: p,
+		store:    store,
+	}
+
+	body := "grant_type=refresh_token&refresh_token=test-rt"
+	r := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	h.Token(w, r)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status: got %d, want 503; body: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	_ = json.NewDecoder(w.Body).Decode(&resp)
+	if resp["error"] != "temporarily_unavailable" {
+		t.Errorf("error: got %v, want temporarily_unavailable", resp["error"])
+	}
+}
+
+// TestNewHandlerRefreshStoreInitError verifies that NewHandler returns an error
+// when the refresh token store path cannot be initialized (e.g., the path
+// already exists as a directory rather than a regular file).
+func TestNewHandlerRefreshStoreInitError(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "tokens.json")
+	// Pre-create a directory at the .refresh path so NewFileRefreshTokenStore fails.
+	refreshPath := storePath + ".refresh"
+	if err := os.Mkdir(refreshPath, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	p := provider.NewGitHub(provider.GitHubConfig{
+		ClientID:     "test-client-id",
+		ClientSecret: "test-client-secret",
+		RedirectURI:  "http://localhost:8080/callback",
+		Scopes:       "repo,user",
+	})
+	_, err := NewHandler(Config{
+		BaseURL:        "http://localhost:8080",
+		SessionTTL:     10 * time.Minute,
+		TokenStorePath: storePath,
+	}, p)
+	if err == nil {
+		t.Fatal("expected error when refresh token store init fails, got nil")
+	}
+}
