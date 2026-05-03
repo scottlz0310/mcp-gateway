@@ -289,8 +289,6 @@ func (s *Store) CreateRefreshToken(accessToken string, ttl time.Duration) (strin
 // is unknown or has expired.  Callers must issue a replacement refresh token
 // (rotation) before returning a token response.
 func (s *Store) UseRefreshToken(refreshToken string) (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	accessToken, _, ok := s.refreshStore.Lookup(refreshToken)
 	if !ok {
 		return "", fmt.Errorf("refresh token not found or expired")

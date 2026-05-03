@@ -92,7 +92,7 @@ The gateway will:
 - Write the file with mode `0600` (owner read/write only)
 - Store only SHA-256-hashed token keys — raw token values never appear on disk
 
-Setting `MCP_GATEWAY_TOKEN_STORE_PATH` also creates a sibling file at `<path>.refresh` (e.g. `/data/tokens.json.refresh`) for **refresh token persistence**. This ensures that gateway-issued refresh tokens survive container restarts, so clients can transparently continue their session via the `refresh_token` grant without triggering a full browser re-authentication.
+Setting `MCP_GATEWAY_TOKEN_STORE_PATH` also enables refresh token persistence: on the first successful `refresh_token` grant, a sibling file at `<path>.refresh` (e.g. `/data/tokens.json.refresh`) is created (the file may not exist immediately after startup until the first refresh token is issued). This ensures that gateway-issued refresh tokens survive container restarts, so clients can transparently continue their session via the `refresh_token` grant without triggering a full browser re-authentication.
 
 > **Security note:** The `.refresh` file stores the **associated access token value in plaintext** alongside a hashed refresh token key. The gateway must re-present the access token to the upstream provider on refresh, so the plaintext value is required. The file is written with mode `0600` (owner read/write only) and should be treated with the same sensitivity as the primary token store file — store both files on an encrypted volume or a `tmpfs` mount in high-security environments.
 

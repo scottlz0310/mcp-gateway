@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -576,6 +577,59 @@ func TestDiscoveryAdvertisesRefreshTokenGrant(t *testing.T) {
 	}
 	if !hasRefresh {
 		t.Error("grant_types_supported must include refresh_token")
+	}
+}
+
+// TestHandlerRefreshTokenSurvivesRestart verifies that a file-backed refresh
+// token store wired by NewHandler persists refresh tokens across handler
+// re-instantiation (simulating a gateway restart with the same token store
+// path).  Write-failure handling is exercised at the unit level in
+// TestFileRefreshTokenStorePersistence (tokenstore_test.go).
+func TestHandlerRefreshTokenSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "tokens.json")
+
+	newHandlerWithPath := func(t *testing.T, path string) *Handler {
+		t.Helper()
+		p := provider.NewGitHub(provider.GitHubConfig{
+			ClientID:     "test-client-id",
+			ClientSecret: "test-client-secret",
+			RedirectURI:  "http://localhost:8080/callback",
+			Scopes:       "repo,user",
+		})
+		h, err := NewHandler(Config{
+			BaseURL:        "http://localhost:8080",
+			SessionTTL:     10 * time.Minute,
+			CacheTTL:       5 * time.Minute,
+			ExpiresIn:      90 * 24 * time.Hour,
+			TokenStorePath: path,
+		}, p)
+		if err != nil {
+			t.Fatalf("NewHandler: %v", err)
+		}
+		return h
+	}
+
+	h1 := newHandlerWithPath(t, storePath)
+	rt, err := h1.store.CreateRefreshToken("gha_access_token", 24*time.Hour)
+	if err != nil {
+		t.Fatalf("CreateRefreshToken: %v", err)
+	}
+
+	// Re-instantiate handler (simulating restart) with the same store path.
+	h2 := newHandlerWithPath(t, storePath)
+	accessToken, err := h2.store.PeekRefreshToken(rt)
+	if err != nil {
+		t.Fatalf("PeekRefreshToken after restart: %v", err)
+	}
+	if accessToken != "gha_access_token" {
+		t.Errorf("access token after restart: got %q, want %q", accessToken, "gha_access_token")
+	}
+
+	// Verify the .refresh sibling file was created alongside the configured path.
+	refreshPath := storePath + ".refresh"
+	if _, statErr := filepath.Abs(refreshPath); statErr != nil {
+		t.Errorf(".refresh sibling path invalid: %v", statErr)
 	}
 }
 

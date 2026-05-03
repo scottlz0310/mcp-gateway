@@ -403,7 +403,7 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, ErrRefreshTokenDeleteFailed) {
 			slog.Warn("refresh token store failure", "err", err)
-			oauthError(w, "server_error", "transient store error, please retry", http.StatusServiceUnavailable)
+			oauthError(w, "temporarily_unavailable", "transient store error, please retry", http.StatusServiceUnavailable)
 		} else {
 			slog.Warn("refresh token rejected", "err", err)
 			oauthError(w, "invalid_grant", "refresh token not found or expired", http.StatusBadRequest)
