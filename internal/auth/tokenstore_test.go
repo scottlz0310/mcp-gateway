@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -244,4 +245,287 @@ func TestFileTokenStoreSweepWritesToDisk(t *testing.T) {
 	if _, ok := ts2.Lookup("stale-tok"); ok {
 		t.Error("after sweep+reload: stale token should have been removed")
 	}
+}
+
+// ── RefreshTokenStore helpers and tests ───────────────────────────────────────
+
+func testRefreshTokenStoreContract(t *testing.T, rts RefreshTokenStore) {
+	t.Helper()
+
+	// Save and Lookup — hit
+	exp := time.Now().Add(time.Hour)
+	if err := rts.Save("rt1", "access-tok-1", exp); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, gotExp, ok := rts.Lookup("rt1")
+	if !ok {
+		t.Fatal("Lookup: expected hit after Save")
+	}
+	if got != "access-tok-1" {
+		t.Errorf("Lookup: accessToken got %q, want %q", got, "access-tok-1")
+	}
+	if gotExp.IsZero() {
+		t.Error("Lookup: expiresAt should not be zero")
+	}
+
+	// Lookup — miss for unknown token
+	if _, _, ok := rts.Lookup("unknown"); ok {
+		t.Error("Lookup: expected miss for unknown token")
+	}
+
+	// Delete
+	if err := rts.Delete("rt1"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, _, ok := rts.Lookup("rt1"); ok {
+		t.Error("Lookup: expected miss after Delete")
+	}
+
+	// Expired entries are not returned by Lookup
+	if err := rts.Save("rt2", "access-tok-2", time.Now().Add(-time.Second)); err != nil {
+		t.Fatalf("Save expired: %v", err)
+	}
+	if _, _, ok := rts.Lookup("rt2"); ok {
+		t.Error("Lookup: expected miss for expired entry")
+	}
+
+	// Sweep removes expired entries
+	if err := rts.Sweep(); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+}
+
+// ── memRefreshTokenStore ──────────────────────────────────────────────────────
+
+func TestMemRefreshTokenStore(t *testing.T) {
+	testRefreshTokenStoreContract(t, NewMemRefreshTokenStore())
+}
+
+// ── fileRefreshTokenStore ─────────────────────────────────────────────────────
+
+func tempRefreshStorePath(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(t.TempDir(), "tokens.json.refresh")
+}
+
+func TestFileRefreshTokenStore(t *testing.T) {
+	rts, err := NewFileRefreshTokenStore(tempRefreshStorePath(t))
+	if err != nil {
+		t.Fatalf("NewFileRefreshTokenStore: %v", err)
+	}
+	testRefreshTokenStoreContract(t, rts)
+}
+
+// TestFileRefreshTokenStorePersistence is the core regression test for issue #33:
+// refresh tokens must survive a process restart (simulated by reloading from the
+// same file path).
+func TestFileRefreshTokenStorePersistence(t *testing.T) {
+	path := tempRefreshStorePath(t)
+
+	rts1, err := NewFileRefreshTokenStore(path)
+	if err != nil {
+		t.Fatalf("initial NewFileRefreshTokenStore: %v", err)
+	}
+	if err := rts1.Save("persist-rt", "access-tok-persist", time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	// Reload from same path — simulates container restart.
+	rts2, err := NewFileRefreshTokenStore(path)
+	if err != nil {
+		t.Fatalf("reloaded NewFileRefreshTokenStore: %v", err)
+	}
+	accessTok, _, ok := rts2.Lookup("persist-rt")
+	if !ok {
+		t.Fatal("after reload: expected hit for previously saved refresh token")
+	}
+	if accessTok != "access-tok-persist" {
+		t.Errorf("after reload: accessToken got %q, want %q", accessTok, "access-tok-persist")
+	}
+}
+
+// TestFileRefreshTokenStoreExpiredNotLoaded verifies that expired refresh tokens
+// written before a reload do not surface after the reload's startup sweep.
+func TestFileRefreshTokenStoreExpiredNotLoaded(t *testing.T) {
+	path := tempRefreshStorePath(t)
+
+	rts1, err := NewFileRefreshTokenStore(path)
+	if err != nil {
+		t.Fatalf("initial NewFileRefreshTokenStore: %v", err)
+	}
+	if err := rts1.Save("expired-rt", "access-tok-old", time.Now().Add(-time.Second)); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	// Reload: startup sweep should discard the expired entry.
+	rts2, err := NewFileRefreshTokenStore(path)
+	if err != nil {
+		t.Fatalf("reloaded NewFileRefreshTokenStore: %v", err)
+	}
+	if _, _, ok := rts2.Lookup("expired-rt"); ok {
+		t.Error("after reload: expired refresh token should not be returned")
+	}
+}
+
+// TestFileRefreshTokenStoreFilePermissions verifies the file is written with
+// mode 0600 on Unix systems.
+func TestFileRefreshTokenStoreFilePermissions(t *testing.T) {
+	if isWindows() {
+		t.Skip("file permission bits not enforced on Windows")
+	}
+	path := tempRefreshStorePath(t)
+	rts, err := NewFileRefreshTokenStore(path)
+	if err != nil {
+		t.Fatalf("NewFileRefreshTokenStore: %v", err)
+	}
+	if err := rts.Save("rt", "at", time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0600 {
+		t.Errorf("file permissions: got %04o, want 0600", perm)
+	}
+}
+
+// TestFileRefreshTokenStoreParentComponentIsFile verifies that
+// NewFileRefreshTokenStore returns an error when a path component used as a
+// parent directory is actually a regular file (triggers a non-ErrNotExist load
+// failure).
+func TestFileRefreshTokenStoreParentComponentIsFile(t *testing.T) {
+	dir := t.TempDir()
+	// notADir is a regular file; using it as a directory component produces ENOTDIR.
+	notADir := filepath.Join(dir, "notadir.txt")
+	if err := os.WriteFile(notADir, []byte("x"), 0o600); err != nil {
+		t.Fatalf("setup WriteFile: %v", err)
+	}
+	path := filepath.Join(notADir, "tokens.json.refresh")
+	if _, err := NewFileRefreshTokenStore(path); err == nil {
+		t.Fatal("expected error when parent component is a file, got nil")
+	}
+}
+
+// TestFileRefreshTokenStoreParentDirMissing verifies that
+// NewFileRefreshTokenStore returns an error when the parent directory of the
+// store path does not exist (stat fails after an ErrNotExist load).
+func TestFileRefreshTokenStoreParentDirMissing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nonexistent", "tokens.json.refresh")
+	if _, err := NewFileRefreshTokenStore(path); err == nil {
+		t.Fatal("expected error when parent directory does not exist, got nil")
+	}
+}
+
+// TestFileRefreshTokenStoreParentNotWritable verifies that
+// NewFileRefreshTokenStore returns an error when the parent directory exists
+// but is not writable.
+// Skipped on Windows where chmod write-bit removal is not reliable.
+func TestFileRefreshTokenStoreParentNotWritable(t *testing.T) {
+	if isWindows() {
+		t.Skip("Unix-only: chmod write-bit removal not reliable on Windows")
+	}
+	dir := t.TempDir()
+	roDir := filepath.Join(dir, "readonly")
+	if err := os.Mkdir(roDir, 0o500); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(roDir, 0o700) })
+	path := filepath.Join(roDir, "tokens.json.refresh")
+	if _, err := NewFileRefreshTokenStore(path); err == nil {
+		t.Fatal("expected error for unwritable parent directory, got nil")
+	}
+}
+
+// TestFileRefreshTokenStoreDeleteMissingKey verifies that Delete on a
+// non-existent key returns nil without flushing (the short-circuit path).
+func TestFileRefreshTokenStoreDeleteMissingKey(t *testing.T) {
+	rts, err := NewFileRefreshTokenStore(tempRefreshStorePath(t))
+	if err != nil {
+		t.Fatalf("NewFileRefreshTokenStore: %v", err)
+	}
+	if err := rts.Delete("nonexistent-refresh-token"); err != nil {
+		t.Errorf("Delete of missing key: got %v, want nil", err)
+	}
+}
+
+// TestFileRefreshTokenStoreSweepWritesToDisk verifies that Sweep flushes
+// pruned state to disk so the reload doesn't see stale entries.
+func TestFileRefreshTokenStoreSweepWritesToDisk(t *testing.T) {
+	path := tempRefreshStorePath(t)
+
+	rts1, err := NewFileRefreshTokenStore(path)
+	if err != nil {
+		t.Fatalf("NewFileRefreshTokenStore: %v", err)
+	}
+	if err := rts1.Save("valid-rt", "valid-at", time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("Save valid: %v", err)
+	}
+	if err := rts1.Save("stale-rt", "stale-at", time.Now().Add(-time.Second)); err != nil {
+		t.Fatalf("Save stale: %v", err)
+	}
+	if err := rts1.Sweep(); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+
+	// Reload: only valid-rt should be present.
+	rts2, err := NewFileRefreshTokenStore(path)
+	if err != nil {
+		t.Fatalf("reloaded NewFileRefreshTokenStore: %v", err)
+	}
+	if _, _, ok := rts2.Lookup("valid-rt"); !ok {
+		t.Error("after sweep+reload: valid refresh token should still be present")
+	}
+	if _, _, ok := rts2.Lookup("stale-rt"); ok {
+		t.Error("after sweep+reload: stale refresh token should have been removed")
+	}
+}
+
+// ── error-injecting RefreshTokenStore helpers ─────────────────────────────────
+
+// alwaysFailRefreshStore is a RefreshTokenStore whose Save and Delete methods
+// always return an error.  Lookup always misses.  Used to cover error-handling
+// paths in Store.CreateRefreshToken, ConsumeRefreshToken, and
+// RestoreRefreshToken.
+type alwaysFailRefreshStore struct{}
+
+var errInjectedStoreFailure = errors.New("test: injected store failure")
+
+func (f *alwaysFailRefreshStore) Save(_, _ string, _ time.Time) error {
+	return errInjectedStoreFailure
+}
+func (f *alwaysFailRefreshStore) Lookup(_ string) (string, time.Time, bool) {
+	return "", time.Time{}, false
+}
+func (f *alwaysFailRefreshStore) Delete(_ string) error { return errInjectedStoreFailure }
+func (f *alwaysFailRefreshStore) Sweep() error          { return nil }
+
+// TestCreateRefreshTokenSaveError verifies that CreateRefreshToken returns an
+// error when the underlying RefreshTokenStore.Save call fails.
+func TestCreateRefreshTokenSaveError(t *testing.T) {
+	store := NewStore(time.Minute, time.Minute, NewMemTokenStore(),
+		WithRefreshTokenStore(&alwaysFailRefreshStore{}))
+	_, err := store.CreateRefreshToken("access-tok", time.Minute)
+	if err == nil {
+		t.Fatal("expected Save error, got nil")
+	}
+}
+
+// TestConsumeRefreshTokenDeleteError verifies that ConsumeRefreshToken logs a
+// warning and does not panic when the underlying Delete call fails.
+func TestConsumeRefreshTokenDeleteError(t *testing.T) {
+	store := NewStore(time.Minute, time.Minute, NewMemTokenStore(),
+		WithRefreshTokenStore(&alwaysFailRefreshStore{}))
+	// Delete always fails; ConsumeRefreshToken must log and return without panicking.
+	store.ConsumeRefreshToken("refresh-tok")
+}
+
+// TestRestoreRefreshTokenSaveError verifies that RestoreRefreshToken logs a
+// warning and does not panic when the underlying Save call fails.
+func TestRestoreRefreshTokenSaveError(t *testing.T) {
+	store := NewStore(time.Minute, time.Minute, NewMemTokenStore(),
+		WithRefreshTokenStore(&alwaysFailRefreshStore{}))
+	// Save always fails; RestoreRefreshToken must log and return without panicking.
+	store.RestoreRefreshToken("refresh-tok", "access-tok", time.Now().Add(time.Hour))
 }

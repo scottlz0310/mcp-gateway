@@ -75,6 +75,7 @@ func NewHandler(cfg Config, p provider.Provider) (*Handler, error) {
 
 	var ts TokenStore
 	var tokensTTL time.Duration
+	var storeOpts []StoreOption
 	if cfg.TokenStorePath != "" {
 		fileStore, err := NewFileTokenStore(cfg.TokenStorePath)
 		if err != nil {
@@ -82,6 +83,12 @@ func NewHandler(cfg Config, p provider.Provider) (*Handler, error) {
 		}
 		ts = fileStore
 		tokensTTL = cfg.ExpiresIn
+
+		fileRTS, err := NewFileRefreshTokenStore(cfg.TokenStorePath + ".refresh")
+		if err != nil {
+			return nil, fmt.Errorf("auth.NewHandler: refresh token store: %w", err)
+		}
+		storeOpts = append(storeOpts, WithRefreshTokenStore(fileRTS))
 	} else {
 		ts = NewMemTokenStore()
 		tokensTTL = cfg.CacheTTL
@@ -90,7 +97,7 @@ func NewHandler(cfg Config, p provider.Provider) (*Handler, error) {
 	return &Handler{
 		cfg:      cfg,
 		provider: p,
-		store:    NewStore(cfg.SessionTTL, tokensTTL, ts),
+		store:    NewStore(cfg.SessionTTL, tokensTTL, ts, storeOpts...),
 	}, nil
 }
 
@@ -394,8 +401,13 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 	// same token will fail here, preventing double-rotation.
 	accessToken, rtExpiresAt, err := h.store.ReserveRefreshToken(rt)
 	if err != nil {
-		slog.Warn("refresh token rejected", "err", err)
-		oauthError(w, "invalid_grant", "refresh token not found or expired", http.StatusBadRequest)
+		if errors.Is(err, ErrRefreshTokenDeleteFailed) {
+			slog.Warn("refresh token store failure", "err", err)
+			oauthError(w, "temporarily_unavailable", "transient store error, please retry", http.StatusServiceUnavailable)
+		} else {
+			slog.Warn("refresh token rejected", "err", err)
+			oauthError(w, "invalid_grant", "refresh token not found or expired", http.StatusBadRequest)
+		}
 		return
 	}
 
