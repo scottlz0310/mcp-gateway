@@ -411,8 +411,18 @@ func NewFileRefreshTokenStore(path string) (RefreshTokenStore, error) {
 func (f *fileRefreshTokenStore) Save(refreshToken, accessToken string, expiresAt time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.entries[tokenKey(refreshToken)] = fileRTEntry{AccessToken: accessToken, ExpiresAt: expiresAt}
-	return f.flush()
+	key := tokenKey(refreshToken)
+	prev, hasPrev := f.entries[key]
+	f.entries[key] = fileRTEntry{AccessToken: accessToken, ExpiresAt: expiresAt}
+	if err := f.flush(); err != nil {
+		if hasPrev {
+			f.entries[key] = prev
+		} else {
+			delete(f.entries, key)
+		}
+		return err
+	}
+	return nil
 }
 
 func (f *fileRefreshTokenStore) Lookup(refreshToken string) (string, time.Time, bool) {
