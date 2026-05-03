@@ -94,6 +94,8 @@ The gateway will:
 
 Setting `MCP_GATEWAY_TOKEN_STORE_PATH` also creates a sibling file at `<path>.refresh` (e.g. `/data/tokens.json.refresh`) for **refresh token persistence**. This ensures that gateway-issued refresh tokens survive container restarts, so clients can transparently continue their session via the `refresh_token` grant without triggering a full browser re-authentication.
 
+> **Security note:** The `.refresh` file stores the **associated access token value in plaintext** alongside a hashed refresh token key. The gateway must re-present the access token to the upstream provider on refresh, so the plaintext value is required. The file is written with mode `0600` (owner read/write only) and should be treated with the same sensitivity as the primary token store file — store both files on an encrypted volume or a `tmpfs` mount in high-security environments.
+
 > **Docker users:** mount a named volume at the store path so data survives container replacement.
 > See the companion issue in [mcp-docker](https://github.com/scottlz0310/Mcp-Docker) for the recommended `docker-compose.yml` snippet.
 

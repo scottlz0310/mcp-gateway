@@ -80,6 +80,8 @@ MCP_GATEWAY_TOKEN_STORE_PATH=/data/tokens.json
 
 `MCP_GATEWAY_TOKEN_STORE_PATH` を設定すると、`<path>.refresh`（例: `/data/tokens.json.refresh`）という**リフレッシュトークン永続化ファイル**も同時に作成されます。これにより gateway が再起動しても発行済みリフレッシュトークンが引き継がれ、クライアントは `refresh_token` グラントで透過的にセッションを継続できます（ブラウザ再認証不要）。
 
+> **セキュリティ上の注意:** `.refresh` ファイルには、ハッシュ済みのリフレッシュトークンキーに加え、**関連する access token 値が平文で保存されます**。gateway はリフレッシュ時に上流プロバイダーへ access token を再提示する必要があるため、平文保存は不可避です。ファイルはパーミッション `0600`（所有者のみ読み書き）で書き込まれます。プライマリトークンストアファイルと同等の機密性として扱い、高セキュリティ環境では暗号化ボリュームや `tmpfs` マウント上に配置することを推奨します。
+
 > **Docker ユーザー:** ストアパスに named volume をマウントしてコンテナ入れ替え後もデータを保持してください。
 > 推奨の `docker-compose.yml` スニペットは [mcp-docker](https://github.com/scottlz0310/Mcp-Docker) の関連 Issue を参照してください。
 

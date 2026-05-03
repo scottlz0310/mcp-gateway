@@ -63,8 +63,13 @@ type StoreOption func(*Store)
 
 // WithRefreshTokenStore overrides the RefreshTokenStore used by the Store.
 // When not provided, an in-memory store is used (data lost on restart).
+// Passing nil is a no-op; the default in-memory store is kept.
 func WithRefreshTokenStore(rts RefreshTokenStore) StoreOption {
-	return func(s *Store) { s.refreshStore = rts }
+	return func(s *Store) {
+		if rts != nil {
+			s.refreshStore = rts
+		}
+	}
 }
 
 // NewStore creates a Store with the given session TTL and TokenStore, then
@@ -256,9 +261,11 @@ func (s *Store) ReleaseDevicePolling(internalCode string) {
 }
 
 // CreateRefreshToken generates a gateway-issued refresh token for the given
-// accessToken and stores it with the supplied TTL.  The refresh token is an
-// opaque random string; the raw access token is never written to persistent
-// storage via this path.
+// accessToken and stores it with the supplied TTL. The refresh token is an
+// opaque random string. When a file-backed RefreshTokenStore is configured
+// (MCP_GATEWAY_TOKEN_STORE_PATH is set), the associated access token value is
+// written to disk in the .refresh sibling file (mode 0600); see the
+// MCP_GATEWAY_TOKEN_STORE_PATH documentation for security considerations.
 func (s *Store) CreateRefreshToken(accessToken string, ttl time.Duration) (string, error) {
 	code, err := generateCode()
 	if err != nil {
