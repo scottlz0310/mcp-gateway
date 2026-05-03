@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -628,8 +629,8 @@ func TestHandlerRefreshTokenSurvivesRestart(t *testing.T) {
 
 	// Verify the .refresh sibling file was created alongside the configured path.
 	refreshPath := storePath + ".refresh"
-	if _, statErr := filepath.Abs(refreshPath); statErr != nil {
-		t.Errorf(".refresh sibling path invalid: %v", statErr)
+	if _, statErr := os.Stat(refreshPath); statErr != nil {
+		t.Errorf(".refresh sibling file not created: %v", statErr)
 	}
 }
 

@@ -430,11 +430,12 @@ func (f *fileRefreshTokenStore) Delete(refreshToken string) error {
 	defer f.mu.Unlock()
 	key := tokenKey(refreshToken)
 	saved, existed := f.entries[key]
+	if !existed {
+		return nil
+	}
 	delete(f.entries, key)
 	if err := f.flush(); err != nil {
-		if existed {
-			f.entries[key] = saved // restore in-memory on flush failure
-		}
+		f.entries[key] = saved // restore in-memory on flush failure
 		return err
 	}
 	return nil

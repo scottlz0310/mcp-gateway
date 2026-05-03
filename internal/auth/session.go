@@ -61,6 +61,7 @@ type Store struct {
 	tokens       TokenStore
 	tokensTTL    time.Duration // TTL applied when saving a validated token
 	refreshStore RefreshTokenStore
+	refreshMu    sync.Mutex // guards atomic lookup+delete in ReserveRefreshToken
 
 	stopCh chan struct{}
 }
@@ -326,8 +327,8 @@ func (s *Store) ConsumeRefreshToken(refreshToken string) {
 // failure in the rotation flow, call RestoreRefreshToken to put the token
 // back so the client can retry.
 func (s *Store) ReserveRefreshToken(refreshToken string) (string, time.Time, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.refreshMu.Lock()
+	defer s.refreshMu.Unlock()
 	accessToken, expiresAt, ok := s.refreshStore.Lookup(refreshToken)
 	if !ok {
 		return "", time.Time{}, fmt.Errorf("refresh token not found or expired")
