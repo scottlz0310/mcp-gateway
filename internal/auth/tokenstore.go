@@ -267,3 +267,238 @@ func (f *fileTokenStore) flush() error {
 	}
 	return nil
 }
+
+// ── RefreshTokenStore ────────────────────────────────────────────────────────
+
+// RefreshTokenStore persists gateway-issued refresh token → access token mappings.
+// Two implementations: memRefreshTokenStore (default) and fileRefreshTokenStore (JSON file).
+type RefreshTokenStore interface {
+	// Save records that refreshToken maps to accessToken and is valid until expiresAt.
+	Save(refreshToken, accessToken string, expiresAt time.Time) error
+	// Lookup returns the access token and expiry for a non-expired refresh token, or ("", zero, false).
+	// expiresAt is returned so that RestoreRefreshToken can re-save with the original expiry on rotation failure.
+	Lookup(refreshToken string) (accessToken string, expiresAt time.Time, ok bool)
+	// Delete removes a single refresh token entry immediately.
+	Delete(refreshToken string) error
+	// Sweep removes all expired entries. Called periodically by the Store janitor.
+	Sweep() error
+}
+
+// ── in-memory RefreshTokenStore ───────────────────────────────────────────────
+
+type memRTEntry struct {
+	accessToken string
+	expiresAt   time.Time
+}
+
+type memRefreshTokenStore struct {
+	mu      sync.RWMutex
+	entries map[string]memRTEntry // key: tokenKey(rawRefreshToken)
+}
+
+// NewMemRefreshTokenStore returns an in-memory RefreshTokenStore.
+// All data is lost when the process exits.
+func NewMemRefreshTokenStore() RefreshTokenStore {
+	return &memRefreshTokenStore{entries: make(map[string]memRTEntry)}
+}
+
+func (m *memRefreshTokenStore) Save(refreshToken, accessToken string, expiresAt time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.entries[tokenKey(refreshToken)] = memRTEntry{accessToken: accessToken, expiresAt: expiresAt}
+	return nil
+}
+
+func (m *memRefreshTokenStore) Lookup(refreshToken string) (string, time.Time, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	e, ok := m.entries[tokenKey(refreshToken)]
+	if !ok || time.Now().After(e.expiresAt) {
+		return "", time.Time{}, false
+	}
+	return e.accessToken, e.expiresAt, true
+}
+
+func (m *memRefreshTokenStore) Delete(refreshToken string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.entries, tokenKey(refreshToken))
+	return nil
+}
+
+func (m *memRefreshTokenStore) Sweep() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Now()
+	for k, v := range m.entries {
+		if now.After(v.expiresAt) {
+			delete(m.entries, k)
+		}
+	}
+	return nil
+}
+
+// ── file-backed RefreshTokenStore ─────────────────────────────────────────────
+
+// fileRTEntry is the on-disk representation of a single refresh token record.
+// The map key is tokenKey(rawRefreshToken), so raw refresh token values never
+// appear in the file. The plaintext access token is stored as the value because
+// the gateway must re-present it to the upstream provider on token refresh.
+type fileRTEntry struct {
+	AccessToken string    `json:"a"`
+	ExpiresAt   time.Time `json:"e"`
+}
+
+type fileRefreshTokenStore struct {
+	mu      sync.RWMutex
+	path    string
+	entries map[string]fileRTEntry // key: tokenKey(rawRefreshToken)
+}
+
+// NewFileRefreshTokenStore returns a file-backed RefreshTokenStore that loads
+// existing entries from path on startup and flushes atomically on every write.
+// The file is created with mode 0600 (owner read/write only).
+// If the file does not yet exist, an empty store is returned without error.
+func NewFileRefreshTokenStore(path string) (RefreshTokenStore, error) {
+	s := &fileRefreshTokenStore{
+		path:    path,
+		entries: make(map[string]fileRTEntry),
+	}
+	if err := s.load(); err != nil {
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("loading refresh token store %q: %w", path, err)
+		}
+		dir := filepath.Dir(path)
+		info, statErr := os.Stat(dir)
+		if statErr != nil {
+			return nil, fmt.Errorf("refresh token store parent directory inaccessible %q: %w", dir, statErr)
+		}
+		if !info.IsDir() {
+			return nil, fmt.Errorf("refresh token store parent path is not a directory %q", dir)
+		}
+		f, createErr := os.CreateTemp(dir, ".reftokenstore-writecheck-*")
+		if createErr != nil {
+			return nil, fmt.Errorf("refresh token store parent directory not writable %q: %w", dir, createErr)
+		}
+		name := f.Name()
+		if closeErr := f.Close(); closeErr != nil {
+			_ = os.Remove(name)
+			return nil, fmt.Errorf("closing refresh token store probe file in %q: %w", dir, closeErr)
+		}
+		if removeErr := os.Remove(name); removeErr != nil {
+			return nil, fmt.Errorf("removing refresh token store probe file %q: %w", name, removeErr)
+		}
+	}
+	s.mu.Lock()
+	if changed := s.sweepLocked(); changed {
+		if err := s.flush(); err != nil {
+			count := len(s.entries)
+			s.mu.Unlock()
+			slog.Warn("refresh token store startup sweep flush failed", "path", path, "err", err)
+			slog.Info("refresh token store loaded", "path", path, "entries", count)
+			return s, nil
+		}
+	}
+	count := len(s.entries)
+	s.mu.Unlock()
+	if err := os.Chmod(path, 0o600); err != nil && !os.IsNotExist(err) {
+		slog.Warn("refresh token store chmod failed", "path", path, "err", err)
+	}
+	slog.Info("refresh token store loaded", "path", path, "entries", count)
+	return s, nil
+}
+
+func (f *fileRefreshTokenStore) Save(refreshToken, accessToken string, expiresAt time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.entries[tokenKey(refreshToken)] = fileRTEntry{AccessToken: accessToken, ExpiresAt: expiresAt}
+	return f.flush()
+}
+
+func (f *fileRefreshTokenStore) Lookup(refreshToken string) (string, time.Time, bool) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	e, ok := f.entries[tokenKey(refreshToken)]
+	if !ok || time.Now().After(e.ExpiresAt) {
+		return "", time.Time{}, false
+	}
+	return e.AccessToken, e.ExpiresAt, true
+}
+
+func (f *fileRefreshTokenStore) Delete(refreshToken string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.entries, tokenKey(refreshToken))
+	return f.flush()
+}
+
+func (f *fileRefreshTokenStore) Sweep() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if changed := f.sweepLocked(); !changed {
+		return nil
+	}
+	return f.flush()
+}
+
+func (f *fileRefreshTokenStore) sweepLocked() bool {
+	now := time.Now()
+	changed := false
+	for k, v := range f.entries {
+		if now.After(v.ExpiresAt) {
+			delete(f.entries, k)
+			changed = true
+		}
+	}
+	return changed
+}
+
+func (f *fileRefreshTokenStore) load() error {
+	data, err := os.ReadFile(f.path)
+	if err != nil {
+		return err
+	}
+	if len(data) == 0 {
+		return nil
+	}
+	return json.Unmarshal(data, &f.entries)
+}
+
+func (f *fileRefreshTokenStore) flush() error {
+	data, err := json.Marshal(f.entries)
+	if err != nil {
+		return fmt.Errorf("marshaling refresh token store: %w", err)
+	}
+	tmp := f.path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return fmt.Errorf("writing refresh token store temp file: %w", err)
+	}
+	if err := os.Rename(tmp, f.path); err == nil {
+		return nil
+	}
+	// Windows fallback: backup existing file, promote temp, then remove backup.
+	backup := f.path + ".bak"
+	_ = os.Remove(backup)
+
+	hadOriginal := false
+	if err2 := os.Rename(f.path, backup); err2 == nil {
+		hadOriginal = true
+	} else if !os.IsNotExist(err2) {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("backing up refresh token store: %w", err2)
+	}
+
+	if err2 := os.Rename(tmp, f.path); err2 != nil {
+		if hadOriginal {
+			if restoreErr := os.Rename(backup, f.path); restoreErr != nil {
+				return fmt.Errorf("renaming refresh token store: %w (restore failed: %v)", err2, restoreErr)
+			}
+		}
+		_ = os.Remove(tmp)
+		return fmt.Errorf("renaming refresh token store: %w", err2)
+	}
+	if hadOriginal {
+		_ = os.Remove(backup)
+	}
+	return nil
+}

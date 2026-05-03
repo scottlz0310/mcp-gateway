@@ -78,6 +78,8 @@ MCP_GATEWAY_TOKEN_STORE_PATH=/data/tokens.json
 - ファイルパーミッション `0600`（所有者のみ読み書き）で書き込む
 - SHA-256 ハッシュ済みのキーのみ保存（生のトークン値はディスクに書き込まれない）
 
+`MCP_GATEWAY_TOKEN_STORE_PATH` を設定すると、`<path>.refresh`（例: `/data/tokens.json.refresh`）という**リフレッシュトークン永続化ファイル**も同時に作成されます。これにより gateway が再起動しても発行済みリフレッシュトークンが引き継がれ、クライアントは `refresh_token` グラントで透過的にセッションを継続できます（ブラウザ再認証不要）。
+
 > **Docker ユーザー:** ストアパスに named volume をマウントしてコンテナ入れ替え後もデータを保持してください。
 > 推奨の `docker-compose.yml` スニペットは [mcp-docker](https://github.com/scottlz0310/Mcp-Docker) の関連 Issue を参照してください。
 

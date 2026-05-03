@@ -75,6 +75,7 @@ func NewHandler(cfg Config, p provider.Provider) (*Handler, error) {
 
 	var ts TokenStore
 	var tokensTTL time.Duration
+	var storeOpts []StoreOption
 	if cfg.TokenStorePath != "" {
 		fileStore, err := NewFileTokenStore(cfg.TokenStorePath)
 		if err != nil {
@@ -82,6 +83,12 @@ func NewHandler(cfg Config, p provider.Provider) (*Handler, error) {
 		}
 		ts = fileStore
 		tokensTTL = cfg.ExpiresIn
+
+		fileRTS, err := NewFileRefreshTokenStore(cfg.TokenStorePath + ".refresh")
+		if err != nil {
+			return nil, fmt.Errorf("auth.NewHandler: refresh token store: %w", err)
+		}
+		storeOpts = append(storeOpts, WithRefreshTokenStore(fileRTS))
 	} else {
 		ts = NewMemTokenStore()
 		tokensTTL = cfg.CacheTTL
@@ -90,7 +97,7 @@ func NewHandler(cfg Config, p provider.Provider) (*Handler, error) {
 	return &Handler{
 		cfg:      cfg,
 		provider: p,
-		store:    NewStore(cfg.SessionTTL, tokensTTL, ts),
+		store:    NewStore(cfg.SessionTTL, tokensTTL, ts, storeOpts...),
 	}, nil
 }
 

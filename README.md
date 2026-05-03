@@ -92,6 +92,8 @@ The gateway will:
 - Write the file with mode `0600` (owner read/write only)
 - Store only SHA-256-hashed token keys — raw token values never appear on disk
 
+Setting `MCP_GATEWAY_TOKEN_STORE_PATH` also creates a sibling file at `<path>.refresh` (e.g. `/data/tokens.json.refresh`) for **refresh token persistence**. This ensures that gateway-issued refresh tokens survive container restarts, so clients can transparently continue their session via the `refresh_token` grant without triggering a full browser re-authentication.
+
 > **Docker users:** mount a named volume at the store path so data survives container replacement.
 > See the companion issue in [mcp-docker](https://github.com/scottlz0310/Mcp-Docker) for the recommended `docker-compose.yml` snippet.
 
