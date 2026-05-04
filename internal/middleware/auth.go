@@ -56,7 +56,7 @@ func Auth(v TokenValidator, opts ...AuthOption) func(http.Handler) http.Handler 
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			token := extractBearer(r)
 			if token == "" {
-				writeUnauthorized(w, "missing_token",
+				writeUnauthorized(w, "invalid_request",
 					"No access token provided. Authenticate via the gateway OAuth flow.",
 					options.baseURL)
 				return
@@ -96,14 +96,16 @@ func Auth(v TokenValidator, opts ...AuthOption) func(http.Handler) http.Handler 
 // MCP clients to the gateway's OAuth re-authentication flow.
 func writeUnauthorized(w http.ResponseWriter, errCode, errDesc, baseURL string) {
 	parts := []string{`Bearer realm="mcp-gateway"`}
-	if errCode != "missing_token" {
-		// Per RFC 6750 §3.1, error attributes only apply to token validation failures,
-		// not to requests that simply lack authentication.
+	if errCode == "invalid_token" {
+		// Per RFC 6750 §3.1, error= is only included for token validation failures
+		// (invalid_token), not for requests that simply lack a token (invalid_request).
 		parts = append(parts, fmt.Sprintf(`error=%q, error_description=%q`, errCode, errDesc))
 	}
 	if baseURL != "" {
 		parts = append(parts, fmt.Sprintf(`resource_metadata=%q`, baseURL+"/.well-known/oauth-protected-resource"))
 	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("WWW-Authenticate", strings.Join(parts, ", "))
 	w.WriteHeader(http.StatusUnauthorized)

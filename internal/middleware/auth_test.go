@@ -40,7 +40,7 @@ func TestAuthMissingToken(t *testing.T) {
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("status: got %d, want %d", w.Code, http.StatusUnauthorized)
 	}
-	assertJSONError(t, w, "missing_token")
+	assertJSONError(t, w, "invalid_request")
 	assertWWWAuthenticate(t, w)
 }
 
@@ -134,7 +134,7 @@ func TestAuthMissingTokenWithBaseURL(t *testing.T) {
 	if !strings.Contains(wwwAuth, "resource_metadata") {
 		t.Errorf("WWW-Authenticate missing resource_metadata: %q", wwwAuth)
 	}
-	if strings.Contains(wwwAuth, `error="missing_token"`) {
+	if strings.Contains(wwwAuth, `error="invalid_request"`) {
 		t.Errorf("WWW-Authenticate should not include error= for missing token per RFC 6750 §3.1: %q", wwwAuth)
 	}
 }
