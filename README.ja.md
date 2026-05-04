@@ -22,12 +22,107 @@ mcp-gateway (:8080)
 
 ## 設定
 
+### GitHub OAuth 認証情報
+
+起動時、ゲートウェイは GitHub OAuth 認証情報を以下の優先順位で解決します:
+
+| 認証情報 | 優先ソース | フォールバック |
+|---------|------------|--------------|
+| `GITHUB_MCP_CLIENT_ID` | `GITHUB_MCP_CLIENT_ID` 環境変数 | `config.yaml` の `auth.github_client_id` |
+| `GITHUB_MCP_CLIENT_SECRET` | `config.yaml` の `auth.github_client_secret`（`ENC[age:]...` 形式も可） | `GITHUB_MCP_CLIENT_SECRET` 環境変数 *(初回起動時のシードのみ — config.yaml に値が存在する場合は無視)* |
+
+また、`ROUTE_<NAME>` によるルート設定が最低1つ必要です（未設定の場合は起動時にエラー終了）。
+
+### シークレット暗号化
+
+ゲートウェイは GitHub OAuth クライアントシークレットを [age](https://age-encryption.org/) X25519 暗号化を用いて `config.yaml` に**暗号化して保存**できます。
+
+#### 動作の仕組み
+
+起動時に以下を実行します:
+
+1. `gateway.key`（パス: `MCP_GATEWAY_KEY_PATH`、デフォルト `./gateway.key`）から X25519 キーをロード（または生成）
+2. `config.yaml`（`MCP_CONFIG_FILE`、デフォルト `./config.yaml`）が存在すれば読み込む
+3. 以下の優先順位で `github_client_secret` を解決:
+   - `config.yaml` に `ENC[age:]...` が存在 → 復号して使用
+   - `config.yaml` に平文が存在 → 暗号化してファイルを書き換え、平文を使用
+   - config に値なし + `GITHUB_MCP_CLIENT_SECRET` 環境変数あり → 暗号化して config に保存し使用
+   - いずれもなし → 明確なエラーメッセージで起動失敗
+
+シークレットは**絶対にログに出力されません**（平文・`ENC[...]` 暗号文・キー内容のいずれも）。
+
+#### キーファイル (`gateway.key`)
+
+キーファイルには `age-keygen` 互換の X25519 identity 文字列（`AGE-SECRET-KEY-1...`）が保存されます。
+
+**生成優先順位:**
+
+| 条件 | 結果 |
+|------|------|
+| `gateway.key` が存在する | そのままロード; `MCP_GATEWAY_MASTER_KEY` は**無視** |
+| `gateway.key` なし + `MCP_GATEWAY_MASTER_KEY` 設定済み | HKDF-SHA256 で X25519 キーを決定論的に導出; ファイルに保存 |
+| `gateway.key` なし + マスターキーなし | ランダムな X25519 キーを生成; ファイルに保存 |
+
+> **⚠ 破損は致命的エラー。** `gateway.key` が存在するが空・読み取り不能・形式不正の場合、ゲートウェイは再生成**しません** — 即座に終了します。これは意図しない上書きによる暗号化シークレットの永久消失を防ぐためです。復旧するには `gateway.key` をバックアップから復元するか、既知のキーで `config.yaml` を再暗号化してください。
+
+ファイルは `0600` パーミッションで書き込まれます。`chmod` が期待通り動作しない Windows ボリュームでは警告をログ出力します。
+
+**`gateway.key` を安全にバックアップしてください。** キーファイルを紛失し `MCP_GATEWAY_MASTER_KEY` を使用していなかった場合（ランダム生成時）、`config.yaml` の暗号化シークレットは復元不能になります。
+
+#### `MCP_GATEWAY_MASTER_KEY`
+
+設定されている場合、マスターキーを用いて X25519 キーを決定論的に導出（HKDF-SHA256）します。これにより、別途キーファイルのバックアップなしでシークレット暗号化が可能になります — 同じマスターキーは常に同じ `gateway.key` を生成します。
+
+**要件:**
+- 最低 **32 バイト** — 短い値は起動時に拒否されます
+- 十分にランダムな値を使用してください（例: `openssl rand -hex 32` の出力）
+- **マスターキーの漏えい = 導出キーの漏えい = 暗号化シークレットが復号可能** — シークレットとして厳重に管理してください
+
+> `gateway.key` が存在する場合、`MCP_GATEWAY_MASTER_KEY` は無視されます。キーファイルの初回生成時のみ使用されます。
+
+`MCP_MASTER_KEY` は `MCP_GATEWAY_MASTER_KEY` の後方互換エイリアスとして受け付けます。
+
+#### `config.yaml` の例
+
+```yaml
+auth:
+  github_client_id: "Ov23liXXXX"
+  github_client_secret: "ENC[age:]<base64-ciphertext>"
+gateway:
+  base_url: "http://localhost:8080"
+  port: "8080"
+  oauth_scopes: "repo,user"
+```
+
+`gateway:` 配下はすべてオプションで、対応する環境変数またはデフォルト値にフォールバックします。
+
+#### Docker Compose の設定例
+
+```yaml
+services:
+  mcp-gateway:
+    volumes:
+      - ./data:/data
+    environment:
+      MCP_GATEWAY_KEY_PATH: /data/gateway.key
+      MCP_CONFIG_FILE: /data/config.yaml
+      # 初回のみ — gateway.key が存在すれば省略可:
+      # MCP_GATEWAY_MASTER_KEY: "${MCP_GATEWAY_MASTER_KEY}"
+      GITHUB_MCP_CLIENT_ID: "${GITHUB_MCP_CLIENT_ID}"
+      # GITHUB_MCP_CLIENT_SECRET は初回起動時に config.yaml へシードする場合のみ必要:
+      # GITHUB_MCP_CLIENT_SECRET: "${GITHUB_MCP_CLIENT_SECRET}"
+      ROUTE_GITHUB: /mcp/github|http://github-mcp:8082
+```
+
 ### 必須環境変数
 
 | 変数 | 説明 |
 |------|------|
 | `GITHUB_MCP_CLIENT_ID` | GitHub OAuth App の Client ID |
-| `GITHUB_MCP_CLIENT_SECRET` | GitHub OAuth App の Client Secret |
+| `ROUTE_<NAME>` | ルーティング設定（最低1件必要、下記参照） |
+
+> `GITHUB_MCP_CLIENT_SECRET` は、`config.yaml` に暗号化済みシークレット (`ENC[age:]...`) が存在する場合は不要です。
+> 存在しない場合は、初回起動時のシードとしてこの環境変数が必要です（詳細は「シークレット暗号化」を参照）。
 
 ### ルーティング設定
 
