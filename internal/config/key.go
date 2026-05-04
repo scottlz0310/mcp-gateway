@@ -101,6 +101,12 @@ func loadKeyFile(keyPath string) (*KeyMaterial, error) {
 			if err != nil {
 				return nil, fmt.Errorf("%w: invalid key in %s: %v", ErrKeyCorrupt, keyPath, err)
 			}
+			// Best-effort tighten permissions on existing key files (e.g. operator-restored keys).
+			if runtime.GOOS != "windows" {
+				if chErr := os.Chmod(keyPath, 0600); chErr != nil {
+					slog.Warn("could not set 0600 permissions on key file", "path", keyPath, "err", chErr)
+				}
+			}
 			return identityToKeyMaterial(identity)
 		}
 	}

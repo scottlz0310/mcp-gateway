@@ -123,6 +123,8 @@ services:
       GITHUB_MCP_CLIENT_ID: "${GITHUB_MCP_CLIENT_ID}"
       # GITHUB_MCP_CLIENT_SECRET only needed on first run to seed config.yaml:
       # GITHUB_MCP_CLIENT_SECRET: "${GITHUB_MCP_CLIENT_SECRET}"
+      # At least one ROUTE_* is required — the gateway will fail to start without routes:
+      ROUTE_GITHUB: /mcp/github|http://github-mcp:8082
 ```
 
 

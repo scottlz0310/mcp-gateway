@@ -101,6 +101,7 @@ func MigrateSecret(configPath string, cfg *AppConfig, km *KeyMaterial) (string, 
 	default:
 		envSecret, ok := os.LookupEnv("GITHUB_MCP_CLIENT_SECRET")
 		if ok && strings.TrimSpace(envSecret) != "" {
+			envSecret = strings.TrimSpace(envSecret)
 			slog.Info("encrypting GITHUB_MCP_CLIENT_SECRET from env and saving to config")
 			encrypted, err := EncryptField(km, envSecret)
 			if err != nil {
