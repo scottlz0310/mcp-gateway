@@ -1,4 +1,4 @@
-# Tasks
+﻿# Tasks
 
 `mcp-gateway` の継続的なタスク管理ファイル。各 issue の状態とサブタスク、依存関係を記録する。
 
@@ -199,30 +199,28 @@ copilot-review-mcp 側のコード変更ゼロで、`ROUTE_COPILOT_REVIEW=/mcp/c
      ※ PoC で API を確認してから実装方法を確定する（以下参照）
 
    ⚠️  filippo.io/age は任意バイト列から X25519Identity を決定論的に生成する
-       公開 API を提供していない（ParseX25519Identity はテキスト形式専用）。
-       以下の 2 候補を PoC で検証してから採用方式を確定すること:
+        公開 API を提供していない（ParseX25519Identity はテキスト形式専用）。
+        X25519 方式に統一する方針のため、PoC での検証は以下に絞る:
 
-   候補 A: age.NewScryptIdentity(masterKey)
-     → パスフレーズベース（X25519 でなく scrypt ラッパー）
-     → 同一パスフレーズ → 同一復号キー（決定論的✅）
-     → AGE-SECRET-KEY-1 形式では保存不可（scrypt identity は別フォーマット）
-     → gateway.key の形式設計が変わる可能性あり
+   採用方式（X25519 統一・PoC 確認中）:
+     HKDF で 32 bytes 導出 → bech32(AGE-SECRET-KEY-1...) エンコード
+     → age.ParseX25519Identity() でパース → X25519 identity
+     → age 標準テキスト形式（AGE-SECRET-KEY-1...）で gateway.key に保存
+     → age CLI / age-keygen と互換
 
-   候補 B: HKDF で 32 bytes 導出 → bech32(AGE-SECRET-KEY-1...) エンコード
-          → age.ParseX25519Identity() でパース → X25519 identity
-     → age 標準テキスト形式（AGE-SECRET-KEY-1...）で保存可能（✅）
-     → HKDF → raw key の操作を含むため、PoC で age の利用規約・API 意図を確認する
+   PoC 確認事項:
+     - HKDF → bech32 → ParseX25519Identity の往復が正常に動作すること
+     - 同じ master key から毎回同じ identity が得られること（決定論的性）
+     - 別の master key では復号できないこと
 
-   PoC で「どちらが age API の意図に沿っているか」「両者の interop」を確認し、
-   採用方式を tasks.md に追記してから internal/config/ の実装に進む。
+   ⛔ ScryptIdentity（候補 A）は採用しない:
+      AGE-SECRET-KEY-1 形式で保存できず、key file 方式と passphrase 方式が
+      混在して設計が濁るため #11 スコープから除外する。
 
-     ※ 同じ master key からは毎回同じ identity が生成されること（決定論的性の保証）
-     ※ 別の master key では復号できないこと（PoC で検証する）
-     ※ MCP_GATEWAY_MASTER_KEY は最低 32 bytes 相当の長さを要求する
-       → 短い値・空文字・最低長未満はエラーにする
-       slog.Error("MCP_GATEWAY_MASTER_KEY must be at least 32 bytes")
-       os.Exit(1)
-       （厳密な強度判定は不要。長さチェックのみ）
+   MCP_GATEWAY_MASTER_KEY からの決定論的生成が難しいと判明した場合:
+     → その機能のみ別 issue / 別 PR に切り出す
+     → #11 ではランダム生成（age.GenerateX25519Identity()）した gateway.key を
+        volume に保存する方式で先行実装する
 
 3. どちらも無い → age.GenerateX25519Identity() で新規生成 → gateway.key 保存
 
@@ -233,27 +231,19 @@ copilot-review-mcp 側のコード変更ゼロで、`ROUTE_COPILOT_REVIEW=/mcp/c
     → README に「キーファイルのバックアップは Docker volume のバックアップと同義」と明記する。
 ```
 
+
 **gateway.key のファイル形式**
 
 ```
-PoC での採用方式が確定するまで形式は未確定。候補:
-
-候補 B（X25519）採用時:
-  age の標準 identity 文字列形式（AGE-SECRET-KEY-1...）でテキスト保存。
-  age-keygen の出力と同じ形式:
-    # created: 2026-05-04T22:00:00+09:00
-    # public key: age1xxxx...
-    AGE-SECRET-KEY-1XXXX...
-  → age CLI ツールとの互換性あり、手動での確認・バックアップが容易。
-
-候補 A（Scrypt）採用時:
-  ScryptIdentity はパスフレーズそのものが「キー」であるため、
-  MCP_GATEWAY_MASTER_KEY が存在する限り gateway.key を保存する必要がない。
-  ただし、PoC で gateway.key としての保存形式（テキスト or JSON）を確認する。
-
-どちらの形式であれ、独自バイナリ形式・独自 JSON 形式・独自 Base64 形式は使わない。
-最終的な形式は PoC 完了後に tasks.md を更新して確定する。
+age の標準 identity 文字列形式（AGE-SECRET-KEY-1...）でテキスト保存（X25519 方式に統一）。
+age-keygen の出力と同じ形式:
+  # created: 2026-05-04T22:00:00+09:00
+  # public key: age1xxxx...
+  AGE-SECRET-KEY-1XXXX...
+→ age CLI ツールとの互換性あり、手動での確認・バックアップが容易。
+独自バイナリ形式・独自 JSON 形式・独自 Base64 形式は使わない。
 ```
+
 
 **env var 命名**
 
@@ -350,16 +340,16 @@ gateway:
 #### サブタスク
 
 - [x] 暗号化ライブラリ選定（`filippo.io/age` 採用確定）・キー管理方針・追加制約の方針決定（完了）
-- [ ] キー導出方式の確定（PoC 必須・未完了）
-  - 候補 A: `age.NewScryptIdentity(masterKey)` — 決定論的・標準 API だが AGE-SECRET-KEY-1... 形式で保存不可
-  - 候補 B: HKDF → 32 bytes → bech32 エンコード → `age.ParseX25519Identity()` — X25519 標準形式だが raw bytes 操作を伴う
+- [ ] キー導出方式の確定（X25519 統一・PoC 必須）
+  - HKDF → 32 bytes → bech32 エンコード → `age.ParseX25519Identity()` で X25519 identity 生成
+  - ScryptIdentity は不採用（AGE-SECRET-KEY-1 形式で保存不可のため #11 スコープ外）
+  - 決定論的生成が困難と判明した場合は別 issue 化し、#11 はランダム生成で先行実装
 - [ ] `filippo.io/age` を go.mod に追加（`go get filippo.io/age`）と PoC
-  - age の公開 API で X25519 identity を master key から決定論的に生成する方法を確認
-  - bech32 フォーマット経由が最適か `age.NewScryptIdentity` 系か検討
+  - HKDF → bech32 → `age.ParseX25519Identity()` の往復が動作するか確認
   - **PoC で検証すること（運用事故チェックリスト）**:
     1. 同じ master key から毎回同じ identity が得られること（決定論的性）
     2. 別の master key では復号できないこと
-    3. gateway.key の標準 age identity 文字列形式での保存・読み込みが往復で一致すること
+    3. gateway.key の AGE-SECRET-KEY-1... 形式での保存・読み込みが往復で一致すること
     4. gateway.key が不正形式・空・存在するが読み取り不能の場合に起動エラーになること（上書きしないこと）
 - [ ] `internal/config/` パッケージ新設
   - Config 構造体・YAML 読み書き（`gopkg.in/yaml.v3`）
@@ -372,9 +362,8 @@ gateway:
         Decrypt age.Identity   // DecryptField, EncryptField(age.Encrypt) 引数
         Encrypt age.Recipient  // EncryptField で使う暗号化側
     }
-    // PoC 結果に応じた具体型:
-    //   候補 B: Decrypt = *X25519Identity, Encrypt = identity.Recipient()
-    //   候補 A: Decrypt = *ScryptIdentity, Encrypt = *ScryptRecipient(masterKey)
+    // PoC 結果に応じた具体型（X25519 統一）:
+    //   Decrypt = *X25519Identity, Encrypt = identity.Recipient()
     ```
 
     - gateway.key 破損時は `errKeyCorrupt` 系エラーを返し、呼び出し元で `os.Exit(1)`
