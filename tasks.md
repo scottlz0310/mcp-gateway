@@ -125,21 +125,21 @@ copilot-review-mcp 側のコード変更ゼロで、`ROUTE_COPILOT_REVIEW=/mcp/c
 
 #### サブタスク
 
-- [ ] `internal/middleware/auth.go` に `AuthMode` 分岐追加（+20〜30行）
-- [ ] `cmd/server/main.go` の `AUTH_MODE` 読み込みと条件分岐（+20行）
-- [ ] `AUTH_MODE=gateway` 時の `GITHUB_CLIENT_ID/SECRET` を optional に変更
-- [ ] テスト追加（gateway モード単体テスト）
-- [ ] README / CHANGELOG 更新
+- [x] `internal/middleware/auth.go` に `AuthMode` 分岐追加（+20〜30行）
+- [x] `cmd/server/main.go` の `AUTH_MODE` 読み込みと条件分岐（+20行）
+- [x] `AUTH_MODE=gateway` 時の `GITHUB_CLIENT_ID/SECRET` を optional に変更
+- [x] テスト追加（gateway モード単体テスト）
+- [x] README / CHANGELOG 更新
 
 ---
 
 ### [#15 feat: ホワイトリストによるアクセス制限（認証済みユーザーのフィルタリング）](https://github.com/scottlz0310/mcp-gateway/issues/15)
 
-**状態**: 保留
-**依存**: #11（Config Persistence）
+**状態**: ⏭️ SKIP（ローカル Docker 運用継続のため当面スキップ。ホスティング移行時に再評価）
+**依存**: #11（Config Persistence）— #11 完了後に設定方式を再決定する
 
-> **保留理由（2026-04-30）**: env var 設計か YAML config 設計かで方針が未確定。
-> #11（Config Persistence）の方向性が固まってから実装する。Docker 運用継続中は緊急度低。
+> **スキップ理由（2026-05-04）**: ホスティング環境での運用を当面行わないため優先度外とする。
+> #11（Config Persistence）で YAML config 方式が確定した後、設計を見直して着手する。
 
 #### サブタスク
 
@@ -192,11 +192,30 @@ copilot-review-mcp 側のコード変更ゼロで、`ROUTE_COPILOT_REVIEW=/mcp/c
       ★ 新規生成してよいのは「gateway.key が存在しない」場合だけ。
 
 2. 存在しない + MCP_GATEWAY_MASTER_KEY が設定されている
-   → age のネイティブ API / 標準フォーマットに従って X25519 identity を
+   → age のネイティブ API / 標準フォーマットに従って identity を
      決定論的に導出 → /data/gateway.key（age 標準 identity 文字列形式）として保存
      ※ HKDF 出力を雑に private key として扱う独自実装は行わない
-     ※ filippo.io/age の公開 API・bech32 フォーマットに沿った実装とする
-     ※ PoC で API を確認してから実装方法を確定する
+     ※ filippo.io/age の公開 API に沿った実装とする
+     ※ PoC で API を確認してから実装方法を確定する（以下参照）
+
+   ⚠️  filippo.io/age は任意バイト列から X25519Identity を決定論的に生成する
+       公開 API を提供していない（ParseX25519Identity はテキスト形式専用）。
+       以下の 2 候補を PoC で検証してから採用方式を確定すること:
+
+   候補 A: age.NewScryptIdentity(masterKey)
+     → パスフレーズベース（X25519 でなく scrypt ラッパー）
+     → 同一パスフレーズ → 同一復号キー（決定論的✅）
+     → AGE-SECRET-KEY-1 形式では保存不可（scrypt identity は別フォーマット）
+     → gateway.key の形式設計が変わる可能性あり
+
+   候補 B: HKDF で 32 bytes 導出 → bech32(AGE-SECRET-KEY-1...) エンコード
+          → age.ParseX25519Identity() でパース → X25519 identity
+     → age 標準テキスト形式（AGE-SECRET-KEY-1...）で保存可能（✅）
+     → HKDF → raw key の操作を含むため、PoC で age の利用規約・API 意図を確認する
+
+   PoC で「どちらが age API の意図に沿っているか」「両者の interop」を確認し、
+   採用方式を tasks.md に追記してから internal/config/ の実装に進む。
+
      ※ 同じ master key からは毎回同じ identity が生成されること（決定論的性の保証）
      ※ 別の master key では復号できないこと（PoC で検証する）
      ※ MCP_GATEWAY_MASTER_KEY は最低 32 bytes 相当の長さを要求する
@@ -268,7 +287,7 @@ README に以下を明記する：
 ```
 github_client_secret の値を確認:
 
-1. "ENC[age1...]" 形式 → age で復号して使用
+1. "ENC[age:]..." 形式 → age で復号して使用
 2. 平文が config.yaml にある → age で暗号化して config.yaml に書き戻し、再起動なしで続行
 3. config.yaml にキー自体が無い or 空
    → GITHUB_MCP_CLIENT_SECRET env var を確認
@@ -278,12 +297,22 @@ github_client_secret の値を確認:
      os.Exit(1)
 ```
 
+> **シークレットのローテーション手順**
+>
+> `ENC[...]` が config.yaml に保存された後、`GITHUB_MCP_CLIENT_SECRET` を更新するには:
+> 1. config.yaml の `github_client_secret:` 行を削除またはコメントアウト
+> 2. 新しい値を `GITHUB_MCP_CLIENT_SECRET` env var にセット
+> 3. 再起動 → 移行ロジックのステップ 3 が新値を暗号化保存する
+>
+> ⚠️ 一度 `ENC[...]` が保存されると env var は **再起動時に再読み込みされない**（意図的な設計）。
+> 上書き変更は必ず上記手順で行うこと。
+
 **ファイルレイアウト（/data/ volume）**
 
 ```
 /data/
-  gateway.key    ← age X25519 秘密鍵（mode 0600）← 必ず volume mount 対象
-  config.yaml    ← github_client_secret: "ENC[age1...]" を含む YAML
+  gateway.key    ← age identity 秘密鍵（mode 0600）← 必ず volume mount 対象
+  config.yaml    ← github_client_secret: "ENC[age:]<base64-ciphertext>" を含む YAML
   tokens.json    ← 既存（変更なし・今回のスコープ外）
 ```
 
@@ -291,13 +320,17 @@ github_client_secret の値を確認:
 
 ```yaml
 auth:
-  github_client_id: "Ov23liXXXXXX"        # 平文
-  github_client_secret: "ENC[age1AAAA...]" # age 暗号化済み
+  github_client_id: "Ov23liXXXXXX"                     # 平文
+  github_client_secret: "ENC[age:]<base64-ciphertext>"  # age 暗号化済み（base64 バイナリ暗号文）
 gateway:
   base_url: "http://localhost:8080"
   port: "8080"
   oauth_scopes: "repo,user"
 ```
+
+> ⚠️ `age1...` は age の公開鍵（受信者）のプレフィックスであり、暗号文ではない。
+> `ENC[...]` の中身は age 暗号文（バイナリまたはアーマーテキスト）を base64 エンコードしたもの。
+> 正確なフォーマット（例: `ENC[age:]<base64>` vs アーマーテキスト直書き）は PoC で確定する。
 
 #### サブタスク
 
@@ -312,16 +345,18 @@ gateway:
     4. gateway.key が不正形式・空・存在するが読み取り不能の場合に起動エラーになること（上書きしないこと）
 - [ ] `internal/config/` パッケージ新設
   - Config 構造体・YAML 読み書き（`gopkg.in/yaml.v3`）
-  - `LoadKey(keyPath, masterKey string) (*age.X25519Identity, error)` — 優先順位でキーを解決・保存
+  - `LoadKey(keyPath, masterKey string) (age.Identity, error)` — 優先順位でキーを解決・保存（戻り値は PoC 結果に応じて X25519Identity or ScryptIdentity）
     - gateway.key 破損時は `errKeyCorrupt` 系エラーを返し、呼び出し元で `os.Exit(1)`
     - MCP_GATEWAY_MASTER_KEY の長さが 32 bytes 未満の場合はエラー
-  - `EncryptField(identity, plaintext string) (string, error)` — `ENC[age1...]` 形式
+  - `EncryptField(identity, plaintext string) (string, error)` — `ENC[age:]<base64-ciphertext>` 形式（正確なフォーマットは PoC で確定）
   - `DecryptField(identity, ciphertext string) (string, error)` — フィールド復号
   - `MigrateSecret(cfg *Config, identity) error` — 移行ロジック（上記 3 ケース）
   - env override マージ（12-factor 互換）
   - 0600 ファイル保存・Windows ベストエフォート警告
   - ログ出力禁止ルールに従うこと（シークレット値を一切 slog に渡さない）
-- [ ] 設定ファイルパス解決（`MCP_CONFIG_FILE` env > `/data/config.yaml`）
+- [ ] 設定ファイルパス解決（`MCP_CONFIG_FILE` env > `./config.yaml`）
+  - Docker Compose では `MCP_CONFIG_FILE=/data/config.yaml` を明示指定する
+  - `/data/config.yaml` をデフォルトにすると非 Docker 環境（`go run`・bare binary）で起動失敗するため、デフォルトはカレントディレクトリ
 - [ ] `cmd/server/main.go` の `mustEnv` を config ロードに置き換え
   - `MCP_GATEWAY_MASTER_KEY` / `MCP_MASTER_KEY` alias の読み込み
 - [ ] `internal/router/router.go` の `ParseEnv()` を config ベース実装に切り替え
