@@ -97,8 +97,9 @@ func Auth(v TokenValidator, opts ...AuthOption) func(http.Handler) http.Handler 
 func writeUnauthorized(w http.ResponseWriter, errCode, errDesc, baseURL string) {
 	parts := []string{`Bearer realm="mcp-gateway"`}
 	if errCode == "invalid_token" {
-		// Per RFC 6750 §3.1, error= is only included for token validation failures
-		// (invalid_token), not for requests that simply lack a token (invalid_request).
+		// By design, error= is only included for token validation failures (invalid_token).
+		// For missing-token requests (invalid_request), we intentionally omit error= to avoid
+		// leaking that a credential is required on unauthenticated probes.
 		parts = append(parts, fmt.Sprintf(`error=%q, error_description=%q`, errCode, errDesc))
 	}
 	if baseURL != "" {

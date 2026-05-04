@@ -135,7 +135,7 @@ func TestAuthMissingTokenWithBaseURL(t *testing.T) {
 		t.Errorf("WWW-Authenticate missing resource_metadata: %q", wwwAuth)
 	}
 	if strings.Contains(wwwAuth, `error="invalid_request"`) {
-		t.Errorf("WWW-Authenticate should not include error= for missing token per RFC 6750 §3.1: %q", wwwAuth)
+		t.Errorf("WWW-Authenticate should not include error= for missing token (design choice): %q", wwwAuth)
 	}
 }
 
