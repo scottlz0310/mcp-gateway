@@ -184,7 +184,8 @@ copilot-review-mcp 側のコード変更ゼロで、`ROUTE_COPILOT_REVIEW=/mcp/c
 ```
 優先順位:  gateway.key  >  MCP_GATEWAY_MASTER_KEY  >  自動生成
 
-1. /data/gateway.key が存在する → パース・検証して使用（MCP_GATEWAY_MASTER_KEY は無視）
+1. `<keyPath>` が存在する → パース・検証して使用（MCP_GATEWAY_MASTER_KEY は無視）
+   （keyPath = `MCP_GATEWAY_KEY_PATH` env > `./gateway.key`）
    ⛔ 存在するが読み取り不能・形式不正・空ファイル・パース失敗の場合は
       自動再生成・上書きを一切行わない。明確なエラーで起動を停止する。
       slog.Error("gateway.key exists but is invalid; refusing to overwrite to avoid data loss", "path", path, "err", err)
@@ -253,7 +254,8 @@ MCP_MASTER_KEY          ← 互換 alias（どちらも設定されている場�
 ```
 
 README に以下を明記する：
-- 十分に長いランダム値（推奨: 32 bytes base64）を使用すること
+- 十分に長いランダム値（推奨: 32 bytes 以上のランダム値を base64 エンコードした文字列 ≈ 44 文字）を使用すること
+  （例: `openssl rand -base64 32`）
 - **漏えいリスク（重要）**: `MCP_GATEWAY_MASTER_KEY` が漏えいした場合、
   暗号化済み `config.yaml`（ENC[...]）を持つ攻撃者は `gateway.key` がなくても
   同じ master key から復号キーを再生成できるため**即座に復号可能**になる。
@@ -334,8 +336,8 @@ gateway:
 ```
 
 > ⚠️ `age1...` は age の公開鍵（受信者）のプレフィックスであり、暗号文ではない。
-> `ENC[...]` の中身は age 暗号文（バイナリまたはアーマーテキスト）を base64 エンコードしたもの。
-> 正確なフォーマット（例: `ENC[age:]<base64>` vs アーマーテキスト直書き）は PoC で確定する。
+> `ENC[...]` の中身は age 暗号文を base64 エンコードしたバイナリ（`ENC[age:]<base64-ciphertext>` 形式で統一）。
+> アーマードテキスト（`-----BEGIN AGE ENCRYPTED FILE-----` 形式）をそのまま埋め込む方式は採用しない。
 
 #### サブタスク
 
@@ -359,7 +361,7 @@ gateway:
     // KeyMaterial は復号 + 暗号化の両 interface を保持する。
     // age.Identity は復号のみ、age.Recipient は暗号化のみのため両方必要。
     type KeyMaterial struct {
-        Decrypt age.Identity   // DecryptField, EncryptField(age.Encrypt) 引数
+        Decrypt age.Identity   // DecryptField で使う復号側（age.Identity は復号専用）
         Encrypt age.Recipient  // EncryptField で使う暗号化側
     }
     // PoC 結果に応じた具体型（X25519 統一）:
