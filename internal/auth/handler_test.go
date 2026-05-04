@@ -61,6 +61,36 @@ func TestDiscovery(t *testing.T) {
 	}
 }
 
+func TestProtectedResourceMetadata(t *testing.T) {
+	h := newTestHandler(t)
+	r := httptest.NewRequest(http.MethodGet, "/.well-known/oauth-protected-resource", nil)
+	w := httptest.NewRecorder()
+
+	h.ProtectedResourceMetadata(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status: got %d, want %d", w.Code, http.StatusOK)
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type: got %q, want %q", ct, "application/json")
+	}
+	var doc map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&doc); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	if doc["resource"] != "http://localhost:8080" {
+		t.Errorf("resource: got %v, want http://localhost:8080", doc["resource"])
+	}
+	servers, ok := doc["authorization_servers"].([]any)
+	if !ok || len(servers) == 0 || servers[0] != "http://localhost:8080" {
+		t.Errorf("authorization_servers: got %v", doc["authorization_servers"])
+	}
+	bearerMethods, ok := doc["bearer_methods_supported"].([]any)
+	if !ok || len(bearerMethods) == 0 || bearerMethods[0] != "header" {
+		t.Errorf("bearer_methods_supported: got %v", doc["bearer_methods_supported"])
+	}
+}
+
 func TestRegisterReturnsClientID(t *testing.T) {
 	h := newTestHandler(t)
 	body := `{"redirect_uris":["http://localhost/cb"],"client_name":"test"}`

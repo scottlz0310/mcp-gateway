@@ -79,11 +79,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	authMiddleware := middleware.Auth(oauthHandler)
+	authMiddleware := middleware.Auth(oauthHandler, middleware.WithBaseURL(cfg.baseURL))
 
 	mux := http.NewServeMux()
 
 	// OAuth façade endpoints (no auth required).
+	mux.HandleFunc("GET /.well-known/oauth-protected-resource", oauthHandler.ProtectedResourceMetadata)
 	mux.HandleFunc("GET /.well-known/oauth-authorization-server", oauthHandler.Discovery)
 	mux.HandleFunc("GET /authorize", oauthHandler.Authorize)
 	mux.HandleFunc("GET /callback", oauthHandler.Callback)

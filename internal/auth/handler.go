@@ -106,6 +106,21 @@ func (h *Handler) refreshTokenTTL() time.Duration {
 	return h.cfg.ExpiresIn + refreshTokenGracePeriod
 }
 
+// ProtectedResourceMetadata implements RFC 9728 OAuth 2.0 Protected Resource
+// Metadata. MCP clients that receive a 401 with a resource_metadata parameter
+// in the WWW-Authenticate header fetch this endpoint to discover the gateway's
+// authorization server, enabling re-authentication via the OAuth flow instead
+// of falling back to alternative auth methods (e.g. gh CLI).
+func (h *Handler) ProtectedResourceMetadata(w http.ResponseWriter, r *http.Request) {
+	doc := map[string]any{
+		"resource":                 h.cfg.BaseURL,
+		"authorization_servers":    []string{h.cfg.BaseURL},
+		"bearer_methods_supported": []string{"header"},
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(doc)
+}
+
 // Discovery returns RFC 8414 authorization server metadata.
 func (h *Handler) Discovery(w http.ResponseWriter, r *http.Request) {
 	doc := map[string]any{
