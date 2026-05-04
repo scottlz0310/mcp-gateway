@@ -67,22 +67,23 @@ ROUTE_COPILOT_REVIEW=/mcp/copilot-review|http://copilot-review-mcp:8083
 |----------|---------|-------------|
 | `MCP_GATEWAY_BASE_URL` | `http://localhost:8080` | Base URL used for OAuth callback and discovery metadata |
 | `MCP_GATEWAY_PORT` | `8080` | Listen port |
-| `MCP_GATEWAY_TOKEN_STORE_PATH` | *(empty)* | Path to the persistent token store file (see [Persistent Auth State](#persistent-auth-state)) |
+| `MCP_GATEWAY_TOKEN_STORE_PATH` | `/data/tokens.json` | Path to the persistent token store file (see [Persistent Auth State](#persistent-auth-state)) |
 | `GITHUB_MCP_OAUTH_SCOPES` | `repo,user` | GitHub OAuth scopes |
 | `LOG_LEVEL` | `info` | Log level: `debug` / `info` / `warn` / `error` |
 | `SESSION_TTL_MIN` | `10` | OAuth session lifetime (minutes) |
-| `TOKEN_CACHE_TTL_MIN` | `30` | Token validation cache TTL in minutes — used only when `MCP_GATEWAY_TOKEN_STORE_PATH` is **not** set |
+| `TOKEN_CACHE_TTL_MIN` | `30` | Token validation cache TTL in minutes — used only when `MCP_GATEWAY_TOKEN_STORE_PATH` is explicitly set to empty |
 | `TOKEN_EXPIRES_IN_SEC` | `7776000` | Token lifetime advertised to clients (seconds; default 90 days). Also used as the TTL for persistent token entries |
 | `GITHUB_MCP_UPSTREAM_URL` | — | **Deprecated** — single upstream fallback when no `ROUTE_*` is set |
 
 ### Persistent Auth State
 
-By default, validated token state is held only in process memory. This means that every time the gateway restarts, MCP clients (VS Code, Claude Desktop, etc.) must go through the browser OAuth flow again.
+By default, validated token state is persisted to `/data/tokens.json` (a directory pre-created by the Docker image with appropriate permissions). This means MCP clients (VS Code, Claude Desktop, etc.) **do not need to re-authenticate after gateway restarts** under normal operation.
 
-To avoid this, set `MCP_GATEWAY_TOKEN_STORE_PATH` to a writable file path:
+To change the store path, set `MCP_GATEWAY_TOKEN_STORE_PATH`. To disable persistence and revert to in-memory-only storage (not recommended for production), set it to an empty string:
 
 ```bash
-MCP_GATEWAY_TOKEN_STORE_PATH=/data/tokens.json
+MCP_GATEWAY_TOKEN_STORE_PATH=/data/tokens.json  # default
+MCP_GATEWAY_TOKEN_STORE_PATH=                   # disable persistence (not recommended)
 ```
 
 The gateway will:

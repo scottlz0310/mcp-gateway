@@ -165,7 +165,7 @@ func loadConfig() config {
 		sessionTTLMin:      getEnvInt("SESSION_TTL_MIN", 10),
 		tokenCacheTTLMin:   getEnvInt("TOKEN_CACHE_TTL_MIN", 30),
 		tokenExpiresInSec:  getEnvInt("TOKEN_EXPIRES_IN_SEC", 7776000), // 90 days
-		tokenStorePath:     getEnv("MCP_GATEWAY_TOKEN_STORE_PATH", ""),
+		tokenStorePath:     getEnv("MCP_GATEWAY_TOKEN_STORE_PATH", "/data/tokens.json"),
 	}
 }
 
