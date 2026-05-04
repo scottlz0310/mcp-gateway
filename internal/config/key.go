@@ -75,7 +75,12 @@ func LoadKey(keyPath string, masterKey []byte) (*KeyMaterial, error) {
 	if err := saveKeyFile(keyPath, identity); err != nil {
 		return nil, fmt.Errorf("saving gateway key to %s: %w", keyPath, err)
 	}
-	return identityToKeyMaterial(identity)
+	// Re-read the file that was just written so the in-memory identity always
+	// matches what is on disk. This also handles the unlikely but possible race
+	// where two processes both observe gateway.key as absent, generate different
+	// random identities, and one overwrites the other via atomic rename: after
+	// both writes settle, both processes will load the same on-disk key.
+	return loadKeyFile(keyPath)
 }
 
 // loadKeyFile reads, parses, and validates an existing key file.

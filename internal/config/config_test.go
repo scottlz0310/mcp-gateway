@@ -142,12 +142,21 @@ func TestMigrateSecret_NoSecretInLogs(t *testing.T) {
 		t.Fatalf("MigrateSecret: %v", err)
 	}
 
+	// Also exercise the LoadConfig path (restart scenario) while still capturing logs.
+	if _, err := LoadConfig(configPath); err != nil {
+		t.Fatalf("LoadConfig with encrypted config: %v", err)
+	}
+
 	output := logBuf.String()
 	if strings.Contains(output, secretValue) {
-		t.Error("secret value leaked to log output")
+		t.Error("plaintext secret leaked to log output")
 	}
 	if strings.Contains(output, enc) {
-		t.Error("returned encrypted value leaked to log output")
+		t.Error("full ENC[age:...] ciphertext leaked to log output")
+	}
+	// Catch any partial logging of the encrypted prefix from either path.
+	if strings.Contains(output, "ENC[age:]") {
+		t.Error("ENC[age:] prefix leaked to log output")
 	}
 }
 

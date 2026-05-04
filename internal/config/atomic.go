@@ -38,6 +38,17 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		}
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
+		if runtime.GOOS == "windows" {
+			// On Windows, MoveFileEx can fail when the destination is open by another
+			// handle. Fall back to a remove-then-rename, accepting the brief window
+			// where the file is absent (safe during gateway startup).
+			_ = os.Remove(path)
+			if err2 := os.Rename(tmpPath, path); err2 != nil {
+				return fmt.Errorf("atomically replacing %s: %w (Windows fallback also failed: %v)", path, err, err2)
+			}
+			ok = true
+			return nil
+		}
 		return fmt.Errorf("atomically replacing %s: %w", path, err)
 	}
 	ok = true

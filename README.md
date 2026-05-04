@@ -34,7 +34,7 @@ mcp-gateway  :8080
 
 ## Configuration
 
-### Required Environment Variables
+### GitHub OAuth Credentials
 
 At startup, the gateway resolves the GitHub OAuth credentials as follows:
 
