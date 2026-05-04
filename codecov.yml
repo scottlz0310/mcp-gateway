@@ -1,0 +1,14 @@
+coverage:
+  status:
+    patch:
+      default:
+        # cmd/ entrypoints are not unit-testable; the threshold reflects
+        # intentionally-untested OS-specific branches (e.g. Windows rename fallback).
+        target: 70%
+        threshold: 5%
+    project:
+      default:
+        threshold: 5%
+
+ignore:
+  - "cmd/"   # main package entrypoints are not unit-tested by design
