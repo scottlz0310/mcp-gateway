@@ -193,7 +193,7 @@ copilot-review-mcp 側のコード変更ゼロで、`ROUTE_COPILOT_REVIEW=/mcp/c
 
 2. 存在しない + MCP_GATEWAY_MASTER_KEY が設定されている
    → age のネイティブ API / 標準フォーマットに従って identity を
-     決定論的に導出 → /data/gateway.key（age 標準 identity 文字列形式）として保存
+     決定論的に導出 → gateway.key（age 標準 identity 文字列形式）として保存
      ※ HKDF 出力を雑に private key として扱う独自実装は行わない
      ※ filippo.io/age の公開 API に沿った実装とする
      ※ PoC で API を確認してから実装方法を確定する（以下参照）
@@ -224,7 +224,7 @@ copilot-review-mcp 側のコード変更ゼロで、`ROUTE_COPILOT_REVIEW=/mcp/c
        os.Exit(1)
        （厳密な強度判定は不要。長さチェックのみ）
 
-3. どちらも無い → age.GenerateX25519Identity() で新規生成 → /data/gateway.key 保存
+3. どちらも無い → age.GenerateX25519Identity() で新規生成 → gateway.key 保存
 
 ⚠️  gateway.key が存在する場合は MCP_GATEWAY_MASTER_KEY を無視する
     （誤ってキーを変えることで復号不能になる事故を防止）
@@ -236,15 +236,23 @@ copilot-review-mcp 側のコード変更ゼロで、`ROUTE_COPILOT_REVIEW=/mcp/c
 **gateway.key のファイル形式**
 
 ```
-age の標準 identity 文字列形式（テキスト）で保存する。
-独自バイナリ形式・独自 JSON 形式・独自 Base64 形式は使わない。
+PoC での採用方式が確定するまで形式は未確定。候補:
 
-標準形式の例（age-keygen の出力と同じ）:
-  # created: 2026-05-04T22:00:00+09:00
-  # public key: age1xxxx...
-  AGE-SECRET-KEY-1XXXX...
+候補 B（X25519）採用時:
+  age の標準 identity 文字列形式（AGE-SECRET-KEY-1...）でテキスト保存。
+  age-keygen の出力と同じ形式:
+    # created: 2026-05-04T22:00:00+09:00
+    # public key: age1xxxx...
+    AGE-SECRET-KEY-1XXXX...
+  → age CLI ツールとの互換性あり、手動での確認・バックアップが容易。
 
-これにより age CLI ツールとの互換性が保たれ、手動での確認・バックアップが容易。
+候補 A（Scrypt）採用時:
+  ScryptIdentity はパスフレーズそのものが「キー」であるため、
+  MCP_GATEWAY_MASTER_KEY が存在する限り gateway.key を保存する必要がない。
+  ただし、PoC で gateway.key としての保存形式（テキスト or JSON）を確認する。
+
+どちらの形式であれ、独自バイナリ形式・独自 JSON 形式・独自 Base64 形式は使わない。
+最終的な形式は PoC 完了後に tasks.md を更新して確定する。
 ```
 
 **env var 命名**
@@ -256,15 +264,17 @@ MCP_MASTER_KEY          ← 互換 alias（どちらも設定されている場�
 
 README に以下を明記する：
 - 十分に長いランダム値（推奨: 32 bytes base64）を使用すること
-- 漏えいした場合は gateway.key が失われていなければ即座に影響はないが、
-  gateway.key の再生成には使用されるため漏えい時は MCP_GATEWAY_MASTER_KEY を変更し
-  gateway.key を削除して再初期化すること
+- **漏えいリスク（重要）**: `MCP_GATEWAY_MASTER_KEY` が漏えいした場合、
+  暗号化済み `config.yaml`（ENC[...]）を持つ攻撃者は `gateway.key` がなくても
+  同じ master key から復号キーを再生成できるため**即座に復号可能**になる。
+  漏えい時は MCP_GATEWAY_MASTER_KEY を変更し、gateway.key を削除して再初期化すること。
+  また、ENC[...] の中身も新しいキーで再暗号化すること。
 - gateway.key が存在する場合は MCP_GATEWAY_MASTER_KEY は無視されること
 
 **ファイルパーミッション**
 
 ```
-/data/gateway.key: mode 0600 で保存（os.WriteFile / os.Chmod）
+gateway.key: mode 0600 で保存（os.WriteFile / os.Chmod）
   → Linux/macOS: 0600 が有効
   → Windows volume 等で chmod が効かない場合: 警告ログを出力してベストエフォートで続行
     slog.Warn("could not set restrictive permissions on key file", "path", path, "err", err)
@@ -277,7 +287,7 @@ README に以下を明記する：
 - シークレット値の平文（`GITHUB_MCP_CLIENT_SECRET` 等）
 - 復号後の値
 - env var の値
-- `/data/gateway.key` の内容
+- `gateway.key` の内容
 - `ENC[...]` の全文
 
 エラーログには「フィールド名」「ファイルパス」「エラー種別」のみ含める。
@@ -295,6 +305,11 @@ github_client_secret の値を確認:
    → env var も無い → 明確なエラーで起動失敗
      slog.Error("github_client_secret is required: set GITHUB_MCP_CLIENT_SECRET env var or provide an encrypted value in config.yaml")
      os.Exit(1)
+
+      ⚠️ #12 Setup Wizard との連携（将来対応）:
+         #12 実装時は「secret 未設定 = セットアップ未完了」状態として
+         os.Exit(1) の代わりにセットアップモードへ遷移する。
+         現時点（#11 単独実装）では #12 との結合は行わない。
 ```
 
 > **シークレットのローテーション手順**
@@ -334,7 +349,10 @@ gateway:
 
 #### サブタスク
 
-- [x] 暗号化ライブラリ・キー管理方針・追加制約の技術選択（完了）
+- [x] 暗号化ライブラリ選定（`filippo.io/age` 採用確定）・キー管理方針・追加制約の方針決定（完了）
+- [ ] キー導出方式の確定（PoC 必須・未完了）
+  - 候補 A: `age.NewScryptIdentity(masterKey)` — 決定論的・標準 API だが AGE-SECRET-KEY-1... 形式で保存不可
+  - 候補 B: HKDF → 32 bytes → bech32 エンコード → `age.ParseX25519Identity()` — X25519 標準形式だが raw bytes 操作を伴う
 - [ ] `filippo.io/age` を go.mod に追加（`go get filippo.io/age`）と PoC
   - age の公開 API で X25519 identity を master key から決定論的に生成する方法を確認
   - bech32 フォーマット経由が最適か `age.NewScryptIdentity` 系か検討
@@ -345,18 +363,34 @@ gateway:
     4. gateway.key が不正形式・空・存在するが読み取り不能の場合に起動エラーになること（上書きしないこと）
 - [ ] `internal/config/` パッケージ新設
   - Config 構造体・YAML 読み書き（`gopkg.in/yaml.v3`）
-  - `LoadKey(keyPath, masterKey string) (age.Identity, error)` — 優先順位でキーを解決・保存（戻り値は PoC 結果に応じて X25519Identity or ScryptIdentity）
+  - `LoadKey(keyPath, masterKey string) (KeyMaterial, error)` — 優先順位でキーを解決・保存
+
+    ```go
+    // KeyMaterial は復号 + 暗号化の両 interface を保持する。
+    // age.Identity は復号のみ、age.Recipient は暗号化のみのため両方必要。
+    type KeyMaterial struct {
+        Decrypt age.Identity   // DecryptField, EncryptField(age.Encrypt) 引数
+        Encrypt age.Recipient  // EncryptField で使う暗号化側
+    }
+    // PoC 結果に応じた具体型:
+    //   候補 B: Decrypt = *X25519Identity, Encrypt = identity.Recipient()
+    //   候補 A: Decrypt = *ScryptIdentity, Encrypt = *ScryptRecipient(masterKey)
+    ```
+
     - gateway.key 破損時は `errKeyCorrupt` 系エラーを返し、呼び出し元で `os.Exit(1)`
     - MCP_GATEWAY_MASTER_KEY の長さが 32 bytes 未満の場合はエラー
-  - `EncryptField(identity, plaintext string) (string, error)` — `ENC[age:]<base64-ciphertext>` 形式（正確なフォーマットは PoC で確定）
-  - `DecryptField(identity, ciphertext string) (string, error)` — フィールド復号
-  - `MigrateSecret(cfg *Config, identity) error` — 移行ロジック（上記 3 ケース）
+  - `EncryptField(km KeyMaterial, plaintext string) (string, error)` — `ENC[age:]<base64-ciphertext>` 形式（正確なフォーマットは PoC で確定）
+  - `DecryptField(km KeyMaterial, ciphertext string) (string, error)` — フィールド復号
+  - `MigrateSecret(cfg *Config, km KeyMaterial) error` — 移行ロジック（上記 3 ケース）
   - env override マージ（12-factor 互換）
   - 0600 ファイル保存・Windows ベストエフォート警告
   - ログ出力禁止ルールに従うこと（シークレット値を一切 slog に渡さない）
 - [ ] 設定ファイルパス解決（`MCP_CONFIG_FILE` env > `./config.yaml`）
   - Docker Compose では `MCP_CONFIG_FILE=/data/config.yaml` を明示指定する
   - `/data/config.yaml` をデフォルトにすると非 Docker 環境（`go run`・bare binary）で起動失敗するため、デフォルトはカレントディレクトリ
+- [ ] キーファイルパス解決（`MCP_GATEWAY_KEY_PATH` env > `./gateway.key`）
+  - Docker Compose では `MCP_GATEWAY_KEY_PATH=/data/gateway.key` を明示指定する
+  - `/data/gateway.key` をデフォルトにすると非 Docker 環境で起動失敗するため、デフォルトはカレントディレクトリ
 - [ ] `cmd/server/main.go` の `mustEnv` を config ロードに置き換え
   - `MCP_GATEWAY_MASTER_KEY` / `MCP_MASTER_KEY` alias の読み込み
 - [ ] `internal/router/router.go` の `ParseEnv()` を config ベース実装に切り替え
