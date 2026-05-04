@@ -102,17 +102,13 @@ func loadKeyFile(keyPath string) (*KeyMaterial, error) {
 	return nil, fmt.Errorf("%w: no AGE-SECRET-KEY-1 line found in %s", ErrKeyCorrupt, keyPath)
 }
 
-// saveKeyFile writes the identity string to keyPath with 0600 permissions.
+// saveKeyFile writes the identity string to keyPath atomically with 0600 permissions.
 // The key content is never written to the log.
 func saveKeyFile(keyPath string, identity *age.X25519Identity) error {
-	if err := os.WriteFile(keyPath, []byte(identity.String()+"\n"), 0600); err != nil {
+	if err := writeFileAtomic(keyPath, []byte(identity.String()+"\n"), 0600); err != nil {
 		return err
 	}
-	if runtime.GOOS != "windows" {
-		if err := os.Chmod(keyPath, 0600); err != nil {
-			slog.Warn("could not set restrictive permissions on key file", "path", keyPath, "err", err)
-		}
-	} else {
+	if runtime.GOOS == "windows" {
 		slog.Warn("running on Windows: cannot guarantee 0600 permissions on key file", "path", keyPath)
 	}
 	return nil

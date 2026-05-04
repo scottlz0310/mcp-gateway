@@ -36,12 +36,12 @@ mcp-gateway  :8080
 
 ### Required Environment Variables
 
-At startup, the gateway resolves the GitHub OAuth credentials using the following priority:
+At startup, the gateway resolves the GitHub OAuth credentials as follows:
 
-| Source | `GITHUB_MCP_CLIENT_ID` | `GITHUB_MCP_CLIENT_SECRET` |
-|--------|------------------------|---------------------------|
-| **env var** | `GITHUB_MCP_CLIENT_ID` | `GITHUB_MCP_CLIENT_SECRET` |
-| **config.yaml** | `auth.github_client_id` | `auth.github_client_secret` (may be `ENC[age:]...`) |
+| Credential | Primary source | Fallback |
+|-----------|----------------|---------|
+| `GITHUB_MCP_CLIENT_ID` | `GITHUB_MCP_CLIENT_ID` env var | `auth.github_client_id` in `config.yaml` |
+| `GITHUB_MCP_CLIENT_SECRET` | `auth.github_client_secret` in `config.yaml` (may be `ENC[age:]...`) | `GITHUB_MCP_CLIENT_SECRET` env var *(first-startup seeding only — ignored once a value exists in config.yaml)* |
 
 At least one route must also be configured via `ROUTE_<NAME>` (see below) — the server exits on startup if no routes are defined.
 

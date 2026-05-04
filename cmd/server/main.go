@@ -60,6 +60,17 @@ func main() {
 	cfg.githubClientID = githubClientID
 	cfg.githubClientSecret = githubClientSecret
 
+	// Apply config.yaml gateway overrides (priority: env var > config.yaml > built-in default).
+	if strings.TrimSpace(os.Getenv("MCP_GATEWAY_BASE_URL")) == "" && strings.TrimSpace(appCfg.Gateway.BaseURL) != "" {
+		cfg.baseURL = appCfg.Gateway.BaseURL
+	}
+	if strings.TrimSpace(os.Getenv("MCP_GATEWAY_PORT")) == "" && strings.TrimSpace(appCfg.Gateway.Port) != "" {
+		cfg.port = appCfg.Gateway.Port
+	}
+	if strings.TrimSpace(os.Getenv("GITHUB_MCP_OAUTH_SCOPES")) == "" && strings.TrimSpace(appCfg.Gateway.OAuthScopes) != "" {
+		cfg.oauthScopes = appCfg.Gateway.OAuthScopes
+	}
+
 	routes, err := router.ParseEnv()
 	if err != nil {
 		slog.Error("invalid route configuration", "err", err)

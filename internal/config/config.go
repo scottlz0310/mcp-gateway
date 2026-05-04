@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"runtime"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -45,13 +46,24 @@ func LoadConfig(path string) (*AppConfig, error) {
 	return &cfg, nil
 }
 
-// SaveConfig writes cfg to path with 0600 permissions.
+// SaveConfig writes cfg to path with 0600 permissions using an atomic temp-file+rename.
+//
+// Note: because AppConfig is a narrow struct, any YAML fields not defined in AppConfig
+// (unknown keys, user-added comments) will be lost on rewrite. SaveConfig is only called
+// during secret migration (first startup with a plaintext or env-var secret), so manual
+// edits to config.yaml should be made after the initial migration run.
 func SaveConfig(path string, cfg *AppConfig) error {
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
 		return fmt.Errorf("marshaling config: %w", err)
 	}
-	return os.WriteFile(path, data, 0600)
+	if err := writeFileAtomic(path, data, 0600); err != nil {
+		return err
+	}
+	if runtime.GOOS == "windows" {
+		slog.Warn("running on Windows: cannot guarantee 0600 permissions on config file", "path", path)
+	}
+	return nil
 }
 
 // MigrateSecret resolves the GitHub OAuth client secret, following this priority:
