@@ -40,11 +40,25 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	if err := os.Rename(tmpPath, path); err != nil {
 		if runtime.GOOS == "windows" {
 			// On Windows, MoveFileEx can fail when the destination is open by another
-			// handle. Fall back to a remove-then-rename, accepting the brief window
-			// where the file is absent (safe during gateway startup).
-			_ = os.Remove(path)
-			if err2 := os.Rename(tmpPath, path); err2 != nil {
-				return fmt.Errorf("atomically replacing %s: %w (Windows fallback also failed: %v)", path, err, err2)
+			// handle. Use a backup-and-restore approach: rename the existing file to a
+			// .bak first, rename the temp file to the target, then remove the .bak.
+			// If the second rename also fails, restore the backup so no data is lost.
+			bakPath := path + ".bak"
+			if _, statErr := os.Stat(path); statErr == nil {
+				if renErr := os.Rename(path, bakPath); renErr != nil {
+					// Cannot create backup; return original rename error.
+					return fmt.Errorf("atomically replacing %s: %w", path, err)
+				}
+				if err2 := os.Rename(tmpPath, path); err2 != nil {
+					_ = os.Rename(bakPath, path) // restore backup on failure
+					return fmt.Errorf("atomically replacing %s: %w (Windows fallback also failed: %v)", path, err, err2)
+				}
+				_ = os.Remove(bakPath)
+			} else {
+				// Target does not exist yet; simple rename suffices.
+				if err2 := os.Rename(tmpPath, path); err2 != nil {
+					return fmt.Errorf("atomically replacing %s: %w (Windows fallback also failed: %v)", path, err, err2)
+				}
 			}
 			ok = true
 			return nil

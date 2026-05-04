@@ -37,38 +37,22 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Load YAML config and resolve the GitHub client secret.
+	// Load YAML config.
 	appCfg, err := appconfig.LoadConfig(cfg.configPath)
 	if err != nil {
 		slog.Error("failed to load config file", "path", cfg.configPath, "err", err)
 		os.Exit(1)
 	}
 
-	githubClientSecret, err := appconfig.MigrateSecret(cfg.configPath, appCfg, km)
-	if err != nil {
-		slog.Error("github_client_secret is unavailable", "err", err)
-		os.Exit(1)
-	}
+	// Validate required startup inputs before any config writes.
+	// This prevents a mistyped env var from being encrypted and saved to config.yaml
+	// on a first boot that would otherwise fail (e.g. missing CLIENT_ID or routes).
 
 	// GitHub client ID: env var takes precedence over config file.
 	githubClientID := getEnv("GITHUB_MCP_CLIENT_ID", appCfg.Auth.GitHubClientID)
 	if strings.TrimSpace(githubClientID) == "" {
 		slog.Error("required value not set: provide GITHUB_MCP_CLIENT_ID env var or auth.github_client_id in config.yaml")
 		os.Exit(1)
-	}
-
-	cfg.githubClientID = githubClientID
-	cfg.githubClientSecret = githubClientSecret
-
-	// Apply config.yaml gateway overrides (priority: env var > config.yaml > built-in default).
-	if strings.TrimSpace(os.Getenv("MCP_GATEWAY_BASE_URL")) == "" && strings.TrimSpace(appCfg.Gateway.BaseURL) != "" {
-		cfg.baseURL = appCfg.Gateway.BaseURL
-	}
-	if strings.TrimSpace(os.Getenv("MCP_GATEWAY_PORT")) == "" && strings.TrimSpace(appCfg.Gateway.Port) != "" {
-		cfg.port = appCfg.Gateway.Port
-	}
-	if strings.TrimSpace(os.Getenv("GITHUB_MCP_OAUTH_SCOPES")) == "" && strings.TrimSpace(appCfg.Gateway.OAuthScopes) != "" {
-		cfg.oauthScopes = appCfg.Gateway.OAuthScopes
 	}
 
 	routes, err := router.ParseEnv()
@@ -99,6 +83,28 @@ func main() {
 	if len(routes) == 0 {
 		slog.Error("no routes configured: set ROUTE_<NAME>=<prefix>|<upstream_url>")
 		os.Exit(1)
+	}
+
+	// Resolve the GitHub client secret (and persist it encrypted if sourced from env).
+	// Only runs after the above validations pass to avoid making a wrong value sticky.
+	githubClientSecret, err := appconfig.MigrateSecret(cfg.configPath, appCfg, km)
+	if err != nil {
+		slog.Error("github_client_secret is unavailable", "err", err)
+		os.Exit(1)
+	}
+
+	cfg.githubClientID = githubClientID
+	cfg.githubClientSecret = githubClientSecret
+
+	// Apply config.yaml gateway overrides (priority: env var > config.yaml > built-in default).
+	if strings.TrimSpace(os.Getenv("MCP_GATEWAY_BASE_URL")) == "" && strings.TrimSpace(appCfg.Gateway.BaseURL) != "" {
+		cfg.baseURL = appCfg.Gateway.BaseURL
+	}
+	if strings.TrimSpace(os.Getenv("MCP_GATEWAY_PORT")) == "" && strings.TrimSpace(appCfg.Gateway.Port) != "" {
+		cfg.port = appCfg.Gateway.Port
+	}
+	if strings.TrimSpace(os.Getenv("GITHUB_MCP_OAUTH_SCOPES")) == "" && strings.TrimSpace(appCfg.Gateway.OAuthScopes) != "" {
+		cfg.oauthScopes = appCfg.Gateway.OAuthScopes
 	}
 
 	prov, err := provider.New(provider.Config{
