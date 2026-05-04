@@ -77,12 +77,15 @@ ROUTE_COPILOT_REVIEW=/mcp/copilot-review|http://copilot-review-mcp:8083
 
 ### Persistent Auth State
 
-By default, validated token state is persisted to `/data/tokens.json` (a directory pre-created by the Docker image with appropriate permissions). This means MCP clients (VS Code, Claude Desktop, etc.) **do not need to re-authenticate after gateway restarts** under normal operation.
+> **Docker default:** The default store path `/data/tokens.json` is designed for Docker deployments — the Docker image pre-creates `/data` with the correct permissions. If you run the gateway with `go run` or a bare binary outside Docker, `/data` likely does not exist and the gateway will fail to start. In that case set `MCP_GATEWAY_TOKEN_STORE_PATH` to a writable path (e.g. `./tokens.json`) or set it to empty to disable persistence.
+
+By default, validated token state is persisted to `/data/tokens.json`. This means MCP clients (VS Code, Claude Desktop, etc.) **do not need to re-authenticate after gateway restarts** under normal operation.
 
 To change the store path, set `MCP_GATEWAY_TOKEN_STORE_PATH`. To disable persistence and revert to in-memory-only storage (not recommended for production), set it to an empty string:
 
 ```bash
-MCP_GATEWAY_TOKEN_STORE_PATH=/data/tokens.json  # default
+MCP_GATEWAY_TOKEN_STORE_PATH=/data/tokens.json  # default (Docker)
+MCP_GATEWAY_TOKEN_STORE_PATH=./tokens.json       # local run
 MCP_GATEWAY_TOKEN_STORE_PATH=                   # disable persistence (not recommended)
 ```
 

@@ -62,12 +62,15 @@ ROUTE_PUBLIC=/public|http://public-svc:8083|auth=none
 
 ### 認証状態の永続化
 
-デフォルトでは、検証済みトークンの状態は `/data/tokens.json` に永続化されます（Docker イメージに適切なパーミッションで事前作成済みのディレクトリ）。通常運用では **gateway を再起動しても MCP クライアント（VS Code、Claude Desktop など）の再認証は不要です**。
+> **Docker デフォルト:** デフォルトのストアパス `/data/tokens.json` は Docker 運用向けです。Docker イメージは `/data` を適切なパーミッションで事前作成しています。Docker 以外（`go run` やバイナリ直接実行）では `/data` が存在しないため起動に失敗します。その場合は `MCP_GATEWAY_TOKEN_STORE_PATH` を書き込み可能なパス（例: `./tokens.json`）に設定するか、永続化を無効にするため空文字を設定してください。
+
+デフォルトでは、検証済みトークンの状態は `/data/tokens.json` に永続化されます。通常運用では **gateway を再起動しても MCP クライアント（VS Code、Claude Desktop など）の再認証は不要です**。
 
 ストアパスを変更したい場合は `MCP_GATEWAY_TOKEN_STORE_PATH` を設定します。永続化を無効にしてインメモリのみに戻す場合（本番環境では非推奨）は空文字を設定します：
 
 ```bash
-MCP_GATEWAY_TOKEN_STORE_PATH=/data/tokens.json  # デフォルト
+MCP_GATEWAY_TOKEN_STORE_PATH=/data/tokens.json  # デフォルト（Docker）
+MCP_GATEWAY_TOKEN_STORE_PATH=./tokens.json       # ローカル実行時
 MCP_GATEWAY_TOKEN_STORE_PATH=                   # 永続化を無効化（非推奨）
 ```
 
