@@ -52,22 +52,26 @@ ROUTE_PUBLIC=/public|http://public-svc:8083|auth=none
 |------|-----------|------|
 | `MCP_GATEWAY_BASE_URL` | `http://localhost:8080` | OAuth コールバック等に使用するベース URL |
 | `MCP_GATEWAY_PORT` | `8080` | リスンポート |
-| `MCP_GATEWAY_TOKEN_STORE_PATH` | *(空)* | 永続トークンストアのファイルパス（[認証状態の永続化](#認証状態の永続化) 参照） |
+| `MCP_GATEWAY_TOKEN_STORE_PATH` | `/data/tokens.json` | 永続トークンストアのファイルパス（[認証状態の永続化](#認証状態の永続化) 参照） |
 | `GITHUB_MCP_OAUTH_SCOPES` | `repo,user` | GitHub OAuth スコープ |
 | `LOG_LEVEL` | `info` | ログレベル (`debug`/`info`/`warn`/`error`) |
 | `SESSION_TTL_MIN` | `10` | OAuth セッション有効期間（分） |
-| `TOKEN_CACHE_TTL_MIN` | `30` | トークン検証キャッシュ TTL（分）— `MCP_GATEWAY_TOKEN_STORE_PATH` 未設定時のみ使用 |
+| `TOKEN_CACHE_TTL_MIN` | `30` | トークン検証キャッシュ TTL（分）— `MCP_GATEWAY_TOKEN_STORE_PATH` を空文字に明示設定した場合のみ使用 |
 | `TOKEN_EXPIRES_IN_SEC` | `7776000` | クライアントへ通知するトークン有効期限（秒、デフォルト 90 日）。永続ストアのエントリ TTL にも使用 |
 | `GITHUB_MCP_UPSTREAM_URL` | — | **非推奨**: 単一アップストリーム（`ROUTE_*` 未設定時のフォールバック） |
 
 ### 認証状態の永続化
 
-デフォルトでは、検証済みトークンの状態はプロセスメモリにのみ保持されます。そのため、gateway を再起動するたびに MCP クライアント（VS Code、Claude Desktop など）はブラウザの OAuth フローをやり直す必要があります。
+> **Docker デフォルト:** デフォルトのストアパス `/data/tokens.json` は Docker 運用向けです。Docker イメージは `/data` を適切なパーミッションで事前作成しています。Docker 以外（`go run` やバイナリ直接実行）では `/data` が存在しないため起動に失敗します。その場合は `MCP_GATEWAY_TOKEN_STORE_PATH` を書き込み可能なパス（例: `./tokens.json`）に設定するか、永続化を無効にするため空文字を設定してください。
 
-これを防ぐには `MCP_GATEWAY_TOKEN_STORE_PATH` に書き込み可能なファイルパスを設定します：
+デフォルトでは、検証済みトークンの状態は `/data/tokens.json` に永続化されます。通常運用では **gateway を再起動しても MCP クライアント（VS Code、Claude Desktop など）の再認証は不要です**。
+
+ストアパスを変更したい場合は `MCP_GATEWAY_TOKEN_STORE_PATH` を設定します。永続化を無効にしてインメモリのみに戻す場合（本番環境では非推奨）は空文字を設定します：
 
 ```bash
-MCP_GATEWAY_TOKEN_STORE_PATH=/data/tokens.json
+MCP_GATEWAY_TOKEN_STORE_PATH=/data/tokens.json  # デフォルト（Docker）
+MCP_GATEWAY_TOKEN_STORE_PATH=./tokens.json       # ローカル実行時
+MCP_GATEWAY_TOKEN_STORE_PATH=                   # 永続化を無効化（非推奨）
 ```
 
 設定すると gateway は以下を行います：

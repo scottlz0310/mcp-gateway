@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -27,14 +28,37 @@ type upstreamErrorer interface {
 	IsUpstreamError() bool
 }
 
+// authOptions holds optional configuration for the Auth middleware.
+type authOptions struct {
+	baseURL string
+}
+
+// AuthOption configures the Auth middleware.
+type AuthOption func(*authOptions)
+
+// WithBaseURL sets the gateway base URL so that 401 responses include a
+// resource_metadata parameter in the WWW-Authenticate header (RFC 9728)
+// pointing to /.well-known/oauth-protected-resource. This enables MCP
+// clients to discover the gateway OAuth flow for re-authentication instead
+// of falling back to alternative auth methods (e.g. gh CLI).
+func WithBaseURL(u string) AuthOption {
+	return func(o *authOptions) { o.baseURL = strings.TrimRight(u, "/") }
+}
+
 // Auth returns a middleware that validates Bearer tokens via the configured
 // OAuth provider.
-func Auth(v TokenValidator) func(http.Handler) http.Handler {
+func Auth(v TokenValidator, opts ...AuthOption) func(http.Handler) http.Handler {
+	var options authOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			token := extractBearer(r)
 			if token == "" {
-				writeUnauthorized(w, "missing_token")
+				writeUnauthorized(w, "invalid_request",
+					"No access token provided. Authenticate via the gateway OAuth flow.",
+					options.baseURL)
 				return
 			}
 
@@ -45,11 +69,16 @@ func Auth(v TokenValidator) func(http.Handler) http.Handler {
 					slog.Error("upstream error during auth", "err", err, "path", r.URL.Path)
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(http.StatusServiceUnavailable)
-					_ = json.NewEncoder(w).Encode(map[string]string{"error": "upstream_error"})
+					_ = json.NewEncoder(w).Encode(map[string]string{
+						"error":             "upstream_error",
+						"error_description": "The upstream MCP server is temporarily unavailable. Please try again later.",
+					})
 					return
 				}
 				slog.Warn("auth failed", "err", err, "path", r.URL.Path)
-				writeUnauthorized(w, "invalid_token")
+				writeUnauthorized(w, "invalid_token",
+					"Access token expired or invalid. Re-authenticate via the gateway OAuth flow.",
+					options.baseURL)
 				return
 			}
 
@@ -60,11 +89,31 @@ func Auth(v TokenValidator) func(http.Handler) http.Handler {
 	}
 }
 
-func writeUnauthorized(w http.ResponseWriter, errCode string) {
+// writeUnauthorized writes an RFC 6750 §3.1 compliant 401 Unauthorized response.
+// For token validation failures (invalid_token), the WWW-Authenticate header
+// includes error and error_description attributes.
+// When baseURL is non-empty, resource_metadata (RFC 9728) is added to guide
+// MCP clients to the gateway's OAuth re-authentication flow.
+func writeUnauthorized(w http.ResponseWriter, errCode, errDesc, baseURL string) {
+	parts := []string{`Bearer realm="mcp-gateway"`}
+	if errCode == "invalid_token" {
+		// By design, error= is only included for token validation failures (invalid_token).
+		// For missing-token requests (invalid_request), we intentionally omit error= to avoid
+		// leaking that a credential is required on unauthenticated probes.
+		parts = append(parts, fmt.Sprintf(`error=%q, error_description=%q`, errCode, errDesc))
+	}
+	if baseURL != "" {
+		parts = append(parts, fmt.Sprintf(`resource_metadata=%q`, baseURL+"/.well-known/oauth-protected-resource"))
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("WWW-Authenticate", `Bearer realm="mcp-gateway"`)
+	w.Header().Set("WWW-Authenticate", strings.Join(parts, ", "))
 	w.WriteHeader(http.StatusUnauthorized)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": errCode})
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"error":             errCode,
+		"error_description": errDesc,
+	})
 }
 
 func extractBearer(r *http.Request) string {

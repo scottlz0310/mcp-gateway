@@ -79,11 +79,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	authMiddleware := middleware.Auth(oauthHandler)
+	authMiddleware := middleware.Auth(oauthHandler, middleware.WithBaseURL(cfg.baseURL))
 
 	mux := http.NewServeMux()
 
 	// OAuth façade endpoints (no auth required).
+	mux.HandleFunc("GET /.well-known/oauth-protected-resource", oauthHandler.ProtectedResourceMetadata)
 	mux.HandleFunc("GET /.well-known/oauth-authorization-server", oauthHandler.Discovery)
 	mux.HandleFunc("GET /authorize", oauthHandler.Authorize)
 	mux.HandleFunc("GET /callback", oauthHandler.Callback)
@@ -164,7 +165,7 @@ func loadConfig() config {
 		sessionTTLMin:      getEnvInt("SESSION_TTL_MIN", 10),
 		tokenCacheTTLMin:   getEnvInt("TOKEN_CACHE_TTL_MIN", 30),
 		tokenExpiresInSec:  getEnvInt("TOKEN_EXPIRES_IN_SEC", 7776000), // 90 days
-		tokenStorePath:     getEnv("MCP_GATEWAY_TOKEN_STORE_PATH", ""),
+		tokenStorePath:     lookupEnv("MCP_GATEWAY_TOKEN_STORE_PATH", "/data/tokens.json"),
 	}
 }
 
@@ -180,6 +181,16 @@ func mustEnv(key string) string {
 func getEnv(key, fallback string) string {
 	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
 		return v
+	}
+	return fallback
+}
+
+// lookupEnv returns the trimmed env value if the variable is set (even if empty),
+// otherwise returns fallback. Use instead of getEnv when an empty value has meaning
+// (e.g. MCP_GATEWAY_TOKEN_STORE_PATH="" disables persistence).
+func lookupEnv(key, fallback string) string {
+	if v, ok := os.LookupEnv(key); ok {
+		return strings.TrimSpace(v)
 	}
 	return fallback
 }

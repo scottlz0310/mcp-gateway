@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -39,7 +40,7 @@ func TestAuthMissingToken(t *testing.T) {
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("status: got %d, want %d", w.Code, http.StatusUnauthorized)
 	}
-	assertJSONError(t, w, "missing_token")
+	assertJSONError(t, w, "invalid_request")
 	assertWWWAuthenticate(t, w)
 }
 
@@ -106,6 +107,9 @@ func assertJSONError(t *testing.T, w *httptest.ResponseRecorder, wantCode string
 	if body["error"] != wantCode {
 		t.Errorf("error field: got %q, want %q", body["error"], wantCode)
 	}
+	if body["error_description"] == "" {
+		t.Error("error_description field missing or empty")
+	}
 }
 
 func assertWWWAuthenticate(t *testing.T, w *httptest.ResponseRecorder) {
@@ -113,5 +117,50 @@ func assertWWWAuthenticate(t *testing.T, w *httptest.ResponseRecorder) {
 	h := w.Header().Get("WWW-Authenticate")
 	if h == "" {
 		t.Error("WWW-Authenticate header missing")
+	}
+}
+
+func TestAuthMissingTokenWithBaseURL(t *testing.T) {
+	h := Auth(&mockValidator{login: "alice"}, WithBaseURL("https://gateway.example.com"))(http.HandlerFunc(okHandler))
+	r := httptest.NewRequest(http.MethodGet, "/mcp", nil)
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status: got %d, want %d", w.Code, http.StatusUnauthorized)
+	}
+	wwwAuth := w.Header().Get("WWW-Authenticate")
+	if !strings.Contains(wwwAuth, "resource_metadata") {
+		t.Errorf("WWW-Authenticate missing resource_metadata: %q", wwwAuth)
+	}
+	if strings.Contains(wwwAuth, `error="invalid_request"`) {
+		t.Errorf("WWW-Authenticate should not include error= for missing token (design choice): %q", wwwAuth)
+	}
+}
+
+func TestAuthInvalidTokenWithBaseURL(t *testing.T) {
+	h := Auth(&mockValidator{err: fmt.Errorf("bad token")}, WithBaseURL("https://gateway.example.com"))(http.HandlerFunc(okHandler))
+	r := httptest.NewRequest(http.MethodGet, "/mcp", nil)
+	r.Header.Set("Authorization", "Bearer bad-token")
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status: got %d, want %d", w.Code, http.StatusUnauthorized)
+	}
+	wwwAuth := w.Header().Get("WWW-Authenticate")
+	if !strings.Contains(wwwAuth, `error="invalid_token"`) {
+		t.Errorf("WWW-Authenticate missing error=invalid_token: %q", wwwAuth)
+	}
+	if !strings.Contains(wwwAuth, "error_description") {
+		t.Errorf("WWW-Authenticate missing error_description: %q", wwwAuth)
+	}
+	if !strings.Contains(wwwAuth, "resource_metadata") {
+		t.Errorf("WWW-Authenticate missing resource_metadata: %q", wwwAuth)
+	}
+	if !strings.Contains(wwwAuth, "/.well-known/oauth-protected-resource") {
+		t.Errorf("WWW-Authenticate resource_metadata should point to /.well-known/oauth-protected-resource: %q", wwwAuth)
 	}
 }
