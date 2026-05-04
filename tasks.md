@@ -11,7 +11,7 @@
 
 ---
 
-## 推奨消化順（2026-04-30 更新）
+## 推奨消化順（2026-05-04 更新）
 
 ### Phase 1 — 今すぐ着手（コード変更不要）
 
@@ -25,14 +25,14 @@
 | 優先 | ISSUE | 状態/理由 |
 |---|---|---|
 | 3 | **mcp-gateway #16** Device Flow 直列化 | ✅ 完了（PR #31 マージ済み） |
-| 4 | **copilot-review-mcp #12** AUTH_MODE=gateway | #19 で二重検証が問題になる場合に対処。変更量は小 |
-| 5 | **mcp-gateway #15** ユーザーホワイトリスト | 運用上の需要が出たタイミングで |
+| 4 | **copilot-review-mcp #12** AUTH_MODE=gateway | ✅ 完了（2026-05-04） |
+| 5 | **mcp-gateway #15** ユーザーホワイトリスト | ⏭️ SKIP（ローカル Docker 運用継続、ホスティング移行時に再評価） |
 
 ### Phase 3 — インフラ整備（長期）
 
 | 優先 | ISSUE | 理由 |
 |---|---|---|
-| 6 | **mcp-gateway #11** Config Persistence | 大きめ。Phase 2 が安定してから |
+| 6 | **mcp-gateway #11** Config Persistence | 🎯 次ターゲット。暗号化方式の技術選択が先決 |
 | 7 | **mcp-gateway #12** Setup Wizard | #11 完了が前提 |
 
 ### 保留維持
@@ -117,7 +117,7 @@ copilot-review-mcp 側のコード変更ゼロで、`ROUTE_COPILOT_REVIEW=/mcp/c
 
 #### [copilot-review-mcp #12 feat: AUTH_MODE=gateway 対応（mcp-gateway 経由モード・二重検証の排除）](https://github.com/scottlz0310/copilot-review-mcp/issues/12)
 
-**状態**: 未着手（#19 動作確認後に着手）
+**状態**: ✅ 完了（2026-05-04）
 **リポジトリ**: `scottlz0310/copilot-review-mcp`
 **依存**: mcp-gateway #19
 
@@ -156,24 +156,187 @@ copilot-review-mcp 側のコード変更ゼロで、`ROUTE_COPILOT_REVIEW=/mcp/c
 
 ### [#11 feat: Config Persistence Layer（env vars → YAML/SQLite 設定ファイル）](https://github.com/scottlz0310/mcp-gateway/issues/11)
 
-**状態**: 保留
+**状態**: 🎯 次ターゲット（技術選択フェーズ）
 **依存**: なし（独立着手可能）
 
-> **保留理由（2026-04-30）**: Docker 運用継続中は env var で十分機能しており YAGNI。
-> ホスティング移行やマルチユーザー運用が現実になったタイミングで再評価する。
-> SQLite・管理画面・Setup Wizard はそれ以降に検討（過剰設計を避ける）。
+> **方針変更（2026-05-04）**: ローカル Docker 運用継続を前提に着手。
+> コンテナ起動時に `GITHUB_MCP_CLIENT_SECRET` 等が必須なため、これを config ファイルに永続化し
+> 再起動時に env var 不要にすることを目的とする。
+> SQLite・管理画面は引き続き後回し。まず YAML + シークレット暗号化 に絞る。
 
-`mustEnv` によるクラッシュを撤廃し、設定を YAML / SQLite で永続管理する。env vars はオーバーライド手段として維持（12-factor 互換）。
+`mustEnv` によるクラッシュを撤廃し、設定を YAML で永続管理する。env vars はオーバーライド手段として維持（12-factor 互換）。
+
+#### シークレット暗号化 — 技術選択（2026-05-04 確定）
+
+**暗号化対象フィールド**
+
+| フィールド | env var | 暗号化 |
+|---|---|---|
+| GitHub OAuth Client Secret | `GITHUB_MCP_CLIENT_SECRET` | ✅ 必須暗号化 |
+| GitHub OAuth Client ID | `GITHUB_MCP_CLIENT_ID` | ❌ 平文（OAuth 安全モデル上公開前提） |
+| tokens.json | — | ❌ 対象外（今回のスコープ外） |
+| 将来の追加プロバイダ credential | TBD | ✅ 同様の方針で対応 |
+
+**採用ライブラリ: `filippo.io/age`（X25519）**
+
+**キー管理方針（優先順位）**
+
+```
+優先順位:  gateway.key  >  MCP_GATEWAY_MASTER_KEY  >  自動生成
+
+1. /data/gateway.key が存在する → パース・検証して使用（MCP_GATEWAY_MASTER_KEY は無視）
+   ⛔ 存在するが読み取り不能・形式不正・空ファイル・パース失敗の場合は
+      自動再生成・上書きを一切行わない。明確なエラーで起動を停止する。
+      slog.Error("gateway.key exists but is invalid; refusing to overwrite to avoid data loss", "path", path, "err", err)
+      os.Exit(1)
+      ★ 新規生成してよいのは「gateway.key が存在しない」場合だけ。
+
+2. 存在しない + MCP_GATEWAY_MASTER_KEY が設定されている
+   → age のネイティブ API / 標準フォーマットに従って X25519 identity を
+     決定論的に導出 → /data/gateway.key（age 標準 identity 文字列形式）として保存
+     ※ HKDF 出力を雑に private key として扱う独自実装は行わない
+     ※ filippo.io/age の公開 API・bech32 フォーマットに沿った実装とする
+     ※ PoC で API を確認してから実装方法を確定する
+     ※ 同じ master key からは毎回同じ identity が生成されること（決定論的性の保証）
+     ※ 別の master key では復号できないこと（PoC で検証する）
+     ※ MCP_GATEWAY_MASTER_KEY は最低 32 bytes 相当の長さを要求する
+       → 短い値・空文字・最低長未満はエラーにする
+       slog.Error("MCP_GATEWAY_MASTER_KEY must be at least 32 bytes")
+       os.Exit(1)
+       （厳密な強度判定は不要。長さチェックのみ）
+
+3. どちらも無い → age.GenerateX25519Identity() で新規生成 → /data/gateway.key 保存
+
+⚠️  gateway.key が存在する場合は MCP_GATEWAY_MASTER_KEY を無視する
+    （誤ってキーを変えることで復号不能になる事故を防止）
+⚠️  gateway.key を失った場合、既存の暗号化済み config は復号不能。
+    MCP_GATEWAY_MASTER_KEY を使って派生させた場合は同じ値で再生成可能。
+    → README に「キーファイルのバックアップは Docker volume のバックアップと同義」と明記する。
+```
+
+**gateway.key のファイル形式**
+
+```
+age の標準 identity 文字列形式（テキスト）で保存する。
+独自バイナリ形式・独自 JSON 形式・独自 Base64 形式は使わない。
+
+標準形式の例（age-keygen の出力と同じ）:
+  # created: 2026-05-04T22:00:00+09:00
+  # public key: age1xxxx...
+  AGE-SECRET-KEY-1XXXX...
+
+これにより age CLI ツールとの互換性が保たれ、手動での確認・バックアップが容易。
+```
+
+**env var 命名**
+
+```
+MCP_GATEWAY_MASTER_KEY  ← 正式名（優先）
+MCP_MASTER_KEY          ← 互換 alias（どちらも設定されている場合は MCP_GATEWAY_MASTER_KEY を優先）
+```
+
+README に以下を明記する：
+- 十分に長いランダム値（推奨: 32 bytes base64）を使用すること
+- 漏えいした場合は gateway.key が失われていなければ即座に影響はないが、
+  gateway.key の再生成には使用されるため漏えい時は MCP_GATEWAY_MASTER_KEY を変更し
+  gateway.key を削除して再初期化すること
+- gateway.key が存在する場合は MCP_GATEWAY_MASTER_KEY は無視されること
+
+**ファイルパーミッション**
+
+```
+/data/gateway.key: mode 0600 で保存（os.WriteFile / os.Chmod）
+  → Linux/macOS: 0600 が有効
+  → Windows volume 等で chmod が効かない場合: 警告ログを出力してベストエフォートで続行
+    slog.Warn("could not set restrictive permissions on key file", "path", path, "err", err)
+    ※ err メッセージのみ。キー内容はログに出さない
+```
+
+**シークレットのログ出力禁止ルール**
+
+以下を絶対にログに出さない：
+- シークレット値の平文（`GITHUB_MCP_CLIENT_SECRET` 等）
+- 復号後の値
+- env var の値
+- `/data/gateway.key` の内容
+- `ENC[...]` の全文
+
+エラーログには「フィールド名」「ファイルパス」「エラー種別」のみ含める。
+
+**config.yaml の secret フィールド移行ロジック（起動時に毎回評価）**
+
+```
+github_client_secret の値を確認:
+
+1. "ENC[age1...]" 形式 → age で復号して使用
+2. 平文が config.yaml にある → age で暗号化して config.yaml に書き戻し、再起動なしで続行
+3. config.yaml にキー自体が無い or 空
+   → GITHUB_MCP_CLIENT_SECRET env var を確認
+   → env var が設定されている → age で暗号化して config.yaml に保存し続行
+   → env var も無い → 明確なエラーで起動失敗
+     slog.Error("github_client_secret is required: set GITHUB_MCP_CLIENT_SECRET env var or provide an encrypted value in config.yaml")
+     os.Exit(1)
+```
+
+**ファイルレイアウト（/data/ volume）**
+
+```
+/data/
+  gateway.key    ← age X25519 秘密鍵（mode 0600）← 必ず volume mount 対象
+  config.yaml    ← github_client_secret: "ENC[age1...]" を含む YAML
+  tokens.json    ← 既存（変更なし・今回のスコープ外）
+```
+
+**config.yaml イメージ**
+
+```yaml
+auth:
+  github_client_id: "Ov23liXXXXXX"        # 平文
+  github_client_secret: "ENC[age1AAAA...]" # age 暗号化済み
+gateway:
+  base_url: "http://localhost:8080"
+  port: "8080"
+  oauth_scopes: "repo,user"
+```
 
 #### サブタスク
 
-- [ ] `internal/config/` パッケージ新設（Config 構造体・YAML 読み書き・env override マージ）
-- [ ] 設定ファイルパス解決（`MCP_CONFIG_FILE` env > XDG > デフォルト）
+- [x] 暗号化ライブラリ・キー管理方針・追加制約の技術選択（完了）
+- [ ] `filippo.io/age` を go.mod に追加（`go get filippo.io/age`）と PoC
+  - age の公開 API で X25519 identity を master key から決定論的に生成する方法を確認
+  - bech32 フォーマット経由が最適か `age.NewScryptIdentity` 系か検討
+  - **PoC で検証すること（運用事故チェックリスト）**:
+    1. 同じ master key から毎回同じ identity が得られること（決定論的性）
+    2. 別の master key では復号できないこと
+    3. gateway.key の標準 age identity 文字列形式での保存・読み込みが往復で一致すること
+    4. gateway.key が不正形式・空・存在するが読み取り不能の場合に起動エラーになること（上書きしないこと）
+- [ ] `internal/config/` パッケージ新設
+  - Config 構造体・YAML 読み書き（`gopkg.in/yaml.v3`）
+  - `LoadKey(keyPath, masterKey string) (*age.X25519Identity, error)` — 優先順位でキーを解決・保存
+    - gateway.key 破損時は `errKeyCorrupt` 系エラーを返し、呼び出し元で `os.Exit(1)`
+    - MCP_GATEWAY_MASTER_KEY の長さが 32 bytes 未満の場合はエラー
+  - `EncryptField(identity, plaintext string) (string, error)` — `ENC[age1...]` 形式
+  - `DecryptField(identity, ciphertext string) (string, error)` — フィールド復号
+  - `MigrateSecret(cfg *Config, identity) error` — 移行ロジック（上記 3 ケース）
+  - env override マージ（12-factor 互換）
+  - 0600 ファイル保存・Windows ベストエフォート警告
+  - ログ出力禁止ルールに従うこと（シークレット値を一切 slog に渡さない）
+- [ ] 設定ファイルパス解決（`MCP_CONFIG_FILE` env > `/data/config.yaml`）
 - [ ] `cmd/server/main.go` の `mustEnv` を config ロードに置き換え
+  - `MCP_GATEWAY_MASTER_KEY` / `MCP_MASTER_KEY` alias の読み込み
 - [ ] `internal/router/router.go` の `ParseEnv()` を config ベース実装に切り替え
-- [ ] SQLite ルートストアの設計・実装（CRUD）
-- [ ] `internal/auth/session.go` のトークン永続化対応
-- [ ] テスト / README.md / CHANGELOG.md 更新
+- [ ] テスト — 以下のケースをすべてカバーすること:
+  - `gateway.key` あり + env var あり → `gateway.key` 優先・env var は無視
+  - `gateway.key` なし + `MCP_GATEWAY_MASTER_KEY` あり → 決定論的に生成・保存（同じ key で再実行すると同じ identity）
+  - `gateway.key` なし + env var なし → ランダム生成・保存
+  - `gateway.key` 不正（空・形式不正・権限エラー）→ 自動上書きせずエラー終了
+  - `ENC[...]` 復号成功
+  - 平文 secret が config.yaml にある → 暗号化して書き戻し
+  - secret なし + `GITHUB_MCP_CLIENT_SECRET` env var あり → 暗号化保存
+  - secret なし + env var なし → 明確なエラー
+  - ログに secret 値・ENC 全文・key 内容が含まれないこと
+  - `MCP_GATEWAY_MASTER_KEY` が 32 bytes 未満 → エラー
+- [ ] README.md（キーバックアップ警告・`MCP_GATEWAY_MASTER_KEY` のリスク・最低長・gateway.key 破損時の対応） / CHANGELOG.md 更新
 
 ---
 
