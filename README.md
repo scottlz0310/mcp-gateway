@@ -36,12 +36,95 @@ mcp-gateway  :8080
 
 ### Required Environment Variables
 
-| Variable | Description |
-|----------|-------------|
-| `GITHUB_MCP_CLIENT_ID` | GitHub OAuth App Client ID |
-| `GITHUB_MCP_CLIENT_SECRET` | GitHub OAuth App Client Secret |
+At startup, the gateway resolves the GitHub OAuth credentials using the following priority:
+
+| Source | `GITHUB_MCP_CLIENT_ID` | `GITHUB_MCP_CLIENT_SECRET` |
+|--------|------------------------|---------------------------|
+| **env var** | `GITHUB_MCP_CLIENT_ID` | `GITHUB_MCP_CLIENT_SECRET` |
+| **config.yaml** | `auth.github_client_id` | `auth.github_client_secret` (may be `ENC[age:]...`) |
 
 At least one route must also be configured via `ROUTE_<NAME>` (see below) — the server exits on startup if no routes are defined.
+
+### Secret Encryption
+
+The gateway can store the GitHub OAuth client secret **encrypted at rest** in `config.yaml` using [age](https://age-encryption.org/) X25519 encryption.
+
+#### How it works
+
+On startup, the gateway:
+
+1. Loads (or generates) an X25519 key from `gateway.key` (path: `MCP_GATEWAY_KEY_PATH`, default `./gateway.key`)
+2. Reads `config.yaml` (`MCP_CONFIG_FILE`, default `./config.yaml`) if it exists
+3. Resolves `github_client_secret` using this priority:
+   - `ENC[age:]...` in `config.yaml` → decrypts and uses the plaintext
+   - Plaintext in `config.yaml` → encrypts it, rewrites the file, uses the plaintext
+   - No secret in config + `GITHUB_MCP_CLIENT_SECRET` env var → encrypts it, writes to config, uses the plaintext
+   - Neither → startup fails with a clear error message
+
+Secrets are **never logged** — neither the plaintext value, nor the `ENC[...]` ciphertext, nor the key contents.
+
+#### Key file (`gateway.key`)
+
+The key file stores a standard `age-keygen`-compatible X25519 identity string (`AGE-SECRET-KEY-1...`).
+
+**Generation priority:**
+
+| Condition | Result |
+|-----------|--------|
+| `gateway.key` exists | Load and use as-is; `MCP_GATEWAY_MASTER_KEY` is **ignored** |
+| `gateway.key` absent + `MCP_GATEWAY_MASTER_KEY` set | Deterministically derive X25519 key via HKDF-SHA256; save to file |
+| `gateway.key` absent + no master key | Generate a random X25519 key; save to file |
+
+> **⚠ Corruption is fatal.** If `gateway.key` exists but is empty, unreadable, or malformed, the gateway will **not** regenerate it — it will exit immediately. This protects against accidental data loss (overwriting the key would permanently destroy any encrypted secrets in `config.yaml`). To recover, restore `gateway.key` from backup or re-encrypt `config.yaml` with a known key.
+
+The file is written with `0600` permissions. On Windows volumes where `chmod` is not supported, a warning is logged.
+
+**Back up `gateway.key` securely.** If the key file is lost and `MCP_GATEWAY_MASTER_KEY` was not used (random generation), the encrypted secrets in `config.yaml` cannot be recovered.
+
+#### `MCP_GATEWAY_MASTER_KEY`
+
+When set, the master key is used to deterministically derive the X25519 key (HKDF-SHA256). This enables secret encryption without a separate key file backup — the same master key always produces the same `gateway.key`.
+
+**Requirements:**
+- Minimum **32 bytes** — shorter values are rejected at startup
+- Use a sufficiently random value (e.g. output of `openssl rand -hex 32`)
+- **Leaked master key = leaked derived key = encrypted secrets can be decrypted** — treat it as a secret
+
+> Once `gateway.key` exists, `MCP_GATEWAY_MASTER_KEY` is ignored. It is only used when generating the key file for the first time.
+
+`MCP_MASTER_KEY` is accepted as a legacy alias for `MCP_GATEWAY_MASTER_KEY`.
+
+#### Example `config.yaml`
+
+```yaml
+auth:
+  github_client_id: "Ov23liXXXX"
+  github_client_secret: "ENC[age:]<base64-ciphertext>"
+gateway:
+  base_url: "http://localhost:8080"
+  port: "8080"
+  oauth_scopes: "repo,user"
+```
+
+All `gateway:` fields are optional — values fall back to the corresponding env vars and then to the built-in defaults.
+
+#### Docker Compose setup
+
+```yaml
+services:
+  mcp-gateway:
+    volumes:
+      - ./data:/data
+    environment:
+      MCP_GATEWAY_KEY_PATH: /data/gateway.key
+      MCP_CONFIG_FILE: /data/config.yaml
+      # On first run only — omit once gateway.key exists:
+      # MCP_GATEWAY_MASTER_KEY: "${MCP_GATEWAY_MASTER_KEY}"
+      GITHUB_MCP_CLIENT_ID: "${GITHUB_MCP_CLIENT_ID}"
+      # GITHUB_MCP_CLIENT_SECRET only needed on first run to seed config.yaml:
+      # GITHUB_MCP_CLIENT_SECRET: "${GITHUB_MCP_CLIENT_SECRET}"
+```
+
 
 ### Route Configuration
 
@@ -65,6 +148,9 @@ ROUTE_COPILOT_REVIEW=/mcp/copilot-review|http://copilot-review-mcp:8083
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `MCP_GATEWAY_KEY_PATH` | `./gateway.key` | Path to the X25519 encryption key file (see [Secret Encryption](#secret-encryption)) |
+| `MCP_CONFIG_FILE` | `./config.yaml` | Path to `config.yaml` for persisted configuration |
+| `MCP_GATEWAY_MASTER_KEY` | — | Master key for deterministic key derivation (≥32 bytes; see [Secret Encryption](#secret-encryption)) |
 | `MCP_GATEWAY_BASE_URL` | `http://localhost:8080` | Base URL used for OAuth callback and discovery metadata |
 | `MCP_GATEWAY_PORT` | `8080` | Listen port |
 | `MCP_GATEWAY_TOKEN_STORE_PATH` | `/data/tokens.json` | Path to the persistent token store file (see [Persistent Auth State](#persistent-auth-state)) |

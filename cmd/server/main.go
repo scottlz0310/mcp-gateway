@@ -12,6 +12,7 @@ import (
 
 	"github.com/scottlz0310/mcp-gateway/internal/auth"
 	"github.com/scottlz0310/mcp-gateway/internal/auth/provider"
+	appconfig "github.com/scottlz0310/mcp-gateway/internal/config"
 	"github.com/scottlz0310/mcp-gateway/internal/middleware"
 	"github.com/scottlz0310/mcp-gateway/internal/proxy"
 	"github.com/scottlz0310/mcp-gateway/internal/router"
@@ -24,6 +25,40 @@ func main() {
 	})))
 
 	cfg := loadConfig()
+
+	// Load or generate the encryption key.
+	masterKey := []byte(getEnv("MCP_GATEWAY_MASTER_KEY", os.Getenv("MCP_MASTER_KEY")))
+	if len(strings.TrimSpace(string(masterKey))) == 0 {
+		masterKey = nil
+	}
+	km, err := appconfig.LoadKey(cfg.keyPath, masterKey)
+	if err != nil {
+		slog.Error("failed to load gateway encryption key", "path", cfg.keyPath, "err", err)
+		os.Exit(1)
+	}
+
+	// Load YAML config and resolve the GitHub client secret.
+	appCfg, err := appconfig.LoadConfig(cfg.configPath)
+	if err != nil {
+		slog.Error("failed to load config file", "path", cfg.configPath, "err", err)
+		os.Exit(1)
+	}
+
+	githubClientSecret, err := appconfig.MigrateSecret(cfg.configPath, appCfg, km)
+	if err != nil {
+		slog.Error("github_client_secret is unavailable", "err", err)
+		os.Exit(1)
+	}
+
+	// GitHub client ID: env var takes precedence over config file.
+	githubClientID := getEnv("GITHUB_MCP_CLIENT_ID", appCfg.Auth.GitHubClientID)
+	if strings.TrimSpace(githubClientID) == "" {
+		slog.Error("required value not set: provide GITHUB_MCP_CLIENT_ID env var or auth.github_client_id in config.yaml")
+		os.Exit(1)
+	}
+
+	cfg.githubClientID = githubClientID
+	cfg.githubClientSecret = githubClientSecret
 
 	routes, err := router.ParseEnv()
 	if err != nil {
@@ -151,31 +186,25 @@ type config struct {
 	tokenCacheTTLMin   int
 	tokenExpiresInSec  int
 	tokenStorePath     string
+	keyPath            string
+	configPath         string
 }
 
 func loadConfig() config {
 	return config{
-		githubClientID:     mustEnv("GITHUB_MCP_CLIENT_ID"),
-		githubClientSecret: mustEnv("GITHUB_MCP_CLIENT_SECRET"),
-		baseURL:            getEnv("MCP_GATEWAY_BASE_URL", "http://localhost:8080"),
-		oauthScopes:        getEnv("GITHUB_MCP_OAUTH_SCOPES", "repo,user"),
-		port:               getEnv("MCP_GATEWAY_PORT", "8080"),
-		logLevel:           getEnv("LOG_LEVEL", "info"),
-		upstreamURL:        getEnv("GITHUB_MCP_UPSTREAM_URL", ""),
-		sessionTTLMin:      getEnvInt("SESSION_TTL_MIN", 10),
-		tokenCacheTTLMin:   getEnvInt("TOKEN_CACHE_TTL_MIN", 30),
-		tokenExpiresInSec:  getEnvInt("TOKEN_EXPIRES_IN_SEC", 7776000), // 90 days
-		tokenStorePath:     lookupEnv("MCP_GATEWAY_TOKEN_STORE_PATH", "/data/tokens.json"),
+		// githubClientID and githubClientSecret are resolved after key/config loading in main().
+		baseURL:           getEnv("MCP_GATEWAY_BASE_URL", "http://localhost:8080"),
+		oauthScopes:       getEnv("GITHUB_MCP_OAUTH_SCOPES", "repo,user"),
+		port:              getEnv("MCP_GATEWAY_PORT", "8080"),
+		logLevel:          getEnv("LOG_LEVEL", "info"),
+		upstreamURL:       getEnv("GITHUB_MCP_UPSTREAM_URL", ""),
+		sessionTTLMin:     getEnvInt("SESSION_TTL_MIN", 10),
+		tokenCacheTTLMin:  getEnvInt("TOKEN_CACHE_TTL_MIN", 30),
+		tokenExpiresInSec: getEnvInt("TOKEN_EXPIRES_IN_SEC", 7776000), // 90 days
+		tokenStorePath:    lookupEnv("MCP_GATEWAY_TOKEN_STORE_PATH", "/data/tokens.json"),
+		keyPath:           getEnv("MCP_GATEWAY_KEY_PATH", "./gateway.key"),
+		configPath:        getEnv("MCP_CONFIG_FILE", "./config.yaml"),
 	}
-}
-
-func mustEnv(key string) string {
-	v := strings.TrimSpace(os.Getenv(key))
-	if v == "" {
-		slog.Error("required environment variable not set", "key", key)
-		os.Exit(1)
-	}
-	return v
 }
 
 func getEnv(key, fallback string) string {
