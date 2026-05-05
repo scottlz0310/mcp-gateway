@@ -10,10 +10,25 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// RouteConfig holds a single proxy route that can be persisted in config.yaml.
+type RouteConfig struct {
+	Name     string `yaml:"name"             json:"name"`
+	Prefix   string `yaml:"prefix"           json:"prefix"`
+	Upstream string `yaml:"upstream"         json:"upstream"`
+	NoAuth   bool   `yaml:"no_auth,omitempty" json:"no_auth,omitempty"`
+}
+
+// SetupConfig holds first-run wizard state.
+type SetupConfig struct {
+	Completed bool `yaml:"completed,omitempty"`
+}
+
 // AppConfig is the application configuration stored in config.yaml.
 type AppConfig struct {
 	Auth    AuthConfig    `yaml:"auth,omitempty"`
 	Gateway GatewayConfig `yaml:"gateway,omitempty"`
+	Routes  []RouteConfig `yaml:"routes,omitempty"`
+	Setup   SetupConfig   `yaml:"setup,omitempty"`
 }
 
 // AuthConfig holds OAuth client credentials.
@@ -49,9 +64,9 @@ func LoadConfig(path string) (*AppConfig, error) {
 // SaveConfig writes cfg to path with 0600 permissions using an atomic temp-file+rename.
 //
 // Note: because AppConfig is a narrow struct, any YAML fields not defined in AppConfig
-// (unknown keys, user-added comments) will be lost on rewrite. SaveConfig is only called
-// during secret migration (first startup with a plaintext or env-var secret), so manual
-// edits to config.yaml should be made after the initial migration run.
+// (unknown keys, user-added comments) will be lost on rewrite. SaveConfig is called
+// during secret migration and by the setup wizard. Manual edits to config.yaml should
+// be made after the initial setup run.
 func SaveConfig(path string, cfg *AppConfig) error {
 	data, err := yaml.Marshal(cfg)
 	if err != nil {

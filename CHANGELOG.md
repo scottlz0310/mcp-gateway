@@ -9,6 +9,17 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- First-run setup wizard ([#12](https://github.com/scottlz0310/mcp-gateway/issues/12))
+  - If `GITHUB_MCP_CLIENT_ID`, `GITHUB_MCP_CLIENT_SECRET`, or routes are missing on startup, the gateway enters **setup mode** automatically instead of exiting
+  - `GET /setup?token=<TOKEN>` returns the list of missing configuration fields as JSON
+  - `POST /setup?token=<TOKEN>` accepts `{client_id, client_secret, routes[]}`, encrypts the secret via `age`, writes `config.yaml`, and exits with code `0` for supervisor-based restart
+  - Setup token is 16 bytes / 32 hex chars, single-use, with a 15-minute TTL
+  - All non-`/setup` paths return `503 {"error":"setup_required","setup_url":"..."}` during setup mode
+  - `internal/setup` package: `Manager` (token lifecycle), `IsSetupRequired` (effective-config sufficiency check), `Handler` (GET/POST endpoints), `UnconfiguredHandler` (503 fallback)
+  - `AppConfig` extended with `Routes []RouteConfig` and `Setup SetupConfig` fields (YAML: `routes:`, `setup:`)
+  - `router.ParseFromConfig` added: converts `[]config.RouteConfig` → `[]Route` with the same validation rules as `ParseEnv` (env `ROUTE_*` takes precedence; config.yaml routes are used as fallback)
+  - Normal startup now falls back to `config.yaml` routes when no `ROUTE_*` env vars are set
+
 - Secret encryption at rest via `filippo.io/age` X25519 ([#11](https://github.com/scottlz0310/mcp-gateway/issues/11))
   - `GITHUB_MCP_CLIENT_SECRET` can now be stored as `ENC[age:]<base64>` in `config.yaml` instead of as a plain env var
   - `internal/config` package: `LoadKey`, `EncryptField`, `DecryptField`, `MigrateSecret`, `LoadConfig`, `SaveConfig`

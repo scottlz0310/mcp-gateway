@@ -402,25 +402,63 @@ gateway:
 
 ### [#12 feat: First-run Setup Wizard（初回デプロイ時のインタラクティブ設定フロー）](https://github.com/scottlz0310/mcp-gateway/issues/12)
 
-**状態**: 未着手
-**依存**: #11（Config Persistence Layer）
+**状態**: 完了（実装済み）
+**依存**: #11（Config Persistence Layer）✅ 完了済み
 
-設定ファイルが存在しない初回起動時に `/setup` エンドポイントを自動活性化し、ブラウザ or CLI で初期設定を完了できるようにする。
+設定ファイルが存在しない初回起動時に `/setup` エンドポイントを自動活性化し、CLI（curl）で初期設定を完了できるようにする。
 
 起動フロー:
 ```
-設定なし → setup_token を stdout に出力 → GET /setup?token=<token> → POST /setup → 設定完了 → 通常起動
+effective config 不足 → setup_token を stdout に出力 → GET /setup?token=<token> → POST /setup → config 保存 → プロセス再起動 → 通常起動
 ```
+
+#### 設計決定（2026-05-05）
+
+**① routes を config.yaml に保存する（v1 スコープに含める）**
+- `AppConfig` に `[]RouteConfig` を追加
+- 優先順位: env `ROUTE_*` > `config.yaml` の routes（既存運用の後方互換を維持）
+
+**② setup 完了後はプロセス再起動方式（exit code `0`）**
+- hot-reload は v1 スコープ外
+- `POST /setup` 成功後: `{"saved": true, "restart_required": true}` を返し slog で再起動促進メッセージを出力
+- Docker/systemd の `restart: unless-stopped` に委ねる
+
+**③ wizard 起動判定は「実効設定の充足」ベース**
+- `setup_required = effective_client_id が空 OR effective_secret が空 OR effective_routes が空`
+- `setup_completed: true` でも上記条件が真なら wizard を起動（矛盾防止）
+- 「CLIENT_ID は env にあるが secret がない」ケースも自然に wizard 対象になる
+
+**④ /setup は JSON API のみ（v1）、HTML は v2 以降**
+```
+GET  /setup?token=<token>  → 200 {"missing": ["client_secret", "routes"]}
+POST /setup?token=<token>  Content-Type: application/json
+  入力: { "client_id": "...", "client_secret": "...", "routes": [{"name": "...", "prefix": "/mcp", "upstream": "http://..."}] }
+  出力: {"saved": true, "restart_required": true}
+エラー: 401 token 不正 / 408 token 期限切れ / 409 already-configured / 422 validation error
+```
+
+**⑤ `setup_completed` は `POST /setup` 成功時に `true` へ書き込む**
+- 起動時の起動可否判定は ③ の充足判定が担う（`setup_completed` は補助フラグ）
+
+**⑥ config 書き換え時の情報欠落は v1 許容**
+- wizard は一度だけ実行される想定のため実害は限定的
+- SaveConfig コメントに「wizard 利用時も同様」の注記を追記する
+
+**⑦ 未 setup 状態での通常ルートは `503 Service Unavailable`**
+- `{"error": "setup_required", "setup_url": "http://<host>/setup?token=XXXX"}` を返す
+- 401/403 は認証失敗を示唆するため不適切
 
 #### サブタスク
 
-- [ ] `internal/setup/` パッケージ新設（token 生成・検証・一度限り保証）
-- [ ] `setup_completed` フラグの config 統合（#11 依存）
-- [ ] `GET /setup` / `POST /setup` ハンドラ実装
-- [ ] 起動ログへの setup_token 出力（`log/slog`）
-- [ ] 未 setup 状態での通常ルートのレスポンス
-- [ ] HTTPS チェック（production 判定）
-- [ ] テスト / README.md（first-run guide 書き換え） / CHANGELOG.md 更新
+- [x] `AppConfig` に `SetupConfig`（`setup_completed` フラグ）と `[]RouteConfig` を追加
+- [x] `internal/setup/` パッケージ新設（token 生成・検証・TTL 15分・一度限り保証）
+- [x] wizard 起動判定関数 `IsSetupRequired(appCfg, envRoutes)` の実装
+- [x] 起動ログへの setup_token 出力（`log/slog`）
+- [x] `GET /setup` ハンドラ（token 検証・不足項目 JSON 返却）
+- [x] `POST /setup` ハンドラ（バリデーション・config 書き込み・token 無効化・`os.Exit(0)`）
+- [x] 未 setup 状態での通常ルート 503 レスポンス
+- [x] HTTPS チェック（平文 HTTP 時の警告ログ、TLS は TLS 終端プロキシ等に委ねる）
+- [x] テスト / README.md（first-run guide 書き換え） / CHANGELOG.md 更新
 
 ---
 
