@@ -193,16 +193,22 @@ v0.1.0 で追加された **設定永続化（age 暗号化）**・**Setup Wizar
    docker compose restart mcp-gateway
    ```
 4. ログにエラーが無いこと、setup mode に入っていないことを確認
-5. 通常ルートに認証エラー（401）が返る — secret が無いと OAuth 開始もできないが、ここでの確認は secret が読み込まれているかどうかの間接確認
+5. 認証不要の discovery エンドポイントが 200 で応答することを確認（secret が config から読み込まれていることの間接確認 — 失敗時は setup mode 突入や startup error が起きる）
    ```bash
    curl -i http://localhost:8080/.well-known/oauth-authorization-server
    # 期待: 200 OK + JSON metadata（issuer/authorization_endpoint/token_endpoint 等）
+   ```
+6. 認証必須ルートが Bearer 無しで 401 を返すこと（auth middleware が活きていることの確認）
+   ```bash
+   curl -i http://localhost:8080/mcp/github
+   # 期待: 401 Unauthorized + WWW-Authenticate: Bearer ...
    ```
 
 #### 期待される挙動
 
 - [ ] 再起動後 setup mode に **入らない**
 - [ ] `/.well-known/oauth-authorization-server` が 200 を返す
+- [ ] `/mcp/github` が Bearer 無しで 401 を返す
 - [ ] ログに `ENC[age:]...` 全文・client_secret 平文が出ていない
 - [ ] `data/config.yaml` の中身に変化がない（再書き込みされていない）
 
@@ -326,12 +332,13 @@ v0.1.0 で追加された **設定永続化（age 暗号化）**・**Setup Wizar
 #### 手順
 
 1. 通常起動状態に戻す（§4.4 まで終わっていれば OK）
-2. PKCE 用の `code_verifier` / `code_challenge` を生成
+2. PKCE 用の `code_verifier` / `code_challenge` を base64url で生成（RFC 7636 §4.1 / §4.2）
    ```bash
-   CODE_VERIFIER=$(openssl rand -base64 32 | tr -d '=+/' | cut -c1-43)
-   CODE_CHALLENGE=$(echo -n "$CODE_VERIFIER" | openssl dgst -sha256 -binary | base64 | tr -d '=+/')
-   echo "verifier=$CODE_VERIFIER"
-   echo "challenge=$CODE_CHALLENGE"
+   # base64url-safe: '+' → '-', '/' → '_', パディング '=' を削除
+   CODE_VERIFIER=$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')
+   CODE_CHALLENGE=$(printf '%s' "$CODE_VERIFIER" | openssl dgst -sha256 -binary | base64 | tr '+/' '-_' | tr -d '=')
+   echo "verifier=$CODE_VERIFIER (len=${#CODE_VERIFIER})"   # 期待: 43 文字（範囲 43〜128 内）
+   echo "challenge=$CODE_CHALLENGE (len=${#CODE_CHALLENGE})"
    ```
 3. ブラウザで `/authorize` を開く
    ```
@@ -491,32 +498,39 @@ v0.1.0 で追加された **設定永続化（age 暗号化）**・**Setup Wizar
 
 #### 手順
 
-1. device 認可開始
+1. device 認可開始（レスポンスを変数に保存して device_code / verification_uri を取り出す）
    ```bash
-   curl -X POST http://localhost:8080/device_authorization \
+   DEVICE_RESP=$(curl -s -X POST http://localhost:8080/device_authorization \
      -d "client_id=mcp-client" \
-     -d "scope=repo user"
-   # 期待: {"device_code":"...","user_code":"XXXX-XXXX","verification_uri":"...","interval":5,...}
+     -d "scope=repo user")
+   echo "$DEVICE_RESP" | jq .
+   DEVICE_CODE=$(echo "$DEVICE_RESP" | jq -r .device_code)
+   USER_CODE=$(echo "$DEVICE_RESP" | jq -r .user_code)
+   VERIFY_URI=$(echo "$DEVICE_RESP" | jq -r '.verification_uri_complete // .verification_uri')
+   echo "open in browser: $VERIFY_URI (user_code=$USER_CODE)"
+   # 期待: device_code/user_code/verification_uri/interval が取れていること
    ```
-2. ブラウザで `verification_uri_complete` を開き、`user_code` を入力して承認
+2. ブラウザで `$VERIFY_URI` を開き、`$USER_CODE` を入力して承認
 3. 承認待ち中に **同じ device_code で並列に 5 回 token endpoint を叩く**
    ```bash
    for i in 1 2 3 4 5; do
-     curl -X POST http://localhost:8080/token \
+     curl -s -X POST http://localhost:8080/token \
        -d "grant_type=urn:ietf:params:oauth:grant-type:device_code" \
        -d "device_code=$DEVICE_CODE" \
        -d "client_id=mcp-client" &
    done
    wait
-   # 期待: 全リクエストが authorization_pending を返し、slow_down が出ない（直列化されている）
+   # 期待: 全リクエストが authorization_pending を返し、うち並列で in-flight に
+   #       後着したものは error_description="polling in progress, please retry" を含む。
+   #       slow_down は 1 件も返らない（直列化されているため GitHub への同時 polling が起きていない）。
    ```
 4. 承認後に再度 `/token` を叩いて access_token を受領
 
 #### 期待される挙動
 
-- [ ] 並列ポーリングしても `slow_down` が返らない
+- [ ] 並列ポーリングしても `slow_down` が **1 件も返らない**
+- [ ] 並列リクエストのうち、in-flight 1 件は GitHub へ転送され、残りは即時に `authorization_pending` + `error_description="polling in progress, please retry"` を返す（gateway 側の直列化が機能している証跡）
 - [ ] 承認後に正常に `access_token` が発行される
-- [ ] gateway ログに per-device serialize の痕跡（acquire/release）が見える
 
 #### 観測された挙動
 
