@@ -374,7 +374,7 @@ func (h *Handler) tokenDeviceGrant(w http.ResponseWriter, r *http.Request) {
 		h.store.DenyDevice(deviceCode)
 		oauthError(w, "access_denied", "user denied authorization", http.StatusBadRequest)
 	default:
-		slog.Warn("unexpected GitHub device poll error", "error", result.Error)
+		slog.Warn("unexpected GitHub device poll error", "err", result.Error)
 		oauthError(w, "server_error", "unexpected upstream error: "+result.Error, http.StatusBadGateway)
 	}
 }
