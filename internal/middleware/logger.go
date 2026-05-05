@@ -50,10 +50,17 @@ func (sw *statusWriter) Flush() {
 }
 
 // Hijack implements http.Hijacker, delegating to the underlying writer when
-// it supports connection hijacking (e.g. for WebSocket upgrades).
+// it supports connection hijacking (e.g. for WebSocket upgrades). On success
+// the status is recorded as 101 Switching Protocols so that the access log
+// reflects the real protocol-upgrade response rather than the default 200.
 func (sw *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	if h, ok := sw.ResponseWriter.(http.Hijacker); ok {
-		return h.Hijack()
+		conn, rw, err := h.Hijack()
+		if err == nil && !sw.wrote {
+			sw.status = http.StatusSwitchingProtocols
+			sw.wrote = true
+		}
+		return conn, rw, err
 	}
 	return nil, nil, http.ErrNotSupported
 }
@@ -74,21 +81,27 @@ func (sw *statusWriter) statusCode() int {
 //
 //	5xx → Error
 //	2xx/3xx/4xx → Info
+//
+// The log line is written in a deferred call so it is always emitted even if
+// a downstream handler panics (net/http recovers the panic after the deferred
+// functions run).
 func Logger() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
 			sw := &statusWriter{ResponseWriter: w}
+			defer func() {
+				latency := time.Since(start).Milliseconds()
+				logFn := logFuncForStatus(sw.statusCode())
+				logFn(r.Context(), "http request",
+					"method", r.Method,
+					"path", r.URL.Path,
+					"status", sw.statusCode(),
+					"latency_ms", latency,
+					"remote_addr", r.RemoteAddr,
+				)
+			}()
 			next.ServeHTTP(sw, r)
-			latency := time.Since(start).Milliseconds()
-			logFn := logFuncForStatus(sw.statusCode())
-			logFn(r.Context(), "http request",
-				"method", r.Method,
-				"path", r.URL.Path,
-				"status", sw.statusCode(),
-				"latency_ms", latency,
-				"remote_addr", r.RemoteAddr,
-			)
 		})
 	}
 }

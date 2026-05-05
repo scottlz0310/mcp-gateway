@@ -182,3 +182,29 @@ func TestStatusWriterHijackNotSupported(t *testing.T) {
 		t.Error("Hijack should return nil conn and rw on error")
 	}
 }
+
+func TestLoggerPanic(t *testing.T) {
+	// Even if the downstream handler panics, the deferred log line must still
+	// be emitted (net/http recovers the panic after deferred functions run).
+	var buf bytes.Buffer
+	t.Cleanup(captureLogs(t, &buf))
+
+	h := Logger()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		panic("simulated handler panic")
+	}))
+	r := httptest.NewRequest(http.MethodGet, "/crash", nil)
+	w := httptest.NewRecorder()
+
+	func() {
+		defer func() { recover() }() //nolint:errcheck
+		h.ServeHTTP(w, r)
+	}()
+
+	if buf.Len() == 0 {
+		t.Error("expected a log line even after handler panic, got none")
+	}
+	entry := parseLastLog(t, &buf)
+	if entry["path"] != "/crash" {
+		t.Errorf("path: got %v, want /crash", entry["path"])
+	}
+}
