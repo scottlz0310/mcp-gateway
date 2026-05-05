@@ -256,10 +256,6 @@ func TestParseFromConfig_Valid(t *testing.T) {
 	if len(routes) != 2 {
 		t.Fatalf("expected 2 routes, got %d", len(routes))
 	}
-	if routes[1].NoAuth {
-		// sorted longest-first, so /play should be routes[1] (equal length)
-		// just verify NoAuth is preserved somewhere
-	}
 	for _, r := range routes {
 		if r.Name == "play" && !r.NoAuth {
 			t.Error("play route: expected NoAuth=true")

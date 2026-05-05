@@ -69,7 +69,7 @@ curl -X POST "http://localhost:8080/setup?token=<TOKEN>" \
 ```
 
 4. The gateway saves `config.yaml` (with the secret encrypted via `age`) and exits with code `0`.
-5. Your process supervisor (`docker-compose restart: unless-stopped`, `systemd`, etc.) restarts the gateway in **normal mode**.
+5. Your process supervisor (e.g., Docker Compose with `restart: unless-stopped`, systemd, etc.) restarts the gateway in **normal mode**.
 
 ### API reference
 

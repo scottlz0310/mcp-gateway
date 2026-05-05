@@ -13,14 +13,33 @@ import (
 	"github.com/scottlz0310/mcp-gateway/internal/router"
 )
 
+const maxRequestBodyBytes = 16 * 1024 // 16 KB
+
 // Handler serves the first-run setup wizard endpoints.
 type Handler struct {
-	mgr       *Manager
-	appCfg    *appconfig.AppConfig
-	cfgPath   string
-	km        *appconfig.KeyMaterial
-	isHTTPS   func(r *http.Request) bool
-	onSuccess func() // called after successful POST (typically schedules os.Exit)
+	mgr          *Manager
+	appCfg       *appconfig.AppConfig
+	cfgPath      string
+	km           *appconfig.KeyMaterial
+	isHTTPS      func(r *http.Request) bool
+	onSuccess    func() // called after successful POST (typically schedules os.Exit)
+	envClientID  string
+	envSecret    string
+	hasEnvRoutes bool
+}
+
+// HandlerOption is a functional option for NewHandler.
+type HandlerOption func(*Handler)
+
+// WithEnvValues supplies the effective env-derived values so that GET /setup
+// reports only genuinely missing fields, and POST /setup can omit fields that
+// are already satisfied by env vars.
+func WithEnvValues(clientID, secret string, hasRoutes bool) HandlerOption {
+	return func(h *Handler) {
+		h.envClientID  = clientID
+		h.envSecret    = secret
+		h.hasEnvRoutes = hasRoutes
+	}
 }
 
 // NewHandler creates a setup HTTP handler.
@@ -28,8 +47,8 @@ type Handler struct {
 // cfgPath is the path to config.yaml.
 // onSuccess is invoked (in a goroutine) after a successful POST /setup so
 // the caller can schedule a clean process exit.
-func NewHandler(mgr *Manager, appCfg *appconfig.AppConfig, cfgPath string, km *appconfig.KeyMaterial, onSuccess func()) *Handler {
-	return &Handler{
+func NewHandler(mgr *Manager, appCfg *appconfig.AppConfig, cfgPath string, km *appconfig.KeyMaterial, onSuccess func(), opts ...HandlerOption) *Handler {
+	h := &Handler{
 		mgr:       mgr,
 		appCfg:    appCfg,
 		cfgPath:   cfgPath,
@@ -37,6 +56,10 @@ func NewHandler(mgr *Manager, appCfg *appconfig.AppConfig, cfgPath string, km *a
 		isHTTPS:   defaultHTTPSCheck,
 		onSuccess: onSuccess,
 	}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
 }
 
 // RegisterRoutes attaches GET /setup and POST /setup to mux, gated by the
@@ -90,6 +113,7 @@ func (h *Handler) handlePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	var req setupRequest
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
@@ -97,45 +121,72 @@ func (h *Handler) handlePost(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusUnprocessableEntity, "invalid JSON: "+err.Error())
 		return
 	}
+	if dec.More() {
+		writeJSONError(w, http.StatusUnprocessableEntity, "request body must contain exactly one JSON object")
+		return
+	}
 
-	if strings.TrimSpace(req.ClientID) == "" {
+	// Only require fields that are not already satisfied by effective config.
+	needClientID := h.envClientID == "" && strings.TrimSpace(h.appCfg.Auth.GitHubClientID) == ""
+	needSecret   := h.envSecret == "" && strings.TrimSpace(h.appCfg.Auth.GitHubClientSecret) == ""
+	needRoutes   := !h.hasEnvRoutes && len(h.appCfg.Routes) == 0
+
+	if needClientID && strings.TrimSpace(req.ClientID) == "" {
 		writeJSONError(w, http.StatusUnprocessableEntity, "client_id is required")
 		return
 	}
-	if strings.TrimSpace(req.ClientSecret) == "" {
+	if needSecret && strings.TrimSpace(req.ClientSecret) == "" {
 		writeJSONError(w, http.StatusUnprocessableEntity, "client_secret is required")
 		return
 	}
-	if len(req.Routes) == 0 {
+	if needRoutes && len(req.Routes) == 0 {
 		writeJSONError(w, http.StatusUnprocessableEntity, "at least one route is required")
 		return
 	}
 
-	// Validate route list by attempting a parse.
-	if _, err := router.ParseFromConfig(req.Routes); err != nil {
-		writeJSONError(w, http.StatusUnprocessableEntity, "invalid route: "+err.Error())
-		return
+	// Validate provided route list by attempting a parse.
+	if len(req.Routes) > 0 {
+		if _, err := router.ParseFromConfig(req.Routes); err != nil {
+			writeJSONError(w, http.StatusUnprocessableEntity, "invalid route: "+err.Error())
+			return
+		}
 	}
 
-	// Encrypt secret before persisting.
-	encSecret, err := appconfig.EncryptField(h.km, req.ClientSecret)
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "failed to encrypt secret: "+err.Error())
-		return
+	// Encrypt new secret before persisting (only if provided).
+	var encSecret string
+	if strings.TrimSpace(req.ClientSecret) != "" {
+		var err error
+		encSecret, err = appconfig.EncryptField(h.km, req.ClientSecret)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "failed to encrypt secret: "+err.Error())
+			return
+		}
 	}
 
-	// Apply changes to the in-memory config.
-	h.appCfg.Auth.GitHubClientID = req.ClientID
-	h.appCfg.Auth.GitHubClientSecret = encSecret
-	h.appCfg.Routes = req.Routes
+	// Save previous in-memory state for rollback on SaveConfig failure.
+	prevClientID     := h.appCfg.Auth.GitHubClientID
+	prevClientSecret := h.appCfg.Auth.GitHubClientSecret
+	prevRoutes       := h.appCfg.Routes
+	prevCompleted    := h.appCfg.Setup.Completed
+
+	// Apply changes to in-memory config (only for fields provided in the request).
+	if strings.TrimSpace(req.ClientID) != "" {
+		h.appCfg.Auth.GitHubClientID = req.ClientID
+	}
+	if encSecret != "" {
+		h.appCfg.Auth.GitHubClientSecret = encSecret
+	}
+	if len(req.Routes) > 0 {
+		h.appCfg.Routes = req.Routes
+	}
 	h.appCfg.Setup.Completed = true
 
 	if err := appconfig.SaveConfig(h.cfgPath, h.appCfg); err != nil {
-		// Attempt rollback of in-memory changes.
-		h.appCfg.Auth.GitHubClientID = ""
-		h.appCfg.Auth.GitHubClientSecret = ""
-		h.appCfg.Routes = nil
-		h.appCfg.Setup.Completed = false
+		// Restore previous in-memory state.
+		h.appCfg.Auth.GitHubClientID     = prevClientID
+		h.appCfg.Auth.GitHubClientSecret = prevClientSecret
+		h.appCfg.Routes                  = prevRoutes
+		h.appCfg.Setup.Completed         = prevCompleted
 		writeJSONError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
 		return
 	}
@@ -179,15 +230,17 @@ func WaitForShutdown(ctx context.Context, srv *http.Server) error {
 
 // --- helpers ---
 
+// missingFields returns the configuration fields that are not satisfied by
+// either env-derived values or the current appCfg.
 func (h *Handler) missingFields() []string {
 	var missing []string
-	if h.appCfg.Auth.GitHubClientID == "" {
+	if h.envClientID == "" && h.appCfg.Auth.GitHubClientID == "" {
 		missing = append(missing, "client_id")
 	}
-	if h.appCfg.Auth.GitHubClientSecret == "" {
+	if h.envSecret == "" && h.appCfg.Auth.GitHubClientSecret == "" {
 		missing = append(missing, "client_secret")
 	}
-	if len(h.appCfg.Routes) == 0 {
+	if !h.hasEnvRoutes && len(h.appCfg.Routes) == 0 {
 		missing = append(missing, "routes")
 	}
 	return missing
@@ -213,6 +266,8 @@ func defaultHTTPSCheck(r *http.Request) bool {
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }

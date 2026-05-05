@@ -1,6 +1,7 @@
 package setup_test
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -42,11 +43,13 @@ func TestValidate_AfterConsume(t *testing.T) {
 }
 
 func TestValidate_ExpiredToken(t *testing.T) {
-	mgr, _ := setup.New()
+	// Create a manager with a negative TTL so the token is already expired.
+	mgr, err := setup.NewWithTTL(-time.Second)
+	if err != nil {
+		t.Fatalf("NewWithTTL: %v", err)
+	}
 	token := mgr.Token()
-	// Force expiry by sleeping past TTL — instead, test via a direct expired check.
-	// We can't easily shorten TTL without exporting it; test via timing if tiny.
-	// Acceptable to skip timing test here and rely on unit-level validation logic.
-	_ = token
-	_ = time.Second // placeholder to keep import used
+	if valErr := mgr.Validate(token); !errors.Is(valErr, setup.ErrTokenExpired) {
+		t.Errorf("expected ErrTokenExpired, got %v", valErr)
+	}
 }

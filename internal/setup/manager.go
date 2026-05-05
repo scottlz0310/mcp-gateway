@@ -5,6 +5,7 @@ package setup
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -36,13 +37,17 @@ type Manager struct {
 // New generates a cryptographically random setup token and returns a Manager
 // with a 15-minute TTL.
 func New() (*Manager, error) {
+	return newManager(tokenTTL)
+}
+
+func newManager(ttl time.Duration) (*Manager, error) {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
 		return nil, fmt.Errorf("generating setup token: %w", err)
 	}
 	return &Manager{
 		token:  hex.EncodeToString(b),
-		expiry: time.Now().Add(tokenTTL),
+		expiry: time.Now().Add(ttl),
 	}, nil
 }
 
@@ -59,7 +64,7 @@ func (m *Manager) Validate(token string) error {
 	if time.Now().After(m.expiry) {
 		return ErrTokenExpired
 	}
-	if token != m.token {
+	if subtle.ConstantTimeCompare([]byte(token), []byte(m.token)) != 1 {
 		return ErrInvalidToken
 	}
 	return nil

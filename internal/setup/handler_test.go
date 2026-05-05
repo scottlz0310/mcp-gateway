@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	appconfig "github.com/scottlz0310/mcp-gateway/internal/config"
 	"github.com/scottlz0310/mcp-gateway/internal/setup"
@@ -114,6 +115,8 @@ func TestHandlerPost_Success(t *testing.T) {
 	select {
 	case <-called:
 		// ok
+	case <-time.After(5 * time.Second):
+		t.Fatal("onSuccess was not called within 5 seconds")
 	}
 }
 

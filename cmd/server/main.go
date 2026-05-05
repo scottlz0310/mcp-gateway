@@ -55,8 +55,21 @@ func main() {
 	// First-run wizard: if any required value is missing, enter setup mode.
 	envClientID := os.Getenv("GITHUB_MCP_CLIENT_ID")
 	envSecret := os.Getenv("GITHUB_MCP_CLIENT_SECRET")
+
+	// Apply config.yaml gateway overrides before setup wizard so the printed
+	// URL uses the correct base_url/port (priority: env var > config.yaml > default).
+	if strings.TrimSpace(os.Getenv("MCP_GATEWAY_BASE_URL")) == "" && strings.TrimSpace(appCfg.Gateway.BaseURL) != "" {
+		cfg.baseURL = appCfg.Gateway.BaseURL
+	}
+	if strings.TrimSpace(os.Getenv("MCP_GATEWAY_PORT")) == "" && strings.TrimSpace(appCfg.Gateway.Port) != "" {
+		cfg.port = appCfg.Gateway.Port
+	}
+	if strings.TrimSpace(os.Getenv("GITHUB_MCP_OAUTH_SCOPES")) == "" && strings.TrimSpace(appCfg.Gateway.OAuthScopes) != "" {
+		cfg.oauthScopes = appCfg.Gateway.OAuthScopes
+	}
+
 	if setup.IsSetupRequired(appCfg, envClientID, envSecret, envRoutes) {
-		runSetupWizard(cfg, appCfg, km)
+		runSetupWizard(cfg, appCfg, km, envClientID, envSecret, len(envRoutes) > 0)
 		// runSetupWizard only returns if the listener fails immediately.
 		os.Exit(1)
 	}
@@ -118,17 +131,6 @@ func main() {
 
 	cfg.githubClientID = githubClientID
 	cfg.githubClientSecret = githubClientSecret
-
-	// Apply config.yaml gateway overrides (priority: env var > config.yaml > built-in default).
-	if strings.TrimSpace(os.Getenv("MCP_GATEWAY_BASE_URL")) == "" && strings.TrimSpace(appCfg.Gateway.BaseURL) != "" {
-		cfg.baseURL = appCfg.Gateway.BaseURL
-	}
-	if strings.TrimSpace(os.Getenv("MCP_GATEWAY_PORT")) == "" && strings.TrimSpace(appCfg.Gateway.Port) != "" {
-		cfg.port = appCfg.Gateway.Port
-	}
-	if strings.TrimSpace(os.Getenv("GITHUB_MCP_OAUTH_SCOPES")) == "" && strings.TrimSpace(appCfg.Gateway.OAuthScopes) != "" {
-		cfg.oauthScopes = appCfg.Gateway.OAuthScopes
-	}
 
 	prov, err := provider.New(provider.Config{
 		Kind:         "github",
@@ -217,7 +219,7 @@ func main() {
 // runSetupWizard starts an HTTP server that serves only the /setup endpoint.
 // It blocks until a successful POST /setup causes the process to exit (so the
 // supervisor can restart in normal mode), or until the listener fails.
-func runSetupWizard(cfg config, appCfg *appconfig.AppConfig, km *appconfig.KeyMaterial) {
+func runSetupWizard(cfg config, appCfg *appconfig.AppConfig, km *appconfig.KeyMaterial, envClientID, envSecret string, hasEnvRoutes bool) {
 	mgr, err := setup.New()
 	if err != nil {
 		slog.Error("failed to create setup token", "err", err)
@@ -235,7 +237,7 @@ func runSetupWizard(cfg config, appCfg *appconfig.AppConfig, km *appconfig.KeyMa
 	h := setup.NewHandler(mgr, appCfg, cfg.configPath, km, func() {
 		slog.Info("setup complete; restarting to apply configuration")
 		os.Exit(0)
-	})
+	}, setup.WithEnvValues(envClientID, envSecret, hasEnvRoutes))
 
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
