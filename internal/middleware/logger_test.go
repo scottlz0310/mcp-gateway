@@ -4,10 +4,12 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -243,4 +245,62 @@ func TestLoggerPanic(t *testing.T) {
 	if entry["level"] != "ERROR" {
 		t.Errorf("level on panic: got %q, want ERROR", entry["level"])
 	}
+}
+
+// mockReaderFromWriter is a ResponseWriter that also implements io.ReaderFrom,
+// capturing the data it received via ReadFrom for assertion.
+type mockReaderFromWriter struct {
+	*httptest.ResponseRecorder
+	readFromCalled bool
+	received       bytes.Buffer
+}
+
+func (m *mockReaderFromWriter) ReadFrom(src io.Reader) (int64, error) {
+	m.readFromCalled = true
+	return io.Copy(&m.received, src)
+}
+
+func TestStatusWriterReadFrom(t *testing.T) {
+	t.Run("delegates to underlying io.ReaderFrom", func(t *testing.T) {
+		inner := &mockReaderFromWriter{ResponseRecorder: httptest.NewRecorder()}
+		sw := &statusWriter{ResponseWriter: inner}
+
+		payload := "hello from ReadFrom"
+		n, err := sw.ReadFrom(strings.NewReader(payload))
+		if err != nil {
+			t.Fatalf("ReadFrom returned error: %v", err)
+		}
+		if n != int64(len(payload)) {
+			t.Errorf("ReadFrom returned %d bytes, want %d", n, len(payload))
+		}
+		if !inner.readFromCalled {
+			t.Error("expected underlying ReadFrom to be called, but it was not")
+		}
+		if inner.received.String() != payload {
+			t.Errorf("underlying received %q, want %q", inner.received.String(), payload)
+		}
+		if sw.statusCode() != http.StatusOK {
+			t.Errorf("statusCode after ReadFrom: got %d, want 200", sw.statusCode())
+		}
+	})
+
+	t.Run("falls back to io.Copy when underlying does not implement io.ReaderFrom", func(t *testing.T) {
+		inner := httptest.NewRecorder()
+		sw := &statusWriter{ResponseWriter: inner}
+
+		payload := "hello via fallback"
+		n, err := sw.ReadFrom(strings.NewReader(payload))
+		if err != nil {
+			t.Fatalf("ReadFrom (fallback) returned error: %v", err)
+		}
+		if n != int64(len(payload)) {
+			t.Errorf("ReadFrom (fallback) returned %d bytes, want %d", n, len(payload))
+		}
+		if inner.Body.String() != payload {
+			t.Errorf("response body via fallback: got %q, want %q", inner.Body.String(), payload)
+		}
+		if sw.statusCode() != http.StatusOK {
+			t.Errorf("statusCode after ReadFrom fallback: got %d, want 200", sw.statusCode())
+		}
+	})
 }
