@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	appconfig "github.com/scottlz0310/mcp-gateway/internal/config"
@@ -27,6 +28,7 @@ type Handler struct {
 	envClientID  string
 	envSecret    string
 	hasEnvRoutes bool
+	postMu       sync.Mutex // serializes POST /setup to prevent concurrent token-race
 }
 
 // HandlerOption is a functional option for NewHandler.
@@ -101,7 +103,14 @@ type setupRequest struct {
 
 // handlePost validates the token, persists the configuration, and schedules
 // a clean shutdown so the supervisor can restart in normal mode.
+//
+// The postMu mutex ensures that concurrent POSTs are serialized so that only
+// one request can pass Validate() and proceed to Consume() at a time,
+// preserving the single-use token semantics.
 func (h *Handler) handlePost(w http.ResponseWriter, r *http.Request) {
+	h.postMu.Lock()
+	defer h.postMu.Unlock()
+
 	if !h.isHTTPS(r) {
 		// Warn but don't block — /setup may be served on localhost or via a
 		// TLS-terminating proxy.  We log a warning so operators notice.

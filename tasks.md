@@ -457,7 +457,7 @@ POST /setup?token=<token>  Content-Type: application/json
 - [x] `GET /setup` ハンドラ（token 検証・不足項目 JSON 返却）
 - [x] `POST /setup` ハンドラ（バリデーション・config 書き込み・token 無効化・`os.Exit(0)`）
 - [x] 未 setup 状態での通常ルート 503 レスポンス
-- [x] HTTPS チェック（production 判定ロジック）
+- [x] HTTPS チェック（平文 HTTP 時の警告ログ、TLS は TLS 終端プロキシ等に委ねる）
 - [x] テスト / README.md（first-run guide 書き換え） / CHANGELOG.md 更新
 
 ---
