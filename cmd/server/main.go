@@ -52,6 +52,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Also apply the legacy GITHUB_MCP_UPSTREAM_URL fallback before the setup check,
+	// so IsSetupRequired does not fire when routes are only provided via the legacy var.
+	if len(envRoutes) == 0 && strings.TrimSpace(cfg.upstreamURL) != "" {
+		u, err := url.Parse(cfg.upstreamURL)
+		if err != nil || u.Scheme == "" || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			slog.Error("invalid upstream URL", "url", cfg.upstreamURL, "err", err)
+			os.Exit(1)
+		}
+		envRoutes = []router.Route{{Name: "default", Prefix: "/mcp", Upstream: u}}
+		slog.Warn("GITHUB_MCP_UPSTREAM_URL is deprecated; use ROUTE_<NAME>=<prefix>|<url> instead")
+	}
+
 	// First-run wizard: if any required value is missing, enter setup mode.
 	envClientID := os.Getenv("GITHUB_MCP_CLIENT_ID")
 	envSecret := os.Getenv("GITHUB_MCP_CLIENT_SECRET")
@@ -86,25 +98,6 @@ func main() {
 	}
 
 	routes := envRoutes
-
-	// Backward-compat: fall back to legacy single-upstream env var.
-	if len(routes) == 0 && cfg.upstreamURL != "" {
-		u, err := url.Parse(cfg.upstreamURL)
-		if err != nil {
-			slog.Error("invalid upstream URL", "url", cfg.upstreamURL, "err", err)
-			os.Exit(1)
-		}
-		if u.Scheme == "" || u.Host == "" {
-			slog.Error("upstream URL must be absolute with scheme and host", "url", cfg.upstreamURL)
-			os.Exit(1)
-		}
-		if u.Scheme != "http" && u.Scheme != "https" {
-			slog.Error("upstream URL scheme must be http or https", "url", cfg.upstreamURL)
-			os.Exit(1)
-		}
-		routes = []router.Route{{Name: "default", Prefix: "/mcp", Upstream: u}}
-		slog.Warn("GITHUB_MCP_UPSTREAM_URL is deprecated; use ROUTE_<NAME>=<prefix>|<url> instead")
-	}
 
 	// Fall back to routes stored in config.yaml (written by the setup wizard).
 	if len(routes) == 0 && len(appCfg.Routes) > 0 {

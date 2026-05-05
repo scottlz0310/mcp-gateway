@@ -12,10 +12,10 @@ import (
 
 // RouteConfig holds a single proxy route that can be persisted in config.yaml.
 type RouteConfig struct {
-	Name     string `yaml:"name"`
-	Prefix   string `yaml:"prefix"`
-	Upstream string `yaml:"upstream"`
-	NoAuth   bool   `yaml:"no_auth,omitempty"`
+	Name     string `yaml:"name"             json:"name"`
+	Prefix   string `yaml:"prefix"           json:"prefix"`
+	Upstream string `yaml:"upstream"         json:"upstream"`
+	NoAuth   bool   `yaml:"no_auth,omitempty" json:"no_auth,omitempty"`
 }
 
 // SetupConfig holds first-run wizard state.

@@ -160,6 +160,47 @@ func TestHandlerPost_NoRoutes(t *testing.T) {
 	}
 }
 
+func TestHandlerPost_RouteWithNoAuth(t *testing.T) {
+	mgr, _ := setup.New()
+	cfg := &appconfig.AppConfig{}
+	km := newTestKM(t)
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+
+	h := setup.NewHandler(mgr, cfg, cfgPath, km, func() {})
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+
+	body := map[string]any{
+		"client_id":     "test-client",
+		"client_secret": "test-secret",
+		"routes": []map[string]any{
+			{"name": "play", "prefix": "/play", "upstream": "http://upstream:9090", "no_auth": true},
+		},
+	}
+	b, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/setup?token="+mgr.Token(), bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /setup status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Verify that no_auth=true is persisted and round-trips correctly.
+	saved, err := appconfig.LoadConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("LoadConfig after POST: %v", err)
+	}
+	if len(saved.Routes) != 1 {
+		t.Fatalf("routes len = %d, want 1", len(saved.Routes))
+	}
+	if !saved.Routes[0].NoAuth {
+		t.Errorf("routes[0].NoAuth = false, want true")
+	}
+}
+
+
 func TestUnconfiguredHandler(t *testing.T) {
 	h := setup.UnconfiguredHandler("http://localhost:8080/setup?token=tok")
 	req := httptest.NewRequest(http.MethodGet, "/mcp/anything", nil)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -121,14 +122,16 @@ func (h *Handler) handlePost(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusUnprocessableEntity, "invalid JSON: "+err.Error())
 		return
 	}
-	if dec.More() {
+	// Reject bodies containing more than one top-level JSON value.
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
 		writeJSONError(w, http.StatusUnprocessableEntity, "request body must contain exactly one JSON object")
 		return
 	}
 
 	// Only require fields that are not already satisfied by effective config.
-	needClientID := h.envClientID == "" && strings.TrimSpace(h.appCfg.Auth.GitHubClientID) == ""
-	needSecret   := h.envSecret == "" && strings.TrimSpace(h.appCfg.Auth.GitHubClientSecret) == ""
+	needClientID := strings.TrimSpace(h.envClientID) == "" && strings.TrimSpace(h.appCfg.Auth.GitHubClientID) == ""
+	needSecret   := strings.TrimSpace(h.envSecret) == "" && strings.TrimSpace(h.appCfg.Auth.GitHubClientSecret) == ""
 	needRoutes   := !h.hasEnvRoutes && len(h.appCfg.Routes) == 0
 
 	if needClientID && strings.TrimSpace(req.ClientID) == "" {
@@ -234,10 +237,10 @@ func WaitForShutdown(ctx context.Context, srv *http.Server) error {
 // either env-derived values or the current appCfg.
 func (h *Handler) missingFields() []string {
 	var missing []string
-	if h.envClientID == "" && h.appCfg.Auth.GitHubClientID == "" {
+	if strings.TrimSpace(h.envClientID) == "" && strings.TrimSpace(h.appCfg.Auth.GitHubClientID) == "" {
 		missing = append(missing, "client_id")
 	}
-	if h.envSecret == "" && h.appCfg.Auth.GitHubClientSecret == "" {
+	if strings.TrimSpace(h.envSecret) == "" && strings.TrimSpace(h.appCfg.Auth.GitHubClientSecret) == "" {
 		missing = append(missing, "client_secret")
 	}
 	if !h.hasEnvRoutes && len(h.appCfg.Routes) == 0 {
