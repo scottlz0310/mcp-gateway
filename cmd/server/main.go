@@ -197,7 +197,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:              addr,
-		Handler:           mux,
+		Handler:           middleware.Logger()(mux),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      0, // unlimited: MCP streaming responses may be long-lived
@@ -239,7 +239,7 @@ func runSetupWizard(cfg config, appCfg *appconfig.AppConfig, km *appconfig.KeyMa
 
 	server := &http.Server{
 		Addr:              addr,
-		Handler:           mux,
+		Handler:           middleware.Logger()(mux),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      30 * time.Second,
