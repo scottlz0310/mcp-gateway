@@ -1,9 +1,11 @@
 package middleware
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -183,9 +185,37 @@ func TestStatusWriterHijackNotSupported(t *testing.T) {
 	}
 }
 
+// mockHijackWriter wraps ResponseRecorder and implements http.Hijacker.
+type mockHijackWriter struct {
+	*httptest.ResponseRecorder
+}
+
+func (m *mockHijackWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	client, server := net.Pipe()
+	_ = server
+	return client, bufio.NewReadWriter(bufio.NewReader(client), bufio.NewWriter(client)), nil
+}
+
+func TestStatusWriterHijackSuccess(t *testing.T) {
+	// When the underlying writer supports Hijack and the call succeeds,
+	// statusWriter must record status 101 Switching Protocols.
+	inner := &mockHijackWriter{httptest.NewRecorder()}
+	sw := &statusWriter{ResponseWriter: inner}
+
+	conn, _, err := sw.Hijack()
+	if err != nil {
+		t.Fatalf("Hijack failed: %v", err)
+	}
+	defer conn.Close()
+
+	if sw.statusCode() != http.StatusSwitchingProtocols {
+		t.Errorf("statusCode after Hijack: got %d, want 101", sw.statusCode())
+	}
+}
+
 func TestLoggerPanic(t *testing.T) {
-	// Even if the downstream handler panics, the deferred log line must still
-	// be emitted (net/http recovers the panic after deferred functions run).
+	// A downstream handler panic must emit a log line with status 500 and
+	// level ERROR. The middleware re-panics so net/http can still recover.
 	var buf bytes.Buffer
 	t.Cleanup(captureLogs(t, &buf))
 
@@ -206,5 +236,11 @@ func TestLoggerPanic(t *testing.T) {
 	entry := parseLastLog(t, &buf)
 	if entry["path"] != "/crash" {
 		t.Errorf("path: got %v, want /crash", entry["path"])
+	}
+	if entry["status"] != float64(500) {
+		t.Errorf("status on panic: got %v, want 500", entry["status"])
+	}
+	if entry["level"] != "ERROR" {
+		t.Errorf("level on panic: got %q, want ERROR", entry["level"])
 	}
 }

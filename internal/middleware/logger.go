@@ -3,6 +3,7 @@ package middleware
 import (
 	"bufio"
 	"context"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -65,8 +66,20 @@ func (sw *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return nil, nil, http.ErrNotSupported
 }
 
-// statusCode returns the captured status, defaulting to 200 when no status was
-// explicitly written (implicit 200 OK from the first Write).
+// ReadFrom implements io.ReaderFrom to preserve the optimised ReadFrom fast
+// path (e.g. sendfile via net.Conn) when the underlying ResponseWriter supports
+// it. Without this, httputil.ReverseProxy falls back to a generic buffered copy
+// which adds avoidable CPU and memory overhead for large or streaming responses.
+func (sw *statusWriter) ReadFrom(src io.Reader) (int64, error) {
+	if !sw.wrote {
+		sw.status = http.StatusOK
+		sw.wrote = true
+	}
+	if rf, ok := sw.ResponseWriter.(io.ReaderFrom); ok {
+		return rf.ReadFrom(src)
+	}
+	return io.Copy(sw.ResponseWriter, src)
+}
 func (sw *statusWriter) statusCode() int {
 	if !sw.wrote {
 		return http.StatusOK
@@ -82,24 +95,34 @@ func (sw *statusWriter) statusCode() int {
 //	5xx → Error
 //	2xx/3xx/4xx → Info
 //
-// The log line is written in a deferred call so it is always emitted even if
-// a downstream handler panics (net/http recovers the panic after the deferred
-// functions run).
+// The log is written inside a deferred function that also recovers panics:
+// if a downstream handler panics before writing any headers the status is
+// set to 500 and the access log is emitted before re-panicking so that
+// net/http's own recover can send a 500 response to the client.
 func Logger() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
 			sw := &statusWriter{ResponseWriter: w}
 			defer func() {
+				p := recover()
+				// Downstream panicked before writing headers: record 500 so the
+				// access log is not misleadingly shown as 200 OK.
+				if p != nil && !sw.wrote {
+					sw.status = http.StatusInternalServerError
+					sw.wrote = true
+				}
 				latency := time.Since(start).Milliseconds()
-				logFn := logFuncForStatus(sw.statusCode())
-				logFn(r.Context(), "http request",
+				logFuncForStatus(sw.statusCode())(r.Context(), "http request",
 					"method", r.Method,
 					"path", r.URL.Path,
 					"status", sw.statusCode(),
 					"latency_ms", latency,
 					"remote_addr", r.RemoteAddr,
 				)
+				if p != nil {
+					panic(p) // re-panic so net/http can recover and send 500
+				}
 			}()
 			next.ServeHTTP(sw, r)
 		})
