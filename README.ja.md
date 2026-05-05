@@ -68,7 +68,7 @@ curl -X POST "http://localhost:8080/setup?token=<TOKEN>" \
 # → {"saved":true,"restart_required":true}
 ```
 
-4. ゲートウェイは `config.yaml`（secret は `age` で暗号化）を保存し、終了コード `0` で終了します。
+4. ゲートウェイは提供されたフィールドを `config.yaml` に保存し（`client_secret` が POST ボディに含まれる場合は `age` で暗号化）、終了コード `0` で終了します。
 5. プロセススーパーバイザー（例: `restart: unless-stopped` の Docker Compose、systemd など）がゲートウェイを**通常モード**で再起動します。
 
 ### API リファレンス
@@ -82,8 +82,8 @@ curl -X POST "http://localhost:8080/setup?token=<TOKEN>" \
 
 ```json
 {
-  "client_id": "string (必須)",
-  "client_secret": "string (必須)",
+  "client_id": "string (GET /setup で missing に含まれる場合のみ必須)",
+  "client_secret": "string (GET /setup で missing に含まれる場合のみ必須)",
   "routes": [
     {
       "name": "string (必須)",
@@ -97,7 +97,7 @@ curl -X POST "http://localhost:8080/setup?token=<TOKEN>" \
 
 **エラーコード:** `401` トークン無効 · `408` トークン期限切れ · `409` 設定済み · `422` バリデーションエラー
 
-> **セキュリティ上の注意:** セットアップトークンはシングルユースで 15 分で期限切れになります。本番環境（HTTPS）では POST リクエストは TLS 経由で行ってください。平文 HTTP で POST を受信した場合、ゲートウェイは警告をログに出力します。
+> **セキュリティ上の注意:** セットアップトークンは成功した `POST /setup` 完了後に無効化され、15 分で期限切れになります。`GET` リクエストや失敗した `POST` は有効期限内であれば再試行可能です。本番環境（HTTPS）では POST リクエストは TLS 経由で行ってください。平文 HTTP で POST を受信した場合、ゲートウェイは警告をログに出力します。
 
 ## 設定
 
@@ -373,6 +373,7 @@ OAuth プロバイダーは `Provider` インターフェースで抽象化さ�
 type Provider interface {
     Name() string
     ClientID() string
+    Scopes() string
     AuthorizeURL(state, codeChallenge string) string
     ExchangeCode(ctx context.Context, code string) (token string, scopes []string, err error)
     ValidateToken(ctx context.Context, token string) (Identity, error)

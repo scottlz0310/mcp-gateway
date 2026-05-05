@@ -68,7 +68,7 @@ curl -X POST "http://localhost:8080/setup?token=<TOKEN>" \
 # → {"saved":true,"restart_required":true}
 ```
 
-4. The gateway saves `config.yaml` (with the secret encrypted via `age`) and exits with code `0`.
+4. The gateway saves only the fields provided in the POST body to `config.yaml` (encrypting `client_secret` via `age` if supplied) and exits with code `0`.
 5. Your process supervisor (e.g., Docker Compose with `restart: unless-stopped`, systemd, etc.) restarts the gateway in **normal mode**.
 
 ### API reference
@@ -82,8 +82,8 @@ curl -X POST "http://localhost:8080/setup?token=<TOKEN>" \
 
 ```json
 {
-  "client_id": "string (required)",
-  "client_secret": "string (required)",
+  "client_id": "string (required only if listed as missing by GET /setup)",
+  "client_secret": "string (required only if listed as missing by GET /setup)",
   "routes": [
     {
       "name": "string (required)",
@@ -97,7 +97,7 @@ curl -X POST "http://localhost:8080/setup?token=<TOKEN>" \
 
 **Error codes:** `401` invalid token · `408` token expired · `409` already configured · `422` validation error
 
-> **Security note:** The setup token is single-use and expires after 15 minutes. In production (HTTPS), POST requests should go over TLS. The gateway logs a warning if POST is received over plain HTTP.
+> **Security note:** The setup token is consumed (invalidated) only after a successful `POST /setup`; GET requests and failed POST attempts remain valid until expiry (15 minutes). In production (HTTPS), POST requests should go over TLS. The gateway logs a warning if POST is received over plain HTTP.
 
 ## Configuration
 
@@ -283,6 +283,7 @@ The OAuth provider is abstracted behind a `Provider` interface, making it straig
 type Provider interface {
     Name() string
     ClientID() string
+    Scopes() string
     AuthorizeURL(state, codeChallenge string) string
     ExchangeCode(ctx context.Context, code string) (token string, scopes []string, err error)
     ValidateToken(ctx context.Context, token string) (Identity, error)
