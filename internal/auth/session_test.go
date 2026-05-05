@@ -401,7 +401,7 @@ func TestAcquireDevicePollingSerializes(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	expiresAt := time.Now().Add(15 * time.Minute)
 
-	code, err := s.CreateDevice("gh-dev", "ABCD-9999", "https://github.com/login/device", expiresAt, 5)
+	code, err := s.CreateDevice("gh-dev", "ABCD-9999", "https://github.com/login/device", expiresAt, 0)
 	if err != nil {
 		t.Fatalf("CreateDevice: %v", err)
 	}
@@ -428,7 +428,7 @@ func TestAcquireDevicePollingConcurrent(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	expiresAt := time.Now().Add(15 * time.Minute)
 
-	code, err := s.CreateDevice("gh-dev-concurrent", "EFGH-0001", "https://github.com/login/device", expiresAt, 5)
+	code, err := s.CreateDevice("gh-dev-concurrent", "EFGH-0001", "https://github.com/login/device", expiresAt, 0)
 	if err != nil {
 		t.Fatalf("CreateDevice: %v", err)
 	}
@@ -480,6 +480,25 @@ func TestAcquireDevicePollingUnknownCode(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	if s.AcquireDevicePolling("no-such-code") {
 		t.Fatal("expected AcquireDevicePolling to return false for unknown code")
+	}
+}
+
+func TestAcquireDevicePollingEnforcesInterval(t *testing.T) {
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
+	expiresAt := time.Now().Add(15 * time.Minute)
+
+	code, err := s.CreateDevice("gh-dev-interval", "IJKL-0002", "https://github.com/login/device", expiresAt, 5)
+	if err != nil {
+		t.Fatalf("CreateDevice: %v", err)
+	}
+
+	if !s.AcquireDevicePolling(code) {
+		t.Fatal("expected first AcquireDevicePolling to succeed")
+	}
+	s.ReleaseDevicePolling(code)
+
+	if s.AcquireDevicePolling(code) {
+		t.Fatal("expected second AcquireDevicePolling inside interval to be rejected")
 	}
 }
 
