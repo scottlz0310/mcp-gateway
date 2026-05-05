@@ -11,29 +11,32 @@
 
 ---
 
-## 推奨消化順（2026-05-04 更新）
+## 推奨消化順（2026-05-05 更新）
 
-### Phase 1 — 今すぐ着手（コード変更不要）
+### v0.1.0 リリース済み（2026-04-30）
 
-| 優先 | ISSUE | 理由 |
+Phase 1〜3 はすべて実装・マージ済み。v0.1.0 として GitHub Release 公開済み。
+
+| Phase | ISSUE | 状態 |
 |---|---|---|
-| 1 | **mcp-gateway #19** Compose ルーティング | ✅ 完了（PR #20 マージ済み） |
-| 2 | **mcp-gateway #18** Copilot API 調査 | ✅ 完了（PR #21 マージ済み） |
+| 1 | **#19** Compose ルーティング | ✅ PR #20 マージ済み |
+| 1 | **#18** Copilot API 調査 | ✅ PR #21 マージ済み |
+| 2 | **#16** Device Flow 直列化 | ✅ PR #31 マージ済み |
+| 2 | **copilot-review-mcp #12** AUTH_MODE=gateway | ✅ 2026-05-04 完了 |
+| 2 | **#15** ユーザーホワイトリスト | ⏭️ SKIP（ホスティング移行時に再評価） |
+| 3 | **#11** Config Persistence | ✅ PR #37 マージ済み（age X25519 暗号化） |
+| 3 | **#12** Setup Wizard | ✅ PR #38 マージ済み |
 
-### Phase 2 — #19 動作確認後
+### v0.2.0 へ向けて（次フェーズ）
 
-| 優先 | ISSUE | 状態/理由 |
-|---|---|---|
-| 3 | **mcp-gateway #16** Device Flow 直列化 | ✅ 完了（PR #31 マージ済み） |
-| 4 | **copilot-review-mcp #12** AUTH_MODE=gateway | ✅ 完了（2026-05-04） |
-| 5 | **mcp-gateway #15** ユーザーホワイトリスト | ⏭️ SKIP（ローカル Docker 運用継続、ホスティング移行時に再評価） |
-
-### Phase 3 — インフラ整備（長期）
-
-| 優先 | ISSUE | 理由 |
-|---|---|---|
-| 6 | **mcp-gateway #11** Config Persistence | 🎯 次ターゲット。暗号化方式の技術選択が先決 |
-| 7 | **mcp-gateway #12** Setup Wizard | #11 完了が前提 |
+| 優先 | 項目 | 種別 | 状態 |
+|---|---|---|---|
+| 1 | **v0.1.0 E2E 動作検証** | runbook | 🎯 次ターゲット（[`docs/runbook-e2e-v0.1.0.md`](docs/runbook-e2e-v0.1.0.md)） |
+| 2 | **観測性整備**（構造化ログ統一・基礎メトリクス） | enhancement | 🗒️ 計画段階 |
+| 3 | **CI 強化**（カバレッジ計測・lint 強化） | infra | 🗒️ 計画段階 |
+| 4 | **ドキュメント整備**（README 構造見直し・運用手順統合） | docs | 🗒️ 計画段階 |
+| 5 | **保留 issue 最終判断**（#3/#4/#5/#6） | triage | 🗒️ 計画段階 |
+| 6 | **v0.2.0 リリース** | release | 上記完了後 |
 
 ### 保留維持
 
@@ -42,7 +45,7 @@
 | **#6** 汎用 OIDC | #18 結果次第で再評価 |
 | **#5** env var 移行 | 追加プロバイダ確定まで YAGNI |
 | **#4** fly.io OAuth | fly.io と直接調整が必要 |
-| **#3** fly.io 調査 | 調査完了済み・保留 |
+| **#3** fly.io 調査 | 調査完了済み・GitHub 側は close 候補（v0.2.0 triage で確定） |
 
 ---
 
@@ -156,8 +159,13 @@ copilot-review-mcp 側のコード変更ゼロで、`ROUTE_COPILOT_REVIEW=/mcp/c
 
 ### [#11 feat: Config Persistence Layer（env vars → YAML/SQLite 設定ファイル）](https://github.com/scottlz0310/mcp-gateway/issues/11)
 
-**状態**: 🎯 次ターゲット（技術選択フェーズ）
+**状態**: ✅ 完了（2026-05-04、PR #37 マージ済み）
 **依存**: なし（独立着手可能）
+
+> 実装ハイライト: `internal/config/` パッケージで age X25519 ベースのフィールド暗号化を実装。
+> `gateway.key`（AGE-SECRET-KEY-1... 形式）+ `MCP_GATEWAY_MASTER_KEY`（HKDF→bech32 決定論的導出）+
+> ランダム生成のフォールバック 3 段階。`config.yaml` の `github_client_secret` を `ENC[age:]<base64>` 形式で永続化。
+> 起動時の自動移行ロジック（平文 → 暗号化）と env var フォールバックを実装済み。
 
 > **方針変更（2026-05-04）**: ローカル Docker 運用継続を前提に着手。
 > コンテナ起動時に `GITHUB_MCP_CLIENT_SECRET` 等が必須なため、これを config ファイルに永続化し
@@ -341,68 +349,27 @@ gateway:
 
 #### サブタスク
 
-- [x] 暗号化ライブラリ選定（`filippo.io/age` 採用確定）・キー管理方針・追加制約の方針決定（完了）
-- [ ] キー導出方式の確定（X25519 統一・PoC 必須）
-  - HKDF → 32 bytes → bech32 エンコード → `age.ParseX25519Identity()` で X25519 identity 生成
-  - ScryptIdentity は不採用（AGE-SECRET-KEY-1 形式で保存不可のため #11 スコープ外）
-  - 決定論的生成が困難と判明した場合は別 issue 化し、#11 はランダム生成で先行実装
-- [ ] `filippo.io/age` を go.mod に追加（`go get filippo.io/age`）と PoC
-  - HKDF → bech32 → `age.ParseX25519Identity()` の往復が動作するか確認
-  - **PoC で検証すること（運用事故チェックリスト）**:
-    1. 同じ master key から毎回同じ identity が得られること（決定論的性）
-    2. 別の master key では復号できないこと
-    3. gateway.key の AGE-SECRET-KEY-1... 形式での保存・読み込みが往復で一致すること
-    4. gateway.key が不正形式・空・存在するが読み取り不能の場合に起動エラーになること（上書きしないこと）
-- [ ] `internal/config/` パッケージ新設
-  - Config 構造体・YAML 読み書き（`gopkg.in/yaml.v3`）
-  - `LoadKey(keyPath, masterKey string) (KeyMaterial, error)` — 優先順位でキーを解決・保存
-
-    ```go
-    // KeyMaterial は復号 + 暗号化の両 interface を保持する。
-    // age.Identity は復号のみ、age.Recipient は暗号化のみのため両方必要。
-    type KeyMaterial struct {
-        Decrypt age.Identity   // DecryptField で使う復号側（age.Identity は復号専用）
-        Encrypt age.Recipient  // EncryptField で使う暗号化側
-    }
-    // PoC 結果に応じた具体型（X25519 統一）:
-    //   Decrypt = *X25519Identity, Encrypt = identity.Recipient()
-    ```
-
-    - gateway.key 破損時は `errKeyCorrupt` 系エラーを返し、呼び出し元で `os.Exit(1)`
-    - MCP_GATEWAY_MASTER_KEY の長さが 32 bytes 未満の場合はエラー
-  - `EncryptField(km KeyMaterial, plaintext string) (string, error)` — `ENC[age:]<base64-ciphertext>` 形式（正確なフォーマットは PoC で確定）
-  - `DecryptField(km KeyMaterial, ciphertext string) (string, error)` — フィールド復号
-  - `MigrateSecret(cfg *Config, km KeyMaterial) error` — 移行ロジック（上記 3 ケース）
-  - env override マージ（12-factor 互換）
-  - 0600 ファイル保存・Windows ベストエフォート警告
-  - ログ出力禁止ルールに従うこと（シークレット値を一切 slog に渡さない）
-- [ ] 設定ファイルパス解決（`MCP_CONFIG_FILE` env > `./config.yaml`）
-  - Docker Compose では `MCP_CONFIG_FILE=/data/config.yaml` を明示指定する
-  - `/data/config.yaml` をデフォルトにすると非 Docker 環境（`go run`・bare binary）で起動失敗するため、デフォルトはカレントディレクトリ
-- [ ] キーファイルパス解決（`MCP_GATEWAY_KEY_PATH` env > `./gateway.key`）
-  - Docker Compose では `MCP_GATEWAY_KEY_PATH=/data/gateway.key` を明示指定する
-  - `/data/gateway.key` をデフォルトにすると非 Docker 環境で起動失敗するため、デフォルトはカレントディレクトリ
-- [ ] `cmd/server/main.go` の `mustEnv` を config ロードに置き換え
-  - `MCP_GATEWAY_MASTER_KEY` / `MCP_MASTER_KEY` alias の読み込み
-- [ ] `internal/router/router.go` の `ParseEnv()` を config ベース実装に切り替え
-- [ ] テスト — 以下のケースをすべてカバーすること:
-  - `gateway.key` あり + env var あり → `gateway.key` 優先・env var は無視
-  - `gateway.key` なし + `MCP_GATEWAY_MASTER_KEY` あり → 決定論的に生成・保存（同じ key で再実行すると同じ identity）
-  - `gateway.key` なし + env var なし → ランダム生成・保存
-  - `gateway.key` 不正（空・形式不正・権限エラー）→ 自動上書きせずエラー終了
-  - `ENC[...]` 復号成功
-  - 平文 secret が config.yaml にある → 暗号化して書き戻し
-  - secret なし + `GITHUB_MCP_CLIENT_SECRET` env var あり → 暗号化保存
-  - secret なし + env var なし → 明確なエラー
-  - ログに secret 値・ENC 全文・key 内容が含まれないこと
-  - `MCP_GATEWAY_MASTER_KEY` が 32 bytes 未満 → エラー
-- [ ] README.md（キーバックアップ警告・`MCP_GATEWAY_MASTER_KEY` のリスク・最低長・gateway.key 破損時の対応） / CHANGELOG.md 更新
+- [x] 暗号化ライブラリ選定（`filippo.io/age` 採用確定）・キー管理方針・追加制約の方針決定
+- [x] キー導出方式の確定（X25519 統一・HKDF → bech32 → `age.ParseX25519Identity()` で決定論的導出）
+- [x] `filippo.io/age` を go.mod に追加・PoC 実施（決定論的性・別 master key での復号失敗・往復一致・破損時の起動エラーをすべて検証済み）
+- [x] `internal/config/` パッケージ新設
+  - `config.go` — `AppConfig` / YAML 読み書き
+  - `key.go` — `LoadKey(keyPath, masterKey)` 3 段階フォールバック
+  - `crypto.go` — `EncryptField` / `DecryptField`（`ENC[age:]<base64>` 形式）
+  - `bech32.go` — bech32 エンコード（age 標準互換）
+  - `atomic.go` — アトミックなファイル書き込み・0600 パーミッション
+- [x] 設定ファイルパス解決（`MCP_CONFIG_FILE` env > `./config.yaml`）
+- [x] キーファイルパス解決（`MCP_GATEWAY_KEY_PATH` env > `./gateway.key`）
+- [x] `cmd/server/main.go` の `mustEnv` を config ロードに置き換え（`MCP_GATEWAY_MASTER_KEY` / `MCP_MASTER_KEY` alias 対応）
+- [x] `internal/router/router.go` の `ParseEnv()` を config ベース実装に切り替え
+- [x] テスト（`config_test.go` / `crypto_test.go` / `key_test.go` で全ケースカバー）
+- [x] README.md / CHANGELOG.md 更新
 
 ---
 
 ### [#12 feat: First-run Setup Wizard（初回デプロイ時のインタラクティブ設定フロー）](https://github.com/scottlz0310/mcp-gateway/issues/12)
 
-**状態**: 完了（実装済み）
+**状態**: ✅ 完了（2026-05-05、PR #38 マージ済み）
 **依存**: #11（Config Persistence Layer）✅ 完了済み
 
 設定ファイルが存在しない初回起動時に `/setup` エンドポイントを自動活性化し、CLI（curl）で初期設定を完了できるようにする。
@@ -459,6 +426,98 @@ POST /setup?token=<token>  Content-Type: application/json
 - [x] 未 setup 状態での通常ルート 503 レスポンス
 - [x] HTTPS チェック（平文 HTTP 時の警告ログ、TLS は TLS 終端プロキシ等に委ねる）
 - [x] テスト / README.md（first-run guide 書き換え） / CHANGELOG.md 更新
+
+---
+
+### v0.2.0 ロードマップ（2026-05-05 起票）
+
+v0.1.0 リリース後の次フェーズ。**コードベースの大規模追加よりも、品質・運用・観測性の底上げを優先**する。
+個別 issue 化は着手前に都度判断する（現時点では tasks.md 内の計画項目のみ）。
+
+---
+
+#### v0.2.0-RM1: v0.1.0 E2E 動作検証（リリースゲート）
+
+**状態**: 🎯 次着手
+**成果物**: [`docs/runbook-e2e-v0.1.0.md`](docs/runbook-e2e-v0.1.0.md)（作成済み・実行待ち）
+
+v0.1.0 で大幅に増えた永続化・暗号化・wizard まわりを実環境（Docker Compose）で踏破する。
+すべて green になったら v0.2.0 リリース判断材料の最大ピースが揃う。
+
+##### サブタスク
+
+- [ ] ランブックに従い E2E 動作検証を実施
+- [ ] 失敗・回帰があれば fix PR を切り、ランブックに「観測された挙動」セクションを追記
+- [ ] CHANGELOG.md に「v0.1.0 E2E 検証完了」セクションを追加
+
+---
+
+#### v0.2.0-RM2: 観測性整備
+
+**状態**: 🗒️ 計画段階
+**目的**: 障害時に「何が起きたか」を log だけで追えるようにする。メトリクスは最小限。
+
+##### 想定スコープ
+
+- [ ] 構造化ログ（`log/slog`）の出力フィールドを統一（request_id・route・upstream・latency_ms・status）
+- [ ] `internal/middleware/` への request_id 注入と propagation（X-Request-ID ヘッダ）
+- [ ] エラー分類タグ（`err_kind=upstream_timeout|token_expired|...`）の最小限の整備
+- [ ] 必要性が確認できた場合のみ Prometheus エンドポイント追加（YAGNI 判定優先）
+- [ ] 個別 issue 化は着手直前に判断
+
+---
+
+#### v0.2.0-RM3: CI 強化
+
+**状態**: 🗒️ 計画段階
+**目的**: 変更時の安全性をプラットフォーム任せにし、レビュー負荷を下げる。
+
+##### 想定スコープ
+
+- [ ] `go test -coverprofile` をワークフローに組み込み・閾値（暫定 60%）を設定
+- [ ] `golangci-lint` の有効ルール拡張（gosec・errcheck・govet 強化）
+- [ ] govulncheck をワークフローに追加
+- [ ] 個別 issue 化は着手直前に判断
+
+---
+
+#### v0.2.0-RM4: ドキュメント整備
+
+**状態**: 🗒️ 計画段階
+**目的**: README が機能追加で肥大化しているため、構造を再設計する。
+
+##### 想定スコープ
+
+- [ ] README.md の章立て見直し（クイックスタート・運用・トラブルシュートを分離）
+- [ ] Setup wizard / config 暗号化 / token 永続化のクックブックを `docs/` に分離
+- [ ] CHANGELOG.md からリリースノートを `docs/release-notes/` に分離（v0.1.0 から）
+- [ ] 個別 issue 化は着手直前に判断
+
+---
+
+#### v0.2.0-RM5: 保留 issue 最終判断（triage）
+
+**状態**: 🗒️ 計画段階
+
+##### 検討対象
+
+- [ ] **#3** fly.io 調査 — 結論 Issue 本文に記載済み・open のままで実害は無いが、close するか判断
+- [ ] **#4** fly.io OAuth — fly.io との直接調整見込みが立たない場合は close
+- [ ] **#5** env var 移行（`OAUTH_*` 系） — 追加プロバイダ未定のため close 候補
+- [ ] **#6** 汎用 OIDC — Entra ID 不適合・対象 MCP 未定のため close 候補
+
+各 issue について「open 維持 / close」を判断し、close する場合は判断理由をコメントで残す。
+
+---
+
+#### v0.2.0-RM6: v0.2.0 リリース
+
+**状態**: 🗒️ RM1〜RM5 完了後
+
+- [ ] CHANGELOG.md に v0.2.0 セクションを記載
+- [ ] tag `v0.2.0` を作成・push
+- [ ] GitHub Release 公開
+- [ ] tasks.md に v0.3.0 の枠（あれば）を追加
 
 ---
 
