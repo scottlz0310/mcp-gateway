@@ -28,7 +28,7 @@ type Handler struct {
 	envClientID  string
 	envSecret    string
 	hasEnvRoutes bool
-	postMu       sync.Mutex // serializes POST /setup to prevent concurrent token-race
+	postMu       sync.RWMutex // guards h.appCfg: write-locked during POST, read-locked during GET
 }
 
 // HandlerOption is a functional option for NewHandler.
@@ -51,6 +51,9 @@ func WithEnvValues(clientID, secret string, hasRoutes bool) HandlerOption {
 // onSuccess is invoked (in a goroutine) after a successful POST /setup so
 // the caller can schedule a clean process exit.
 func NewHandler(mgr *Manager, appCfg *appconfig.AppConfig, cfgPath string, km *appconfig.KeyMaterial, onSuccess func(), opts ...HandlerOption) *Handler {
+	if onSuccess == nil {
+		onSuccess = func() {}
+	}
 	h := &Handler{
 		mgr:       mgr,
 		appCfg:    appCfg,
@@ -87,7 +90,9 @@ func (h *Handler) handleGet(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, tokenErrStatus(err), err.Error())
 		return
 	}
+	h.postMu.RLock()
 	missing := h.missingFields()
+	h.postMu.RUnlock()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"missing": missing,
 		"hint":    "POST /setup with JSON body: {\"client_id\",\"client_secret\",\"routes\":[{\"name\",\"prefix\",\"upstream\"}]}",
@@ -104,9 +109,10 @@ type setupRequest struct {
 // handlePost validates the token, persists the configuration, and schedules
 // a clean shutdown so the supervisor can restart in normal mode.
 //
-// The postMu mutex ensures that concurrent POSTs are serialized so that only
-// one request can pass Validate() and proceed to Consume() at a time,
-// preserving the single-use token semantics.
+// postMu (write-lock) serializes concurrent POSTs so that only one request
+// can proceed from Validate() through SaveConfig() to Consume() at a time,
+// preserving single-use token semantics. It also prevents data races against
+// concurrent GET reads of h.appCfg.
 func (h *Handler) handlePost(w http.ResponseWriter, r *http.Request) {
 	h.postMu.Lock()
 	defer h.postMu.Unlock()
@@ -230,6 +236,8 @@ func UnconfiguredHandler(setupURL string) http.Handler {
 }
 
 // WaitForShutdown serves mux until ctx is cancelled.
+// http.ErrServerClosed is translated to nil because it is the normal result
+// of a clean Shutdown() call and callers should not need to special-case it.
 func WaitForShutdown(ctx context.Context, srv *http.Server) error {
 	go func() {
 		<-ctx.Done()
@@ -237,7 +245,10 @@ func WaitForShutdown(ctx context.Context, srv *http.Server) error {
 		defer cancel()
 		_ = srv.Shutdown(shutCtx)
 	}()
-	return srv.ListenAndServe()
+	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
 }
 
 // --- helpers ---
