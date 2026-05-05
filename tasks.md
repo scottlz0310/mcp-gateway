@@ -41,13 +41,13 @@ v0.2.0 の実装項目はすべてマージ済み。v0.1.0 E2E ランブック�
 
 ### v0.3.0 へ向けて（次フェーズ）
 
-| 優先 | 項目 | 種別 | 状態 |
-|---|---|---|---|
-| 1 | **観測性整備**（構造化ログ統一・基礎メトリクス） | enhancement | 🗒️ 計画段階 |
-| 2 | **CI 強化**（カバレッジ計測・lint 強化） | infra | 🗒️ 計画段階 |
-| 3 | **ドキュメント整備**（README 構造見直し・運用手順統合） | docs | 🗒️ 計画段階 |
-| 4 | **保留 issue 最終判断**（#3/#4/#5/#6） | triage | 🗒️ 計画段階 |
-| 5 | **v0.3.0 リリース** | release | 上記完了後 |
+| 優先 | 項目 | 種別 | Issue | 状態 |
+|---|---|---|---|---|
+| 1 | **観測性整備**（構造化ログ統一・基礎メトリクス） | enhancement | [#42](https://github.com/scottlz0310/mcp-gateway/issues/42) | 🗒️ 計画段階 |
+| 2 | **CI 強化**（govulncheck・golangci-lint 設定・カバレッジ閾値） | infra | [#43](https://github.com/scottlz0310/mcp-gateway/issues/43) | 🗒️ 計画段階 |
+| 3 | **ドキュメント整備**（運用ガイド・README 構造見直し） | docs | [#44](https://github.com/scottlz0310/mcp-gateway/issues/44) | 🗒️ 計画段階 |
+| 4 | **保留 issue 最終判断**（#3/#4/#5/#6） | triage | [#45](https://github.com/scottlz0310/mcp-gateway/issues/45) | 🗒️ 計画段階 |
+| 5 | **v0.3.0 リリース** | release | — | 上記完了後 |
 
 ### 保留維持
 
