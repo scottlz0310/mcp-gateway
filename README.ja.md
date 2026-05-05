@@ -2,23 +2,102 @@
 
 MCP サービス群への統合ゲートウェイ（GitHub OAuth 認証・リクエストルーティング・Fly.io デプロイ対応）
 
+> **[mcp-docker](https://github.com/scottlz0310/Mcp-Docker) エコシステムの一部** — `mcp-docker` および `copilot-review-mcp` と組み合わせて、コンポーザブルなセルフホスト MCP インフラスタックを構成します。
+
 ## 概要
 
-`mcp-gateway` は複数の MCP サービスへのリクエストルーティングと GitHub OAuth 2.0 認証を一元管理するリバースプロキシです。`github-oauth-proxy` の後継として設計されています（[Mcp-Docker#102](https://github.com/scottlz0310/Mcp-Docker/issues/102)）。
+`mcp-gateway` は複数の MCP サービスへのリクエストルーティングと GitHub OAuth 2.0 認証を一元管理するリバースプロキシです。MCP クライアント（Claude Desktop、VS Code GitHub Copilot など）の単一エントリポイントとして機能し、PKCE 付き OAuth 2.0 認可コードフローを処理してから認証済みリクエストを上流 MCP サーバーへ転送します。
+
+`github-oauth-proxy` の後継として設計されています（[Mcp-Docker#102](https://github.com/scottlz0310/Mcp-Docker/issues/102)）。
 
 ## アーキテクチャ
 
 ```
-MCP クライアント
+MCP クライアント（Claude Desktop / VS Code / etc.）
       │
       ▼
 mcp-gateway (:8080)
-  ├── OAuth フロー   (/authorize, /callback, /token, /register)
-  ├── Bearer 検証   (GitHub API キャッシュ付き)
-  └── ルーティング
-        ├── /mcp/github       → github-mcp:8082
-        └── /mcp/copilot-review → copilot-review-mcp:8083
+  ├── OAuth ファサード   /authorize  /callback  /token  /register
+  ├── Bearer 検証       (GitHub API キャッシュ付き)
+  └── ルーティング（最長プレフィックスマッチ）
+        ├── /mcp/github           → github-mcp-server  :8082
+        └── /mcp/copilot-review   → copilot-review-mcp :8083
 ```
+
+### 3リポジトリ構成
+
+| リポジトリ | 役割 |
+|-----------|------|
+| **mcp-gateway**（本リポジトリ） | OAuth 2.0 認証 + ルーティングゲートウェイ |
+| [mcp-docker](https://github.com/scottlz0310/Mcp-Docker) | MCP スタック全体の Docker Compose オーケストレーション |
+| [copilot-review-mcp](https://github.com/scottlz0310/copilot-review-mcp) | Copilot コードレビュー MCP サーバー |
+
+## 初回起動セットアップウィザード
+
+起動時に必須の値（`GITHUB_MCP_CLIENT_ID`・`GITHUB_MCP_CLIENT_SECRET`・最低1件のルート）のいずれかが不足している場合、ゲートウェイは終了せず自動的に**セットアップモード**に移行します。
+
+### 動作の流れ
+
+1. ゲートウェイは通常ポート（デフォルト `:8080`）でセットアップモードとして起動します。
+2. ワンタイムセットアップトークン（TTL 15 分）が標準出力に出力されます:
+   ```
+   {"level":"warn","msg":"mcp-gateway starting in setup mode — configure via /setup",
+    "setup_url":"http://localhost:8080/setup?token=<TOKEN>",
+    "token":"<TOKEN>"}
+   ```
+3. `/setup` 以外のすべてのルートは `503 {"error":"setup_required","setup_url":"..."}` を返します。
+
+### curl でのセットアップ完了
+
+```bash
+# 1. 不足している設定項目を確認
+curl "http://localhost:8080/setup?token=<TOKEN>"
+# → {"missing":["client_id","client_secret","routes"],"hint":"POST /setup ..."}
+
+# 2. 設定を送信
+curl -X POST "http://localhost:8080/setup?token=<TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_id": "Ov23liXXXXXXXXXX",
+    "client_secret": "your-github-oauth-secret",
+    "routes": [
+      {"name": "github", "prefix": "/mcp/github", "upstream": "http://github-mcp:8082"},
+      {"name": "playwright", "prefix": "/mcp/playwright", "upstream": "http://playwright:8931", "no_auth": true}
+    ]
+  }'
+# → {"saved":true,"restart_required":true}
+```
+
+4. ゲートウェイは `config.yaml`（secret は `age` で暗号化）を保存し、終了コード `0` で終了します。
+5. プロセススーパーバイザー（例: `restart: unless-stopped` の Docker Compose、systemd など）がゲートウェイを**通常モード**で再起動します。
+
+### API リファレンス
+
+| メソッド | パス | 説明 |
+|---------|------|------|
+| `GET` | `/setup?token=<TOKEN>` | 不足している設定項目のリストを `{"missing":[...]}` として返す |
+| `POST` | `/setup?token=<TOKEN>` | JSON ボディを受け取り、config を保存して `os.Exit(0)` を呼び出す |
+
+**POST ボディスキーマ:**
+
+```json
+{
+  "client_id": "string (必須)",
+  "client_secret": "string (必須)",
+  "routes": [
+    {
+      "name": "string (必須)",
+      "prefix": "/スラッシュ始まり (必須)",
+      "upstream": "http(s)://host:port (必須)",
+      "no_auth": false
+    }
+  ]
+}
+```
+
+**エラーコード:** `401` トークン無効 · `408` トークン期限切れ · `409` 設定済み · `422` バリデーションエラー
+
+> **セキュリティ上の注意:** セットアップトークンはシングルユースで 15 分で期限切れになります。本番環境（HTTPS）では POST リクエストは TLS 経由で行ってください。平文 HTTP で POST を受信した場合、ゲートウェイは警告をログに出力します。
 
 ## 設定
 
@@ -145,6 +224,9 @@ ROUTE_PUBLIC=/public|http://public-svc:8083|auth=none
 
 | 変数 | デフォルト | 説明 |
 |------|-----------|------|
+| `MCP_GATEWAY_KEY_PATH` | `./gateway.key` | X25519 暗号化キーファイルのパス（[シークレット暗号化](#シークレット暗号化) 参照） |
+| `MCP_CONFIG_FILE` | `./config.yaml` | 永続設定を格納する `config.yaml` のパス |
+| `MCP_GATEWAY_MASTER_KEY` | — | 決定論的キー導出に使用するマスターキー（≥32 バイト; [シークレット暗号化](#シークレット暗号化) 参照） |
 | `MCP_GATEWAY_BASE_URL` | `http://localhost:8080` | OAuth コールバック等に使用するベース URL |
 | `MCP_GATEWAY_PORT` | `8080` | リスンポート |
 | `MCP_GATEWAY_TOKEN_STORE_PATH` | `/data/tokens.json` | 永続トークンストアのファイルパス（[認証状態の永続化](#認証状態の永続化) 参照） |
@@ -280,3 +362,46 @@ go build ./cmd/server
 # Docker ビルド
 docker build -t mcp-gateway .
 ```
+
+## 内部設計
+
+### Provider インターフェース
+
+OAuth プロバイダーは `Provider` インターフェースで抽象化されており、auth ハンドラやミドルウェアを変更することなく新しい ID プロバイダー（fly.io、OIDC など）を追加しやすい構造になっています:
+
+```go
+type Provider interface {
+    Name() string
+    ClientID() string
+    AuthorizeURL(state, codeChallenge string) string
+    ExchangeCode(ctx context.Context, code string) (token string, scopes []string, err error)
+    ValidateToken(ctx context.Context, token string) (Identity, error)
+}
+
+type Identity struct {
+    Provider    string
+    Subject     string // 上流に転送する安定したユーザー識別子
+    DisplayName string // ログ用のオプショナルな表示名
+}
+```
+
+プロキシは上流 MCP サーバーに以下のヘッダーを転送します:
+
+| ヘッダー | 値 |
+|---------|---|
+| `X-Authenticated-User` | `Identity.Subject`（正規のプロバイダー非依存識別子） |
+| `X-GitHub-Login` | `X-Authenticated-User` と同値（後方互換のため両方送出） |
+
+なりすまし可能な受信ヘッダー（`X-Authenticated-User`、`X-GitHub-Login`）はプロキシ前にストリップされます。
+
+## Docker イメージ
+
+```
+ghcr.io/scottlz0310/mcp-gateway:latest
+```
+
+`gcr.io/distroless/static-debian12:nonroot` をベースにビルド — シェルなし・パッケージマネージャなし・非 root（UID 65532）で動作します。
+
+## ライセンス
+
+[LICENSE](LICENSE) を参照してください。
