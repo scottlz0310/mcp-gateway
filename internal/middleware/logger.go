@@ -1,16 +1,18 @@
 package middleware
 
 import (
+	"bufio"
 	"context"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 )
 
 // statusWriter wraps http.ResponseWriter to capture the written HTTP status
-// code. It implements Unwrap so that http.NewResponseController can reach the
-// underlying writer and use its optional interfaces (Flush, Hijack, etc.),
-// preserving streaming behaviour through the Logger middleware.
+// code. It explicitly implements http.Flusher and http.Hijacker by delegating
+// to the underlying writer, so that both direct type-assertions and
+// http.NewResponseController can reach those capabilities through the wrapper.
 type statusWriter struct {
 	http.ResponseWriter
 	status int
@@ -33,10 +35,27 @@ func (sw *statusWriter) Write(b []byte) (int, error) {
 	return sw.ResponseWriter.Write(b)
 }
 
-// Unwrap returns the underlying ResponseWriter so that http.ResponseController
-// and direct Flusher/Hijacker type-assertions continue to work through the wrapper.
+// Unwrap returns the underlying ResponseWriter so http.NewResponseController
+// can find optional interfaces beyond Flusher and Hijacker.
 func (sw *statusWriter) Unwrap() http.ResponseWriter {
 	return sw.ResponseWriter
+}
+
+// Flush implements http.Flusher, delegating to the underlying writer when
+// it supports flushing (e.g. for Server-Sent Events or chunked responses).
+func (sw *statusWriter) Flush() {
+	if f, ok := sw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Hijack implements http.Hijacker, delegating to the underlying writer when
+// it supports connection hijacking (e.g. for WebSocket upgrades).
+func (sw *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if h, ok := sw.ResponseWriter.(http.Hijacker); ok {
+		return h.Hijack()
+	}
+	return nil, nil, http.ErrNotSupported
 }
 
 // statusCode returns the captured status, defaulting to 200 when no status was
@@ -54,8 +73,7 @@ func (sw *statusWriter) statusCode() int {
 // Log level is chosen by status range:
 //
 //	5xx → Error
-//	4xx → Warn
-//	2xx/3xx → Info
+//	2xx/3xx/4xx → Info
 func Logger() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -78,12 +96,8 @@ func Logger() func(http.Handler) http.Handler {
 type logFunc func(ctx context.Context, msg string, args ...any)
 
 func logFuncForStatus(status int) logFunc {
-	switch {
-	case status >= 500:
+	if status >= 500 {
 		return slog.ErrorContext
-	case status >= 400:
-		return slog.WarnContext
-	default:
-		return slog.InfoContext
 	}
+	return slog.InfoContext
 }

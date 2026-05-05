@@ -91,8 +91,8 @@ func TestLogger4xx(t *testing.T) {
 	h.ServeHTTP(w, r)
 
 	entry := parseLastLog(t, &buf)
-	if entry["level"] != "WARN" {
-		t.Errorf("level: got %q, want WARN", entry["level"])
+	if entry["level"] != "INFO" {
+		t.Errorf("level: got %q, want INFO", entry["level"])
 	}
 	if entry["status"] != float64(401) {
 		t.Errorf("status: got %v, want 401", entry["status"])
@@ -143,5 +143,42 @@ func TestLoggerUnwrap(t *testing.T) {
 	sw := &statusWriter{ResponseWriter: inner}
 	if sw.Unwrap() != inner {
 		t.Error("Unwrap should return the underlying ResponseWriter")
+	}
+}
+
+func TestStatusWriterFlush(t *testing.T) {
+	// httptest.ResponseRecorder implements http.Flusher, so Flush() must be
+	// forwarded without panicking and must set the Flushed flag.
+	inner := httptest.NewRecorder()
+	sw := &statusWriter{ResponseWriter: inner}
+
+	// statusWriter itself must satisfy http.Flusher via direct type assertion.
+	flusher, ok := any(sw).(http.Flusher)
+	if !ok {
+		t.Fatal("statusWriter does not implement http.Flusher")
+	}
+	flusher.Flush()
+	if !inner.Flushed {
+		t.Error("Flush did not propagate to underlying ResponseRecorder")
+	}
+}
+
+func TestStatusWriterHijackNotSupported(t *testing.T) {
+	// httptest.ResponseRecorder does NOT implement http.Hijacker, so Hijack()
+	// must return http.ErrNotSupported and statusWriter must still satisfy the
+	// http.Hijacker interface via direct type assertion.
+	inner := httptest.NewRecorder()
+	sw := &statusWriter{ResponseWriter: inner}
+
+	hijacker, ok := any(sw).(http.Hijacker)
+	if !ok {
+		t.Fatal("statusWriter does not implement http.Hijacker")
+	}
+	conn, rw, err := hijacker.Hijack()
+	if err == nil {
+		t.Error("expected error from Hijack when underlying writer does not support it")
+	}
+	if conn != nil || rw != nil {
+		t.Error("Hijack should return nil conn and rw on error")
 	}
 }
