@@ -1,0 +1,679 @@
+# v0.1.0 E2E 動作検証ランブック
+
+`mcp-gateway` v0.1.0 リリース後の E2E 動作検証手順。
+v0.1.0 で追加された **設定永続化（age 暗号化）**・**Setup Wizard**・**トークン永続化**・**ルーティング**・**OAuth 各種フロー**を実環境（Docker Compose）で踏破することを目的とする。
+
+> **対象タグ**: `v0.1.0`（コミット `dd6de92` 以降のメインブランチでも可）
+> **想定実行者**: メンテナ本人
+> **所要時間**: 60〜90 分（GitHub OAuth のブラウザ往復を含む）
+> **作成日**: 2026-05-05
+
+---
+
+## 1. 検証スコープと合格基準
+
+### スコープ
+
+| 領域 | 検証する項目 |
+|---|---|
+| Config 永続化 | `config.yaml` への secret 暗号化保存、再起動後の復号 |
+| Key management | `gateway.key` 自動生成・破損検知・`MCP_GATEWAY_MASTER_KEY` 決定論的導出 |
+| Setup Wizard | 初回起動時の `503 setup_required`、`/setup` 経由の config 投入、再起動後の通常起動 |
+| OAuth | Authorization Code + PKCE、Refresh Token、Device Authorization Grant |
+| Token persistence | `/data/tokens.json` 経由の認証スキップ（再起動後） |
+| Routing | longest-prefix match、`auth=none` バイパス |
+| エラー応答 | RFC 6750 / RFC 9728 に沿った 401 / `WWW-Authenticate` |
+| 結合 | `copilot-review-mcp` との `AUTH_MODE=gateway` 連携 |
+
+### スコープ外
+
+- 負荷テスト・パフォーマンス計測
+- セキュリティ監査（gosec / govulncheck などは v0.2.0-RM3 で別途）
+- HTTPS 終端（リバースプロキシ／Caddy 等は本ランブック外）
+- fly.io デプロイ（保留中の #4 で対応予定）
+
+### 合格基準
+
+- すべての必須シナリオ（§4.1〜§4.10）が **観測された挙動 = 期待挙動** で完了
+- ログに以下が **一切出力されていない** こと:
+  - GitHub OAuth client secret の平文値
+  - `ENC[age:]...` の全文
+  - `gateway.key` の内容
+  - 任意の Bearer token の生値
+- 失敗・回帰があった場合は §6 の手順で issue 化
+
+---
+
+## 2. 前提条件
+
+### 必要なツール
+
+| ツール | 用途 | 推奨バージョン |
+|---|---|---|
+| Docker / Docker Compose | gateway + upstream の起動 | 24+ / v2 |
+| `curl` | HTTP リクエスト | 任意 |
+| `jq` | JSON パース | 任意 |
+| `openssl` | `MCP_GATEWAY_MASTER_KEY` 生成 | 任意 |
+| ブラウザ | Authorization Code Flow の手動承認 | 任意 |
+| `age-keygen`（任意） | `gateway.key` の互換性確認 | 1.1+ |
+
+### 必要な事前準備
+
+1. GitHub OAuth App を 2 つ用意する（gateway 用 + copilot-review-mcp 用）
+   - 用途を分けるためアプリは分離するが、同一アプリでも検証は可能
+   - Authorization callback URL: `http://localhost:8080/callback`
+   - Device Flow を有効化（GitHub OAuth App 設定 → "Enable Device Flow"）
+2. `examples/copilot-review-routing/` をコピーして作業ディレクトリを作る
+   ```bash
+   cp -r examples/copilot-review-routing /tmp/mcp-gateway-e2e
+   cd /tmp/mcp-gateway-e2e
+   ```
+3. `.env` を作成（`.env.example` があればそれをベースに、無ければ次の最小構成）
+   ```env
+   GITHUB_MCP_CLIENT_ID=Ov23liXXXXXXXXXX
+   GITHUB_MCP_CLIENT_SECRET=__leave_empty_for_wizard_test__
+   GITHUB_CLIENT_ID=Ov23liYYYYYYYYYY
+   GITHUB_CLIENT_SECRET=copilot-review-secret
+   GITHUB_PERSONAL_ACCESS_TOKEN=ghp_xxxxxxxxxxxx
+   MCP_GATEWAY_BASE_URL=http://localhost:8080
+   ```
+4. `data/` ディレクトリを volume mount 用に作成
+   ```bash
+   mkdir -p data
+   ```
+5. `docker-compose.yml` の `mcp-gateway` サービスに以下を追記
+   ```yaml
+       volumes:
+         - ./data:/data
+       environment:
+         MCP_GATEWAY_KEY_PATH: /data/gateway.key
+         MCP_CONFIG_FILE: /data/config.yaml
+         MCP_GATEWAY_TOKEN_STORE_PATH: /data/tokens.json
+   ```
+
+---
+
+## 3. 検証実行のルール
+
+- **シナリオは原則順序通りに実行する**。前段の状態（`gateway.key`・`config.yaml`・`tokens.json`）を後段が利用するため。
+- 各シナリオの末尾に「**観測された挙動**」欄を設け、合致／差分を記録する。
+- 期待と異なる挙動を観測した場合は中断し、§6 のテンプレートで issue を切る。
+- 検証中はログを `docker compose logs -f mcp-gateway` で常時 follow しておく。
+- シナリオを途中からやり直す場合は §7 の「クリーンアップ」を参照。
+
+---
+
+## 4. 検証シナリオ
+
+### 4.1 First-run Setup Wizard
+
+**目的**: `config.yaml` も env vars も不足する状態から `/setup` 経由で初期化できることを確認する。
+
+#### 手順
+
+1. `data/` を空にする
+   ```bash
+   rm -f data/gateway.key data/config.yaml data/tokens.json data/tokens.json.refresh
+   ```
+2. `.env` から secret 系を一時的に空にする
+   ```env
+   GITHUB_MCP_CLIENT_ID=
+   GITHUB_MCP_CLIENT_SECRET=
+   ```
+   `docker-compose.yml` の `ROUTE_GITHUB` / `ROUTE_COPILOT_REVIEW` も一時的にコメントアウトする（routes も空状態を作る）。
+3. 起動
+   ```bash
+   docker compose up -d mcp-gateway
+   docker compose logs -f mcp-gateway
+   ```
+4. ログで setup token を取得
+   ```
+   {"level":"warn","msg":"mcp-gateway starting in setup mode — configure via /setup",
+    "setup_url":"http://localhost:8080/setup?token=<TOKEN>","token":"<TOKEN>"}
+   ```
+5. 通常ルートが 503 を返すことを確認
+   ```bash
+   curl -i http://localhost:8080/mcp/github
+   # 期待: HTTP/1.1 503 Service Unavailable
+   #       {"error":"setup_required","setup_url":"http://localhost:8080/setup?token=..."}
+   ```
+6. `GET /setup` で不足項目を確認
+   ```bash
+   curl "http://localhost:8080/setup?token=<TOKEN>"
+   # 期待: {"missing":["client_id","client_secret","routes"], ...}
+   ```
+7. `POST /setup` で設定を投入
+   ```bash
+   curl -X POST "http://localhost:8080/setup?token=<TOKEN>" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "client_id": "Ov23liXXXXXXXXXX",
+       "client_secret": "your-real-github-oauth-secret",
+       "routes": [
+         {"name": "github", "prefix": "/mcp/github", "upstream": "http://github-mcp:8082"},
+         {"name": "copilot_review", "prefix": "/mcp/copilot-review", "upstream": "http://copilot-review-mcp:8083"}
+       ]
+     }'
+   # 期待: {"saved":true,"restart_required":true}
+   ```
+8. gateway が exit code 0 で停止し、`restart: unless-stopped` で再起動することを確認
+
+#### 期待される挙動
+
+- [ ] `data/gateway.key` が新規生成され、`AGE-SECRET-KEY-1...` で始まるテキストファイルである
+- [ ] `data/config.yaml` の `auth.github_client_secret` が `ENC[age:]<base64>` 形式
+- [ ] `data/config.yaml` に `routes:` ブロックが書き込まれている
+- [ ] `data/config.yaml` の `setup.completed: true` が記録されている
+- [ ] 再起動後は通常モードで起動し、setup token のログが出ない
+- [ ] ログに client_secret の平文が含まれない
+- [ ] `gateway.key` のパーミッションが `0600`（Linux/macOS）
+
+#### 観測された挙動
+
+```
+（実行時に記入）
+```
+
+---
+
+### 4.2 Config 暗号化往復（再起動を跨いだ persist）
+
+**目的**: 暗号化された `github_client_secret` が再起動後も復号でき、ログに平文が出ないことを確認する。
+
+#### 手順
+
+1. §4.1 完了状態から開始
+2. `data/config.yaml` を読み、`ENC[age:]...` で始まる行があることを確認
+   ```bash
+   grep -E "^\s*github_client_secret:" data/config.yaml
+   # 期待: github_client_secret: "ENC[age:]<base64>..."
+   ```
+3. `.env` の `GITHUB_MCP_CLIENT_SECRET` は空のまま gateway を再起動
+   ```bash
+   docker compose restart mcp-gateway
+   ```
+4. ログにエラーが無いこと、setup mode に入っていないことを確認
+5. 通常ルートに認証エラー（401）が返る — secret が無いと OAuth 開始もできないが、ここでの確認は secret が読み込まれているかどうかの間接確認
+   ```bash
+   curl -i http://localhost:8080/.well-known/oauth-authorization-server
+   # 期待: 200 OK + JSON metadata（issuer/authorization_endpoint/token_endpoint 等）
+   ```
+
+#### 期待される挙動
+
+- [ ] 再起動後 setup mode に **入らない**
+- [ ] `/.well-known/oauth-authorization-server` が 200 を返す
+- [ ] ログに `ENC[age:]...` 全文・client_secret 平文が出ていない
+- [ ] `data/config.yaml` の中身に変化がない（再書き込みされていない）
+
+#### 観測された挙動
+
+```
+（実行時に記入）
+```
+
+---
+
+### 4.3 gateway.key 破損時の起動失敗
+
+**目的**: `gateway.key` が壊れている／空のとき、自動上書きせず明示的に起動失敗することを確認する（運用事故防止）。
+
+#### 手順
+
+1. gateway を停止
+   ```bash
+   docker compose stop mcp-gateway
+   ```
+2. `gateway.key` をバックアップしてから空にする
+   ```bash
+   cp data/gateway.key data/gateway.key.bak
+   : > data/gateway.key
+   ```
+3. 起動
+   ```bash
+   docker compose up -d mcp-gateway
+   docker compose logs mcp-gateway
+   ```
+4. 起動が失敗していること（exit code 非 0）を確認
+   ```bash
+   docker compose ps mcp-gateway
+   # 期待: STATUS が Exited (1) もしくは類似
+   ```
+5. ログに以下のようなメッセージが出ていることを確認
+   ```
+   gateway.key exists but is invalid; refusing to overwrite to avoid data loss
+   ```
+6. バックアップを書き戻して復旧
+   ```bash
+   mv data/gateway.key.bak data/gateway.key
+   docker compose up -d mcp-gateway
+   ```
+
+#### 期待される挙動
+
+- [ ] 空ファイル状態で起動が失敗（exit code 1）
+- [ ] `gateway.key` が **自動再生成されない**（ファイルサイズが 0 のままか、バックアップ前の状態を保持）
+- [ ] ログにキー内容が出力されていない
+
+#### 観測された挙動
+
+```
+（実行時に記入）
+```
+
+---
+
+### 4.4 MCP_GATEWAY_MASTER_KEY 決定論的導出
+
+**目的**: `gateway.key` を消した状態で `MCP_GATEWAY_MASTER_KEY` を与えると、同じキーが再生成されることを確認する。
+
+#### 手順
+
+1. gateway を停止し、`data/gateway.key` の内容を退避してから削除
+   ```bash
+   docker compose stop mcp-gateway
+   cp data/gateway.key /tmp/gateway.key.original
+   rm data/gateway.key
+   ```
+2. `MCP_GATEWAY_MASTER_KEY` を生成し `.env` にセット
+   ```bash
+   echo "MCP_GATEWAY_MASTER_KEY=$(openssl rand -hex 32)" >> .env
+   ```
+3. `docker-compose.yml` で `MCP_GATEWAY_MASTER_KEY: ${MCP_GATEWAY_MASTER_KEY}` を有効化
+4. 起動
+   ```bash
+   docker compose up -d mcp-gateway
+   ```
+5. `data/gateway.key` が生成されたことを確認し、内容を一時保存
+   ```bash
+   cp data/gateway.key /tmp/gateway.key.derived1
+   ```
+6. もう一度キーを削除して再起動
+   ```bash
+   docker compose stop mcp-gateway
+   rm data/gateway.key
+   docker compose up -d mcp-gateway
+   ```
+7. 再生成された `gateway.key` が `/tmp/gateway.key.derived1` と完全一致することを確認
+   ```bash
+   diff data/gateway.key /tmp/gateway.key.derived1
+   # 期待: 出力なし（一致）
+   ```
+8. 既存 `config.yaml` の `ENC[age:]...` を復号して通常起動できることを確認
+   ```bash
+   curl -i http://localhost:8080/.well-known/oauth-authorization-server
+   # 期待: 200 OK
+   ```
+
+#### 期待される挙動
+
+- [ ] 同じ `MCP_GATEWAY_MASTER_KEY` から毎回同じ `gateway.key` が生成される
+- [ ] 既存の `ENC[age:]...` が新しく導出されたキーで復号できる
+- [ ] `MCP_GATEWAY_MASTER_KEY` が 32 bytes 未満の場合は起動失敗（追加検証として `MCP_GATEWAY_MASTER_KEY=short` で起動して確認）
+
+#### 観測された挙動
+
+```
+（実行時に記入）
+```
+
+---
+
+### 4.5 Authorization Code Flow（ブラウザ経由）
+
+**目的**: ブラウザ経由の OAuth 2.0 + PKCE が成立し、Bearer token が発行されることを確認する。
+
+#### 手順
+
+1. 通常起動状態に戻す（§4.4 まで終わっていれば OK）
+2. PKCE 用の `code_verifier` / `code_challenge` を生成
+   ```bash
+   CODE_VERIFIER=$(openssl rand -base64 32 | tr -d '=+/' | cut -c1-43)
+   CODE_CHALLENGE=$(echo -n "$CODE_VERIFIER" | openssl dgst -sha256 -binary | base64 | tr -d '=+/')
+   echo "verifier=$CODE_VERIFIER"
+   echo "challenge=$CODE_CHALLENGE"
+   ```
+3. ブラウザで `/authorize` を開く
+   ```
+   http://localhost:8080/authorize?response_type=code&client_id=mcp-client&redirect_uri=http://localhost:8080/callback&code_challenge=<CODE_CHALLENGE>&code_challenge_method=S256&state=test123
+   ```
+4. GitHub の承認画面で許可 → callback で `code` パラメータを受領
+5. `/token` で code を交換
+   ```bash
+   curl -X POST http://localhost:8080/token \
+     -d "grant_type=authorization_code" \
+     -d "code=<CODE>" \
+     -d "redirect_uri=http://localhost:8080/callback" \
+     -d "client_id=mcp-client" \
+     -d "code_verifier=$CODE_VERIFIER"
+   # 期待: {"access_token":"...","token_type":"Bearer","expires_in":7776000,"refresh_token":"..."}
+   ```
+6. 取得した access_token を保存
+   ```bash
+   ACCESS=<access_token>
+   REFRESH=<refresh_token>
+   ```
+
+#### 期待される挙動
+
+- [ ] `/authorize` が GitHub の承認画面にリダイレクトされる
+- [ ] callback 後に `code` が発行される
+- [ ] `/token` が `access_token` + `refresh_token` を返す
+- [ ] ログに access_token / refresh_token の生値が **含まれない**
+
+#### 観測された挙動
+
+```
+（実行時に記入）
+```
+
+---
+
+### 4.6 ルーティング & ヘッダ注入
+
+**目的**: longest-prefix match と `X-Authenticated-User` ヘッダ注入が成立することを確認する。
+
+#### 手順
+
+1. §4.5 で取得した `$ACCESS` を使い、`/mcp/github` にリクエスト
+   ```bash
+   curl -i -H "Authorization: Bearer $ACCESS" \
+     http://localhost:8080/mcp/github/health
+   # 期待: 200 OK（github-mcp の応答）
+   ```
+2. `/mcp/copilot-review` も同様に確認
+   ```bash
+   curl -i -H "Authorization: Bearer $ACCESS" \
+     http://localhost:8080/mcp/copilot-review/health
+   ```
+3. gateway のログから upstream へ `X-Authenticated-User` / `X-GitHub-Login` が注入されていることを確認
+   - upstream 側ログ（`docker compose logs github-mcp` など）でも、これらのヘッダが見えるはず
+
+#### 期待される挙動
+
+- [ ] `/mcp/github` → `github-mcp:8082` にルーティングされる
+- [ ] `/mcp/copilot-review` → `copilot-review-mcp:8083` にルーティングされる
+- [ ] upstream へ `X-Authenticated-User: <github-login>` が注入される
+- [ ] Bearer 無し / 無効 token は 401 を返す
+  ```bash
+  curl -i http://localhost:8080/mcp/github/
+  # 期待: 401 Unauthorized + WWW-Authenticate: Bearer realm="..." resource_metadata="..."
+  ```
+
+#### 観測された挙動
+
+```
+（実行時に記入）
+```
+
+---
+
+### 4.7 Refresh Token Grant
+
+**目的**: `refresh_token` grant でアクセストークンを再発行できることを確認する。
+
+#### 手順
+
+1. §4.5 の `$REFRESH` を使う
+   ```bash
+   curl -X POST http://localhost:8080/token \
+     -d "grant_type=refresh_token" \
+     -d "refresh_token=$REFRESH" \
+     -d "client_id=mcp-client"
+   # 期待: {"access_token":"...","token_type":"Bearer","expires_in":...,"refresh_token":"<NEW>"}
+   ```
+2. 旧 refresh_token が **無効化されている**ことを確認
+   ```bash
+   curl -X POST http://localhost:8080/token \
+     -d "grant_type=refresh_token" \
+     -d "refresh_token=$REFRESH" \
+     -d "client_id=mcp-client"
+   # 期待: 400 invalid_grant
+   ```
+3. 新しく発行された refresh_token を保存して以降の検証に使う
+
+#### 期待される挙動
+
+- [ ] 新しい access_token が発行される
+- [ ] refresh_token もローテーションされる（新しい値が返る）
+- [ ] 旧 refresh_token は再使用不可
+- [ ] `data/tokens.json.refresh` が更新されている
+
+#### 観測された挙動
+
+```
+（実行時に記入）
+```
+
+---
+
+### 4.8 Token persistence（再起動後の認証スキップ）
+
+**目的**: `/data/tokens.json` 経由で gateway 再起動後も認証が引き継がれることを確認する。
+
+#### 手順
+
+1. §4.7 完了直後の `$ACCESS` を保持
+2. gateway を再起動
+   ```bash
+   docker compose restart mcp-gateway
+   ```
+3. 再起動後すぐに同じ access_token で `/mcp/github` にアクセス
+   ```bash
+   curl -i -H "Authorization: Bearer $ACCESS" \
+     http://localhost:8080/mcp/github/health
+   # 期待: 200 OK（再認証なし）
+   ```
+4. `data/tokens.json` がハッシュ化された token key のみを含むことを確認
+   ```bash
+   cat data/tokens.json | jq '.'
+   # 期待: token 値の生形ではなく、SHA-256 ハッシュキーが格納されている
+   ```
+
+#### 期待される挙動
+
+- [ ] 再起動後も既存 access_token が有効
+- [ ] `tokens.json` は `0600` パーミッション
+- [ ] `tokens.json` に raw token 文字列が **含まれない**（hashed key のみ）
+- [ ] `tokens.json.refresh` が存在し、`0600` パーミッション
+
+#### 観測された挙動
+
+```
+（実行時に記入）
+```
+
+---
+
+### 4.9 Device Authorization Grant
+
+**目的**: RFC 8628 device flow が並列リクエストでも `slow_down` 無く成立することを確認する。
+
+#### 手順
+
+1. device 認可開始
+   ```bash
+   curl -X POST http://localhost:8080/device_authorization \
+     -d "client_id=mcp-client" \
+     -d "scope=repo user"
+   # 期待: {"device_code":"...","user_code":"XXXX-XXXX","verification_uri":"...","interval":5,...}
+   ```
+2. ブラウザで `verification_uri_complete` を開き、`user_code` を入力して承認
+3. 承認待ち中に **同じ device_code で並列に 5 回 token endpoint を叩く**
+   ```bash
+   for i in 1 2 3 4 5; do
+     curl -X POST http://localhost:8080/token \
+       -d "grant_type=urn:ietf:params:oauth:grant-type:device_code" \
+       -d "device_code=$DEVICE_CODE" \
+       -d "client_id=mcp-client" &
+   done
+   wait
+   # 期待: 全リクエストが authorization_pending を返し、slow_down が出ない（直列化されている）
+   ```
+4. 承認後に再度 `/token` を叩いて access_token を受領
+
+#### 期待される挙動
+
+- [ ] 並列ポーリングしても `slow_down` が返らない
+- [ ] 承認後に正常に `access_token` が発行される
+- [ ] gateway ログに per-device serialize の痕跡（acquire/release）が見える
+
+#### 観測された挙動
+
+```
+（実行時に記入）
+```
+
+---
+
+### 4.10 per-route auth bypass（auth=none）
+
+**目的**: `ROUTE_<NAME>=...|auth=none` で特定ルートの Bearer 検証がスキップされることを確認する。
+
+#### 手順
+
+1. `docker-compose.yml` に検証用の auth=none ルートを追加
+   ```yaml
+       ROUTE_HEALTH: /public-health|http://github-mcp:8082|auth=none
+   ```
+   または既存のテスト用 upstream を流用
+2. gateway を再起動
+3. Bearer 無しでアクセス
+   ```bash
+   curl -i http://localhost:8080/public-health
+   # 期待: 200 OK（401 ではない）
+   ```
+4. 通常ルートは Bearer 無しで 401 になることを確認
+   ```bash
+   curl -i http://localhost:8080/mcp/github
+   # 期待: 401 Unauthorized
+   ```
+5. 検証後はテスト用ルートをコメントアウトして元に戻す
+
+#### 期待される挙動
+
+- [ ] `auth=none` ルートは Bearer 無しで通る
+- [ ] 同時に動いている他のルートは Bearer 検証が有効
+
+#### 観測された挙動
+
+```
+（実行時に記入）
+```
+
+---
+
+### 4.11 RFC 6750 / RFC 9728 エラー応答（任意）
+
+**目的**: Bearer 不正時の `WWW-Authenticate` ヘッダが仕様に沿っていることを確認する。
+
+#### 手順
+
+1. 不正な token でアクセス
+   ```bash
+   curl -i -H "Authorization: Bearer invalid" \
+     http://localhost:8080/mcp/github
+   ```
+2. レスポンスヘッダを確認
+   ```
+   HTTP/1.1 401 Unauthorized
+   WWW-Authenticate: Bearer realm="...", error="invalid_token", resource_metadata="..."
+   ```
+
+#### 期待される挙動
+
+- [ ] `WWW-Authenticate` ヘッダが存在
+- [ ] `error="invalid_token"` を含む
+- [ ] `resource_metadata` URL が含まれる（RFC 9728）
+
+#### 観測された挙動
+
+```
+（実行時に記入）
+```
+
+---
+
+## 5. 結果サマリ
+
+| シナリオ | 結果 | 備考 |
+|---|---|---|
+| 4.1 Setup Wizard | ☐ Pass / ☐ Fail | |
+| 4.2 Config 暗号化往復 | ☐ Pass / ☐ Fail | |
+| 4.3 gateway.key 破損時 | ☐ Pass / ☐ Fail | |
+| 4.4 MASTER_KEY 決定論性 | ☐ Pass / ☐ Fail | |
+| 4.5 Authorization Code | ☐ Pass / ☐ Fail | |
+| 4.6 Routing & ヘッダ注入 | ☐ Pass / ☐ Fail | |
+| 4.7 Refresh Token | ☐ Pass / ☐ Fail | |
+| 4.8 Token persistence | ☐ Pass / ☐ Fail | |
+| 4.9 Device Grant 並列 | ☐ Pass / ☐ Fail | |
+| 4.10 auth=none bypass | ☐ Pass / ☐ Fail | |
+| 4.11 WWW-Authenticate | ☐ Pass / ☐ Fail | |
+
+**最終判定**: ☐ v0.2.0 リリース可 / ☐ 修正後再検証
+
+---
+
+## 6. 失敗時のフロー
+
+1. シナリオを中断し、再現手順を最小化する
+2. 期待挙動と観測挙動の差分をシナリオの「観測された挙動」欄に記録
+3. GitHub issue を以下のテンプレートで切る
+   ```
+   タイトル: bug(e2e): <シナリオ番号> <症状の要約>
+
+   ## 再現手順
+   - ランブック: docs/runbook-e2e-v0.1.0.md §<番号>
+   - <最小再現手順>
+
+   ## 期待
+   - <ランブックの期待挙動>
+
+   ## 観測
+   - <実際に起きたこと>
+
+   ## 環境
+   - mcp-gateway: <commit hash>
+   - Docker: <version>
+   - OS: <version>
+   ```
+4. 修正 PR をマージしたらランブックを最初から再実行（前段の状態に依存するため）
+
+---
+
+## 7. クリーンアップ・再実行
+
+### 全状態をリセットして最初からやり直す
+
+```bash
+docker compose down
+rm -rf data/
+mkdir -p data/
+docker compose up -d
+```
+
+### setup wizard だけやり直す
+
+```bash
+docker compose stop mcp-gateway
+rm data/config.yaml
+# gateway.key は残してよい（残せば暗号化キーは保持される）
+docker compose up -d mcp-gateway
+```
+
+### token state だけリセットする（強制再認証）
+
+```bash
+docker compose stop mcp-gateway
+rm -f data/tokens.json data/tokens.json.refresh
+docker compose up -d mcp-gateway
+```
+
+---
+
+## 8. 参考
+
+- [README.md](../README.md) — 通常運用ドキュメント
+- [CHANGELOG.md](../CHANGELOG.md) — v0.1.0 変更点
+- [docs/spike-18-copilot-api-auth.md](spike-18-copilot-api-auth.md) — Copilot API 認証調査
+- [tasks.md](../tasks.md) — タスク全体管理（v0.2.0 ロードマップ含む）
