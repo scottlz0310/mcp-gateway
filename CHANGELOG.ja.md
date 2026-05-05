@@ -5,6 +5,8 @@
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-05
+
 ### Added
 
 - 初回起動セットアップウィザード ([#12](https://github.com/scottlz0310/mcp-gateway/issues/12))
@@ -80,5 +82,6 @@
 - `auth.Handler` から GitHub 固有の HTTP 通信を排除し、`provider.Provider` への委譲に変更。
 - `middleware` のコンテキストキーを `github_login` → `authenticated_user` に rename（内部実装のみ、外部互換維持）。
 
-[Unreleased]: https://github.com/scottlz0310/mcp-gateway/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/scottlz0310/mcp-gateway/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/scottlz0310/mcp-gateway/releases/tag/v0.1.0
