@@ -47,6 +47,7 @@ type DeviceSession struct {
 	Scope           string
 	Status          deviceStatus
 	pollingInFlight bool // true while one request is actively polling GitHub
+	nextPollAfter   time.Time
 }
 
 // Store holds OAuth flow state (sessions, codes, devices) and delegates token
@@ -235,11 +236,16 @@ func (s *Store) DenyDevice(internalCode string) {
 
 // AcquireDevicePolling atomically marks the device session as in-flight for
 // GitHub polling. It returns true when the caller wins the race and must call
-// ReleaseDevicePolling when done. It returns false in two cases:
+// ReleaseDevicePolling when done. Winning also reserves the next provider poll
+// slot for the device's interval, so a fast follow-up request cannot hit GitHub
+// inside the interval and trigger slow_down.
+//
+// It returns false in three cases:
 //
 //  1. Another goroutine is already polling GitHub for the same device code
 //     (pollingInFlight is true).
-//  2. The device session no longer exists (e.g. it was already consumed or
+//  2. The previous provider poll happened less than Interval seconds ago.
+//  3. The device session no longer exists (e.g. it was already consumed or
 //     expired and cleaned up by the janitor).
 //
 // Callers should distinguish these cases by re-reading the session state when
@@ -254,7 +260,14 @@ func (s *Store) AcquireDevicePolling(internalCode string) bool {
 	if d.pollingInFlight {
 		return false
 	}
+	now := time.Now()
+	if !d.nextPollAfter.IsZero() && now.Before(d.nextPollAfter) {
+		return false
+	}
 	d.pollingInFlight = true
+	if d.Interval > 0 {
+		d.nextPollAfter = now.Add(time.Duration(d.Interval) * time.Second)
+	}
 	return true
 }
 

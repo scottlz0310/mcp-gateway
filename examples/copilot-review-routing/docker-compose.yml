@@ -20,6 +20,9 @@ services:
       GITHUB_MCP_CLIENT_SECRET: ${GITHUB_MCP_CLIENT_SECRET}
       MCP_GATEWAY_BASE_URL: ${MCP_GATEWAY_BASE_URL:-http://localhost:8080}
       MCP_GATEWAY_PORT: ${MCP_GATEWAY_PORT:-8080}
+      MCP_GATEWAY_KEY_PATH: ${MCP_GATEWAY_KEY_PATH:-/data/gateway.key}
+      MCP_CONFIG_FILE: ${MCP_CONFIG_FILE:-/data/config.yaml}
+      MCP_GATEWAY_TOKEN_STORE_PATH: ${MCP_GATEWAY_TOKEN_STORE_PATH:-/data/tokens.json}
       # Route longest-prefix-first; both routes served from a single gateway port.
       ROUTE_GITHUB: /mcp/github|http://github-mcp:8082
       ROUTE_COPILOT_REVIEW: /mcp/copilot-review|http://copilot-review-mcp:8083
@@ -27,6 +30,8 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-info}
       SESSION_TTL_MIN: ${SESSION_TTL_MIN:-10}
       TOKEN_CACHE_TTL_MIN: ${TOKEN_CACHE_TTL_MIN:-30}
+    volumes:
+      - ./data:/data
     depends_on:
       - github-mcp
       - copilot-review-mcp
@@ -79,10 +84,10 @@ services:
     # distroless:nonroot UID=65532
     user: "65532:65532"
     environment:
-      # copilot-review-mcp validates the Bearer token independently (double-validation).
-      # You may reuse the same GitHub OAuth App as GITHUB_MCP_CLIENT_ID/SECRET.
-      # Note: AUTH_MODE=gateway will make these optional in a future release
-      #       (see https://github.com/scottlz0310/copilot-review-mcp/issues/12).
+      # gateway mode trusts X-Authenticated-User injected by mcp-gateway and
+      # avoids a second GitHub token validation in copilot-review-mcp.
+      AUTH_MODE: ${COPILOT_REVIEW_AUTH_MODE:-gateway}
+      # Required only when COPILOT_REVIEW_AUTH_MODE=standalone.
       GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID}
       GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET}
       BASE_URL: ${COPILOT_REVIEW_BASE_URL:-http://localhost:8083}

@@ -46,6 +46,10 @@ and versioning follows [Semantic Versioning](https://semver.org/).
   - "Recommended order" header rewritten to a "v0.1.0 released" view
   - **v0.2.0 roadmap** added (RM1〜RM6): RM1 v0.1.0 E2E acceptance (release gate) · RM2 observability baseline · RM3 CI hardening (coverage, golangci-lint, govulncheck) · RM4 documentation restructuring · RM5 deferred-issue triage (#3/#4/#5/#6) · RM6 v0.2.0 release. Per-RM issue creation is intentionally deferred to immediately before each item is started.
 
+### Fixed
+
+- Device Authorization Grant polling now enforces the provider interval after each GitHub poll, so fast follow-up requests for the same `device_code` are answered locally with `authorization_pending` instead of reaching GitHub and producing `slow_down`.
+
 ## [0.1.0] - 2026-04-30
 
 ### Added

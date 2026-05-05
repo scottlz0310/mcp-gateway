@@ -53,14 +53,16 @@ v0.1.0 で追加された **設定永続化（age 暗号化）**・**Setup Wizar
 | Docker / Docker Compose | gateway + upstream の起動 | 24+ / v2 |
 | `curl` | HTTP リクエスト | 任意 |
 | `jq` | JSON パース | 任意 |
-| `openssl` | `MCP_GATEWAY_MASTER_KEY` 生成 | 任意 |
+| `openssl` | `MCP_GATEWAY_MASTER_KEY` / PKCE 値の生成 | 任意（PowerShell 代替可） |
 | ブラウザ | Authorization Code Flow の手動承認 | 任意 |
 | `age-keygen`（任意） | `gateway.key` の互換性確認 | 1.1+ |
 
 ### 必要な事前準備
 
-1. GitHub OAuth App を 2 つ用意する（gateway 用 + copilot-review-mcp 用）
-   - 用途を分けるためアプリは分離するが、同一アプリでも検証は可能
+1. GitHub OAuth App を用意する
+   - `AUTH_MODE=gateway` で検証する場合は gateway 用 1 つでよい
+   - `copilot-review-mcp` の standalone モードも併せて検証する場合のみ、copilot-review-mcp 用に 2 つ目を用意する
+   - 用途を分けるためアプリは分離してもよいが、同一アプリでも検証は可能
    - Authorization callback URL: `http://localhost:8080/callback`
    - Device Flow を有効化（GitHub OAuth App 設定 → "Enable Device Flow"）
 2. `examples/copilot-review-routing/` をコピーして作業ディレクトリを作る
@@ -72,8 +74,9 @@ v0.1.0 で追加された **設定永続化（age 暗号化）**・**Setup Wizar
    ```env
    GITHUB_MCP_CLIENT_ID=Ov23liXXXXXXXXXX
    GITHUB_MCP_CLIENT_SECRET=__leave_empty_for_wizard_test__
-   GITHUB_CLIENT_ID=Ov23liYYYYYYYYYY
-   GITHUB_CLIENT_SECRET=copilot-review-secret
+   COPILOT_REVIEW_AUTH_MODE=gateway
+   GITHUB_CLIENT_ID=
+   GITHUB_CLIENT_SECRET=
    GITHUB_PERSONAL_ACCESS_TOKEN=ghp_xxxxxxxxxxxx
    MCP_GATEWAY_BASE_URL=http://localhost:8080
    ```
@@ -81,7 +84,7 @@ v0.1.0 で追加された **設定永続化（age 暗号化）**・**Setup Wizar
    ```bash
    mkdir -p data
    ```
-5. `docker-compose.yml` の `mcp-gateway` サービスに以下を追記
+5. `docker-compose.yml` の `mcp-gateway` サービスに永続化設定があることを確認する（現行の `examples/copilot-review-routing/` には設定済み。古いコピーを使う場合は以下を追記）
    ```yaml
        volumes:
          - ./data:/data
@@ -89,6 +92,10 @@ v0.1.0 で追加された **設定永続化（age 暗号化）**・**Setup Wizar
          MCP_GATEWAY_KEY_PATH: /data/gateway.key
          MCP_CONFIG_FILE: /data/config.yaml
          MCP_GATEWAY_TOKEN_STORE_PATH: /data/tokens.json
+   ```
+6. `copilot-review-mcp` サービスに gateway mode が設定されていることを確認する
+   ```yaml
+      AUTH_MODE: ${COPILOT_REVIEW_AUTH_MODE:-gateway}
    ```
 
 ---
@@ -100,6 +107,31 @@ v0.1.0 で追加された **設定永続化（age 暗号化）**・**Setup Wizar
 - 期待と異なる挙動を観測した場合は中断し、§6 のテンプレートで issue を切る。
 - 検証中はログを `docker compose logs -f mcp-gateway` で常時 follow しておく。
 - シナリオを途中からやり直す場合は §7 の「クリーンアップ」を参照。
+
+### Windows Defender / セキュリティソフトの誤検知
+
+本ランブックでは PowerShell / Docker Compose / `curl` を用いて、OAuth client secret、`gateway.key`、`tokens.json`、`auth=none` ルートなどを扱う。
+そのため Windows Defender 等が `Trojan:PowerShell`、`Behavior:Win32`、`AMSI` 系の検出名で E2E 実行コマンドを誤検知する場合がある。
+
+検出された場合は、除外設定を行う前に以下を確認する。
+
+- 検出対象が本リポジトリ配下または E2E 用作業ディレクトリであること
+- 検出対象が `pwsh.exe -Command ...` の E2E 実行コマンド、または本ランブックの手順で生成した一時スクリプトであること
+- ログや生成ファイルに実 token / secret / `gateway.key` の生値が出力されていないこと
+
+実際に Codex の自律確認で Defender が反応したコマンドラインは、長い inline PowerShell が `docker compose` 用の一時 YAML を生成し、`mcp-gateway:e2e-local` を `mcpgw-e2e-<port>` project 名で起動するものだった。
+このケースでは以下が一致していれば、本ランブック由来の一時検証である可能性が高い。
+
+- `pwsh.exe -Command` の中で `$root = Join-Path $env:TEMP ("mcp-gateway-e2e-codex-" + ...)` を作成している
+- Docker Compose project 名が `mcpgw-e2e-<port>` 形式
+- gateway image が `mcp-gateway:e2e-local`
+- secret 値が `dummy-secret-for-e2e` で、実 OAuth secret / PAT / Bearer token ではない
+- HTTP アクセス先が `localhost:<port>` の一時 gateway
+
+同種の自律確認を再実行する場合は、長い `pwsh.exe -Command ...` を直接実行するより、E2E 用作業ディレクトリ配下に確認用 `.ps1` を置いて内容を確認してから実行する。
+実 secret / PAT / Bearer token がコマンドライン、ログ、`docker compose config` 出力、PowerShell history、Defender 検出詳細のいずれかに含まれていた場合は、その値を漏えい扱いとして即座にローテーションする。
+
+除外設定を行う場合は、`TEMP` 全体や `pwsh.exe` ではなく、E2E 用作業ディレクトリなど最小範囲に限定する。
 
 ---
 
@@ -247,7 +279,8 @@ v0.1.0 で追加された **設定永続化（age 暗号化）**・**Setup Wizar
    ```
 5. ログに以下のようなメッセージが出ていることを確認
    ```
-   gateway.key exists but is invalid; refusing to overwrite to avoid data loss
+   failed to load gateway encryption key
+   gateway.key is corrupt or unreadable
    ```
 6. バックアップを書き戻して復旧
    ```bash
@@ -273,17 +306,31 @@ v0.1.0 で追加された **設定永続化（age 暗号化）**・**Setup Wizar
 
 **目的**: `gateway.key` を消した状態で `MCP_GATEWAY_MASTER_KEY` を与えると、同じキーが再生成されることを確認する。
 
+> **重要**: `MCP_GATEWAY_MASTER_KEY` は「同じ master key で生成された `gateway.key`」を復元するためのもの。
+> §4.1 を master key 無しで実行した場合、`config.yaml` はランダム生成された `gateway.key` で暗号化されている。
+> その後で新しい `MCP_GATEWAY_MASTER_KEY` を設定しても、既存の `ENC[age:]...` は復号できない。
+> このシナリオでは §4.1 の状態をバックアップし、まず決定論的導出だけを確認する。
+> 「暗号化済み config の復号」まで確認する場合は、後述の追加検証のように master key を最初から設定した状態で config を作り直す。
+
 #### 手順
 
-1. gateway を停止し、`data/gateway.key` の内容を退避してから削除
+1. gateway を停止し、現在の `gateway.key` / `config.yaml` を退避してから削除する
    ```bash
    docker compose stop mcp-gateway
    cp data/gateway.key /tmp/gateway.key.original
+   cp data/config.yaml /tmp/config.yaml.original
    rm data/gateway.key
+   rm data/config.yaml
    ```
 2. `MCP_GATEWAY_MASTER_KEY` を生成し `.env` にセット
    ```bash
    echo "MCP_GATEWAY_MASTER_KEY=$(openssl rand -hex 32)" >> .env
+   ```
+   PowerShell で `openssl` が無い場合:
+   ```powershell
+   $bytes = [byte[]]::new(32)
+   [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+   "MCP_GATEWAY_MASTER_KEY=$([Convert]::ToHexString($bytes).ToLower())" | Add-Content .env
    ```
 3. `docker-compose.yml` で `MCP_GATEWAY_MASTER_KEY: ${MCP_GATEWAY_MASTER_KEY}` を有効化
 4. 起動
@@ -305,16 +352,34 @@ v0.1.0 で追加された **設定永続化（age 暗号化）**・**Setup Wizar
    diff data/gateway.key /tmp/gateway.key.derived1
    # 期待: 出力なし（一致）
    ```
-8. 既存 `config.yaml` の `ENC[age:]...` を復号して通常起動できることを確認
+8. バックアップした元の `gateway.key` / `config.yaml` を戻し、`MCP_GATEWAY_MASTER_KEY` を無効化して通常状態へ復旧する
+   ```bash
+   docker compose stop mcp-gateway
+   mv /tmp/gateway.key.original data/gateway.key
+   mv /tmp/config.yaml.original data/config.yaml
+   # .env または docker-compose.yml から MCP_GATEWAY_MASTER_KEY の有効化を戻す
+   docker compose up -d mcp-gateway
+   ```
+9. 通常起動できることを確認
    ```bash
    curl -i http://localhost:8080/.well-known/oauth-authorization-server
    # 期待: 200 OK
    ```
 
+#### 追加検証: master key 由来 config の復号
+
+`MCP_GATEWAY_MASTER_KEY` から再生成した `gateway.key` で `ENC[age:]...` を復号できることまで確認する場合は、別の作業ディレクトリまたは `data/` の完全バックアップを取ったうえで次を実行する。
+
+1. `MCP_GATEWAY_MASTER_KEY` を有効化した状態で `data/` を空にする
+2. §4.1 Setup Wizard を再実行し、`config.yaml` を master key 由来の `gateway.key` で暗号化保存する
+3. gateway を停止し、`data/gateway.key` だけを削除する
+4. 同じ `MCP_GATEWAY_MASTER_KEY` のまま起動する
+5. `/.well-known/oauth-authorization-server` が 200 を返すことを確認する
+
 #### 期待される挙動
 
 - [ ] 同じ `MCP_GATEWAY_MASTER_KEY` から毎回同じ `gateway.key` が生成される
-- [ ] 既存の `ENC[age:]...` が新しく導出されたキーで復号できる
+- [ ] master key 由来の `gateway.key` で暗号化した `ENC[age:]...` は、同じ master key から再生成したキーで復号できる
 - [ ] `MCP_GATEWAY_MASTER_KEY` が 32 bytes 未満の場合は起動失敗（追加検証として `MCP_GATEWAY_MASTER_KEY=short` で起動して確認）
 
 #### 観測された挙動
@@ -339,6 +404,16 @@ v0.1.0 で追加された **設定永続化（age 暗号化）**・**Setup Wizar
    CODE_CHALLENGE=$(printf '%s' "$CODE_VERIFIER" | openssl dgst -sha256 -binary | base64 | tr '+/' '-_' | tr -d '=')
    echo "verifier=$CODE_VERIFIER (len=${#CODE_VERIFIER})"   # 期待: 43 文字（範囲 43〜128 内）
    echo "challenge=$CODE_CHALLENGE (len=${#CODE_CHALLENGE})"
+   ```
+   PowerShell で `openssl` が無い場合:
+   ```powershell
+   $bytes = [byte[]]::new(32)
+   [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+   $CODE_VERIFIER = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+','-').Replace('/','_')
+   $hash = [System.Security.Cryptography.SHA256]::HashData([Text.Encoding]::ASCII.GetBytes($CODE_VERIFIER))
+   $CODE_CHALLENGE = [Convert]::ToBase64String($hash).TrimEnd('=').Replace('+','-').Replace('/','_')
+   "verifier=$CODE_VERIFIER (len=$($CODE_VERIFIER.Length))"
+   "challenge=$CODE_CHALLENGE (len=$($CODE_CHALLENGE.Length))"
    ```
 3. ブラウザで `/authorize` を開く
    ```
@@ -382,16 +457,23 @@ v0.1.0 で追加された **設定永続化（age 暗号化）**・**Setup Wizar
 
 #### 手順
 
-1. §4.5 で取得した `$ACCESS` を使い、`/mcp/github` にリクエスト
+1. §4.5 で取得した `$ACCESS` を使い、`/mcp/github` に MCP initialize リクエストを送る
    ```bash
-   curl -i -H "Authorization: Bearer $ACCESS" \
-     http://localhost:8080/mcp/github/health
+   MCP_INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"mcp-gateway-e2e","version":"0.0.1"}}}'
+   curl -i -X POST http://localhost:8080/mcp/github \
+     -H "Authorization: Bearer $ACCESS" \
+     -H "Content-Type: application/json" \
+     -H "Accept: application/json, text/event-stream" \
+     --data "$MCP_INIT"
    # 期待: 200 OK（github-mcp の応答）
    ```
 2. `/mcp/copilot-review` も同様に確認
    ```bash
-   curl -i -H "Authorization: Bearer $ACCESS" \
-     http://localhost:8080/mcp/copilot-review/health
+   curl -i -X POST http://localhost:8080/mcp/copilot-review \
+     -H "Authorization: Bearer $ACCESS" \
+     -H "Content-Type: application/json" \
+     -H "Accept: application/json, text/event-stream" \
+     --data "$MCP_INIT"
    ```
 3. gateway のログから upstream へ `X-Authenticated-User` / `X-GitHub-Login` が注入されていることを確認
    - upstream 側ログ（`docker compose logs github-mcp` など）でも、これらのヘッダが見えるはず
@@ -465,24 +547,29 @@ v0.1.0 で追加された **設定永続化（age 暗号化）**・**Setup Wizar
    ```bash
    docker compose restart mcp-gateway
    ```
-3. 再起動後すぐに同じ access_token で `/mcp/github` にアクセス
+3. 再起動後すぐに同じ access_token で `/mcp/github` に MCP initialize リクエストを送る
    ```bash
-   curl -i -H "Authorization: Bearer $ACCESS" \
-     http://localhost:8080/mcp/github/health
+   MCP_INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"mcp-gateway-e2e","version":"0.0.1"}}}'
+   curl -i -X POST http://localhost:8080/mcp/github \
+     -H "Authorization: Bearer $ACCESS" \
+     -H "Content-Type: application/json" \
+     -H "Accept: application/json, text/event-stream" \
+     --data "$MCP_INIT"
    # 期待: 200 OK（再認証なし）
    ```
-4. `data/tokens.json` がハッシュ化された token key のみを含むことを確認
+4. token store がハッシュ化された token key のみを含むことを確認
    ```bash
    cat data/tokens.json | jq '.'
    # 期待: token 値の生形ではなく、SHA-256 ハッシュキーが格納されている
    ```
+   `MCP_GATEWAY_TOKEN_STORE_PATH` を `tokens.db` などに変更している場合は、その実ファイル名を確認する。
 
 #### 期待される挙動
 
 - [ ] 再起動後も既存 access_token が有効
-- [ ] `tokens.json` は `0600` パーミッション
-- [ ] `tokens.json` に raw token 文字列が **含まれない**（hashed key のみ）
-- [ ] `tokens.json.refresh` が存在し、`0600` パーミッション
+- [ ] token store ファイルは `0600` パーミッション
+- [ ] token store に raw token 文字列が **含まれない**（hashed key のみ）
+- [ ] refresh token store（例: `tokens.json.refresh`）が存在し、`0600` パーミッション
 
 #### 観測された挙動
 
@@ -548,13 +635,17 @@ v0.1.0 で追加された **設定永続化（age 暗号化）**・**Setup Wizar
 
 1. `docker-compose.yml` に検証用の auth=none ルートを追加
    ```yaml
-       ROUTE_HEALTH: /public-health|http://github-mcp:8082|auth=none
+       ROUTE_PUBLIC_MCP: /public-mcp|http://github-mcp:8082|auth=none
    ```
-   または既存のテスト用 upstream を流用
+   または既存の `auth=none` MCP upstream を流用する。
 2. gateway を再起動
-3. Bearer 無しでアクセス
+3. Bearer 無しで MCP initialize リクエストを送る
    ```bash
-   curl -i http://localhost:8080/public-health
+   MCP_INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"mcp-gateway-e2e","version":"0.0.1"}}}'
+   curl -i -X POST http://localhost:8080/public-mcp \
+     -H "Content-Type: application/json" \
+     -H "Accept: application/json, text/event-stream" \
+     --data "$MCP_INIT"
    # 期待: 200 OK（401 ではない）
    ```
 4. 通常ルートは Bearer 無しで 401 になることを確認

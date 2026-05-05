@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -317,6 +318,75 @@ func TestTokenDeviceGrantPending(t *testing.T) {
 	}
 	if resp["error"] != "authorization_pending" {
 		t.Errorf("error: got %v, want authorization_pending", resp["error"])
+	}
+}
+
+func TestTokenDeviceGrantConcurrentPollingDoesNotSlowDown(t *testing.T) {
+	var upstreamCalls int32
+	ghServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&upstreamCalls, 1)
+		time.Sleep(50 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"error":"authorization_pending"}`)
+	}))
+	defer ghServer.Close()
+
+	originalTransport := githubClient.Transport
+	defer func() { githubClient.Transport = originalTransport }()
+	githubClient.Transport = rewriteHostTransport{target: ghServer.URL, inner: ghServer.Client().Transport}
+
+	h := newTestHandler(t)
+
+	expiresAt := time.Now().Add(15 * time.Minute)
+	internalCode, err := h.store.CreateDevice("gh-dev-code", "WDJB-MJHT", "https://github.com/login/device", expiresAt, 5)
+	if err != nil {
+		t.Fatalf("creating device session: %v", err)
+	}
+
+	const requests = 5
+	start := make(chan struct{})
+	results := make(chan map[string]any, requests)
+	var wg sync.WaitGroup
+
+	for range requests {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			body := fmt.Sprintf("grant_type=urn:ietf%%3Aparams%%3Aoauth%%3Agrant-type%%3Adevice_code&device_code=%s", internalCode)
+			r := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
+			r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			w := httptest.NewRecorder()
+
+			h.Token(w, r)
+
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("status: got %d, want 400; body: %s", w.Code, w.Body.String())
+			}
+			var resp map[string]any
+			if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+				t.Errorf("decoding response: %v", err)
+				return
+			}
+			results <- resp
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+	close(results)
+
+	var slowDown int
+	for resp := range results {
+		if resp["error"] == "slow_down" {
+			slowDown++
+		}
+	}
+	if slowDown != 0 {
+		t.Fatalf("expected no slow_down responses, got %d", slowDown)
+	}
+	if got := atomic.LoadInt32(&upstreamCalls); got != 1 {
+		t.Fatalf("expected exactly one upstream poll, got %d", got)
 	}
 }
 
