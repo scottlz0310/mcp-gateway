@@ -2,6 +2,8 @@ package router
 
 import (
 	"testing"
+
+	appconfig "github.com/scottlz0310/mcp-gateway/internal/config"
 )
 
 func TestParseRoutesEmpty(t *testing.T) {
@@ -239,5 +241,76 @@ func TestParseRoutesMixedAuth(t *testing.T) {
 				t.Errorf("playwright route should skip auth")
 			}
 		}
+	}
+}
+
+func TestParseFromConfig_Valid(t *testing.T) {
+	cfgRoutes := []appconfig.RouteConfig{
+		{Name: "mcp", Prefix: "/mcp", Upstream: "http://upstream:8080"},
+		{Name: "play", Prefix: "/play", Upstream: "http://playwright:8931", NoAuth: true},
+	}
+	routes, err := ParseFromConfig(cfgRoutes)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(routes) != 2 {
+		t.Fatalf("expected 2 routes, got %d", len(routes))
+	}
+	if routes[1].NoAuth {
+		// sorted longest-first, so /play should be routes[1] (equal length)
+		// just verify NoAuth is preserved somewhere
+	}
+	for _, r := range routes {
+		if r.Name == "play" && !r.NoAuth {
+			t.Error("play route: expected NoAuth=true")
+		}
+		if r.Name == "mcp" && r.NoAuth {
+			t.Error("mcp route: expected NoAuth=false")
+		}
+	}
+}
+
+func TestParseFromConfig_Empty(t *testing.T) {
+	routes, err := ParseFromConfig(nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(routes) != 0 {
+		t.Errorf("expected 0 routes, got %d", len(routes))
+	}
+}
+
+func TestParseFromConfig_DuplicatePrefix(t *testing.T) {
+	cfgRoutes := []appconfig.RouteConfig{
+		{Name: "a", Prefix: "/mcp", Upstream: "http://a:8080"},
+		{Name: "b", Prefix: "/mcp", Upstream: "http://b:8081"},
+	}
+	_, err := ParseFromConfig(cfgRoutes)
+	if err == nil {
+		t.Fatal("expected error for duplicate prefix")
+	}
+}
+
+func TestParseFromConfig_InvalidUpstream(t *testing.T) {
+	cfgRoutes := []appconfig.RouteConfig{
+		{Name: "bad", Prefix: "/mcp", Upstream: "ftp://x:8080"},
+	}
+	_, err := ParseFromConfig(cfgRoutes)
+	if err == nil {
+		t.Fatal("expected error for non-http upstream")
+	}
+}
+
+func TestParseFromConfig_SortedLongestFirst(t *testing.T) {
+	cfgRoutes := []appconfig.RouteConfig{
+		{Name: "short", Prefix: "/mcp", Upstream: "http://a:8080"},
+		{Name: "long", Prefix: "/mcp/github", Upstream: "http://b:8081"},
+	}
+	routes, err := ParseFromConfig(cfgRoutes)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if routes[0].Prefix != "/mcp/github" {
+		t.Errorf("first route should be longest prefix, got %q", routes[0].Prefix)
 	}
 }

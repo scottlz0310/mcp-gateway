@@ -32,6 +32,73 @@ mcp-gateway  :8080
 | [mcp-docker](https://github.com/scottlz0310/Mcp-Docker) | Docker Compose orchestration for the full MCP stack |
 | [copilot-review-mcp](https://github.com/scottlz0310/copilot-review-mcp) | Copilot code-review MCP server |
 
+## First-Run Setup Wizard
+
+If any required value (`GITHUB_MCP_CLIENT_ID`, `GITHUB_MCP_CLIENT_SECRET`, or at least one route) is missing on startup, the gateway automatically enters **setup mode** instead of exiting.
+
+### What happens
+
+1. The gateway starts in setup mode on the normal port (`:8080` by default).
+2. A one-time setup token (15-min TTL) is printed to stdout:
+   ```
+   {"level":"warn","msg":"mcp-gateway starting in setup mode — configure via /setup",
+    "setup_url":"http://localhost:8080/setup?token=<TOKEN>",
+    "token":"<TOKEN>"}
+   ```
+3. All routes except `/setup` return `503 {"error":"setup_required","setup_url":"..."}`.
+
+### Completing setup via curl
+
+```bash
+# 1. Check what fields are missing
+curl "http://localhost:8080/setup?token=<TOKEN>"
+# → {"missing":["client_id","client_secret","routes"],"hint":"POST /setup ..."}
+
+# 2. Submit your configuration
+curl -X POST "http://localhost:8080/setup?token=<TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_id": "Ov23liXXXXXXXXXX",
+    "client_secret": "your-github-oauth-secret",
+    "routes": [
+      {"name": "github", "prefix": "/mcp/github", "upstream": "http://github-mcp:8082"},
+      {"name": "playwright", "prefix": "/mcp/playwright", "upstream": "http://playwright:8931", "no_auth": true}
+    ]
+  }'
+# → {"saved":true,"restart_required":true}
+```
+
+4. The gateway saves `config.yaml` (with the secret encrypted via `age`) and exits with code `0`.
+5. Your process supervisor (`docker-compose restart: unless-stopped`, `systemd`, etc.) restarts the gateway in **normal mode**.
+
+### API reference
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/setup?token=<TOKEN>` | Returns `{"missing":[...]}` listing incomplete fields |
+| `POST` | `/setup?token=<TOKEN>` | Accepts JSON body; saves config; triggers `os.Exit(0)` |
+
+**POST body schema:**
+
+```json
+{
+  "client_id": "string (required)",
+  "client_secret": "string (required)",
+  "routes": [
+    {
+      "name": "string (required)",
+      "prefix": "/must-start-with-slash (required)",
+      "upstream": "http(s)://host:port (required)",
+      "no_auth": false
+    }
+  ]
+}
+```
+
+**Error codes:** `401` invalid token · `408` token expired · `409` already configured · `422` validation error
+
+> **Security note:** The setup token is single-use and expires after 15 minutes. In production (HTTPS), POST requests should go over TLS. The gateway logs a warning if POST is received over plain HTTP.
+
 ## Configuration
 
 ### GitHub OAuth Credentials
@@ -43,7 +110,7 @@ At startup, the gateway resolves the GitHub OAuth credentials as follows:
 | `GITHUB_MCP_CLIENT_ID` | `GITHUB_MCP_CLIENT_ID` env var | `auth.github_client_id` in `config.yaml` |
 | `GITHUB_MCP_CLIENT_SECRET` | `auth.github_client_secret` in `config.yaml` (may be `ENC[age:]...`) | `GITHUB_MCP_CLIENT_SECRET` env var *(first-startup seeding only — ignored once a value exists in config.yaml)* |
 
-At least one route must also be configured via `ROUTE_<NAME>` (see below) — the server exits on startup if no routes are defined.
+At least one route must also be configured — via `ROUTE_<NAME>` env vars, `routes:` in `config.yaml` (written by the setup wizard), or the legacy `GITHUB_MCP_UPSTREAM_URL` — the server exits on startup if no routes are defined after all sources are checked.
 
 ### Secret Encryption
 

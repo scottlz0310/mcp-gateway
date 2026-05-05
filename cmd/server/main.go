@@ -16,6 +16,7 @@ import (
 	"github.com/scottlz0310/mcp-gateway/internal/middleware"
 	"github.com/scottlz0310/mcp-gateway/internal/proxy"
 	"github.com/scottlz0310/mcp-gateway/internal/router"
+	"github.com/scottlz0310/mcp-gateway/internal/setup"
 )
 
 func main() {
@@ -44,6 +45,22 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Parse routes from env early so setup.IsSetupRequired can see them.
+	envRoutes, err := router.ParseEnv()
+	if err != nil {
+		slog.Error("invalid route configuration", "err", err)
+		os.Exit(1)
+	}
+
+	// First-run wizard: if any required value is missing, enter setup mode.
+	envClientID := os.Getenv("GITHUB_MCP_CLIENT_ID")
+	envSecret := os.Getenv("GITHUB_MCP_CLIENT_SECRET")
+	if setup.IsSetupRequired(appCfg, envClientID, envSecret, envRoutes) {
+		runSetupWizard(cfg, appCfg, km)
+		// runSetupWizard only returns if the listener fails immediately.
+		os.Exit(1)
+	}
+
 	// Validate required startup inputs before any config writes.
 	// This prevents a mistyped env var from being encrypted and saved to config.yaml
 	// on a first boot that would otherwise fail (e.g. missing CLIENT_ID or routes).
@@ -55,11 +72,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	routes, err := router.ParseEnv()
-	if err != nil {
-		slog.Error("invalid route configuration", "err", err)
-		os.Exit(1)
-	}
+	routes := envRoutes
 
 	// Backward-compat: fall back to legacy single-upstream env var.
 	if len(routes) == 0 && cfg.upstreamURL != "" {
@@ -78,6 +91,16 @@ func main() {
 		}
 		routes = []router.Route{{Name: "default", Prefix: "/mcp", Upstream: u}}
 		slog.Warn("GITHUB_MCP_UPSTREAM_URL is deprecated; use ROUTE_<NAME>=<prefix>|<url> instead")
+	}
+
+	// Fall back to routes stored in config.yaml (written by the setup wizard).
+	if len(routes) == 0 && len(appCfg.Routes) > 0 {
+		cfgRoutes, err := router.ParseFromConfig(appCfg.Routes)
+		if err != nil {
+			slog.Error("invalid routes in config.yaml", "err", err)
+			os.Exit(1)
+		}
+		routes = cfgRoutes
 	}
 
 	if len(routes) == 0 {
@@ -188,6 +211,48 @@ func main() {
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		slog.Error("server error", "err", err)
 		os.Exit(1)
+	}
+}
+
+// runSetupWizard starts an HTTP server that serves only the /setup endpoint.
+// It blocks until a successful POST /setup causes the process to exit (so the
+// supervisor can restart in normal mode), or until the listener fails.
+func runSetupWizard(cfg config, appCfg *appconfig.AppConfig, km *appconfig.KeyMaterial) {
+	mgr, err := setup.New()
+	if err != nil {
+		slog.Error("failed to create setup token", "err", err)
+		return
+	}
+
+	addr := ":" + cfg.port
+	setupURL := strings.TrimRight(cfg.baseURL, "/") + "/setup?token=" + mgr.Token()
+
+	slog.Warn("mcp-gateway starting in setup mode — configure via /setup",
+		"setup_url", setupURL,
+		"token", mgr.Token(),
+	)
+
+	h := setup.NewHandler(mgr, appCfg, cfg.configPath, km, func() {
+		slog.Info("setup complete; restarting to apply configuration")
+		os.Exit(0)
+	})
+
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	// All other paths return 503 directing operators to /setup.
+	mux.Handle("/", setup.UnconfiguredHandler(setupURL))
+
+	server := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+	slog.Info("setup wizard listening", "addr", addr)
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		slog.Error("setup server error", "err", err)
 	}
 }
 
