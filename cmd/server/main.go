@@ -219,14 +219,20 @@ func main() {
 		if route.NoAuth {
 			wrapped = h
 		} else {
-			routeResource := publicURL + route.Prefix
-			routePRMPath := "/.well-known/oauth-protected-resource" + route.Prefix
-			routePRMURL := publicURL + routePRMPath
-			mux.HandleFunc("GET "+routePRMPath, oauthHandler.RouteProtectedResourceMetadata(routeResource))
-			routeAuth := middleware.Auth(oauthHandler,
-				middleware.WithBaseURL(cfg.publicURL),
-				middleware.WithResourceMetadataURL(routePRMURL),
-			)
+			// For a root prefix ("/"), the gateway-wide PRM registered above
+			// already covers the route (resource == public_url). Skip per-route
+			// registration to avoid (a) ServeMux duplicate-pattern panic, and
+			// (b) a trailing-slash subtree pattern that would shadow other
+			// per-route PRM URLs. The middleware then falls back to the
+			// gateway-wide resource_metadata URL via WithBaseURL.
+			authOpts := []middleware.AuthOption{middleware.WithBaseURL(cfg.publicURL)}
+			if route.Prefix != "/" {
+				routeResource := publicURL + route.Prefix
+				routePRMPath := "/.well-known/oauth-protected-resource" + route.Prefix
+				mux.HandleFunc("GET "+routePRMPath, oauthHandler.RouteProtectedResourceMetadata(routeResource))
+				authOpts = append(authOpts, middleware.WithResourceMetadataURL(publicURL+routePRMPath))
+			}
+			routeAuth := middleware.Auth(oauthHandler, authOpts...)
 			wrapped = routeAuth(h)
 		}
 		mux.Handle(route.Prefix, wrapped)
