@@ -267,13 +267,15 @@ To reset all authentication state (force re-auth for all clients), delete the st
 | Path | Method | Description |
 |------|--------|-------------|
 | `/.well-known/oauth-authorization-server` | GET | RFC 8414 authorization server metadata |
+| `/.well-known/oauth-protected-resource` | GET | RFC 9728 Protected Resource Metadata for the gateway as a whole (resource = `public_url`) |
+| `/.well-known/oauth-protected-resource/<prefix>` | GET | Per-route PRM (MCP Authorization Spec 2025-06-18) — `resource` is the route's absolute URL `<public_url>/<prefix>`. Registered for every authenticated route |
 | `/authorize` | GET | OAuth 2.0 authorization endpoint |
 | `/callback` | GET | GitHub OAuth callback |
 | `/device_authorization` | POST | Device Authorization Grant endpoint (RFC 8628) |
 | `/token` | POST | Token endpoint — supports `authorization_code` + PKCE, `urn:ietf:params:oauth:grant-type:device_code`, and `refresh_token` grants |
 | `/register` | POST | RFC 7591 dynamic client registration (pseudo) |
 | `/health` | GET | Health check — returns `{"status":"ok"}` |
-| `/<prefix>` | ANY | Reverse proxy to the matched upstream — Bearer-validated unless `auth=none` is set for the matched route |
+| `/<prefix>` | ANY | Reverse proxy to the matched upstream — Bearer-validated unless `auth=none` is set for the matched route. 401 responses point `WWW-Authenticate.resource_metadata` at the route's per-route PRM |
 
 ## Internal Design
 

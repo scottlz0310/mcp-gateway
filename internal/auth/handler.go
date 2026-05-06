@@ -107,13 +107,38 @@ func (h *Handler) refreshTokenTTL() time.Duration {
 }
 
 // ProtectedResourceMetadata implements RFC 9728 OAuth 2.0 Protected Resource
-// Metadata. MCP clients that receive a 401 with a resource_metadata parameter
-// in the WWW-Authenticate header fetch this endpoint to discover the gateway's
-// authorization server, enabling re-authentication via the OAuth flow instead
-// of falling back to alternative auth methods (e.g. gh CLI).
+// Metadata for the gateway as a whole. MCP clients that receive a 401 with a
+// resource_metadata parameter in the WWW-Authenticate header fetch this
+// endpoint to discover the gateway's authorization server, enabling
+// re-authentication via the OAuth flow instead of falling back to alternative
+// auth methods (e.g. gh CLI).
+//
+// This handler returns the gateway's canonical public URL as the resource
+// identifier. For per-route metadata (MCP Authorization Spec 2025-06-18),
+// see RouteProtectedResourceMetadata.
 func (h *Handler) ProtectedResourceMetadata(w http.ResponseWriter, r *http.Request) {
+	h.writePRM(w, h.cfg.BaseURL)
+}
+
+// RouteProtectedResourceMetadata returns an HTTP handler that serves an RFC
+// 9728 Protected Resource Metadata document for a single route. The resource
+// argument MUST be the canonical absolute URL of the route (e.g.
+// "https://gateway.example/mcp/copilot-review"); the authorization_servers
+// field continues to point at the gateway-wide OAuth authorization server.
+//
+// Per the MCP Authorization Spec (2025-06-18), each MCP endpoint exposes its
+// own PRM at /.well-known/oauth-protected-resource{path-of-resource}. Callers
+// register one handler per route alongside the gateway-wide handler.
+func (h *Handler) RouteProtectedResourceMetadata(resource string) http.HandlerFunc {
+	resource = strings.TrimRight(resource, "/")
+	return func(w http.ResponseWriter, r *http.Request) {
+		h.writePRM(w, resource)
+	}
+}
+
+func (h *Handler) writePRM(w http.ResponseWriter, resource string) {
 	doc := map[string]any{
-		"resource":                 h.cfg.BaseURL,
+		"resource":                 resource,
 		"authorization_servers":    []string{h.cfg.BaseURL},
 		"bearer_methods_supported": []string{"header"},
 	}

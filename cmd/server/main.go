@@ -187,11 +187,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	authMiddleware := middleware.Auth(oauthHandler, middleware.WithBaseURL(cfg.publicURL))
+	publicURL := strings.TrimRight(cfg.publicURL, "/")
 
 	mux := http.NewServeMux()
 
 	// OAuth façade endpoints (no auth required).
+	// The path-less /.well-known/oauth-protected-resource is preserved for
+	// backward compatibility (gateway-wide PRM); per-route PRMs are registered
+	// inside the route loop below per MCP Authorization Spec 2025-06-18.
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource", oauthHandler.ProtectedResourceMetadata)
 	mux.HandleFunc("GET /.well-known/oauth-authorization-server", oauthHandler.Discovery)
 	mux.HandleFunc("GET /authorize", oauthHandler.Authorize)
@@ -207,13 +210,24 @@ func main() {
 	})
 
 	// Proxy routes — apply auth middleware unless the route opts out.
+	// Each authenticated route also exposes its own RFC 9728 PRM document at
+	// /.well-known/oauth-protected-resource{prefix}, and 401 responses point
+	// resource_metadata at that route-scoped URL.
 	for _, route := range routes {
 		h := proxy.NewHandler(route.Upstream, oauthHandler)
 		var wrapped http.Handler
 		if route.NoAuth {
 			wrapped = h
 		} else {
-			wrapped = authMiddleware(h)
+			routeResource := publicURL + route.Prefix
+			routePRMPath := "/.well-known/oauth-protected-resource" + route.Prefix
+			routePRMURL := publicURL + routePRMPath
+			mux.HandleFunc("GET "+routePRMPath, oauthHandler.RouteProtectedResourceMetadata(routeResource))
+			routeAuth := middleware.Auth(oauthHandler,
+				middleware.WithBaseURL(cfg.publicURL),
+				middleware.WithResourceMetadataURL(routePRMURL),
+			)
+			wrapped = routeAuth(h)
 		}
 		mux.Handle(route.Prefix, wrapped)
 		mux.Handle(route.Prefix+"/", wrapped)

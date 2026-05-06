@@ -164,3 +164,48 @@ func TestAuthInvalidTokenWithBaseURL(t *testing.T) {
 		t.Errorf("WWW-Authenticate resource_metadata should point to /.well-known/oauth-protected-resource: %q", wwwAuth)
 	}
 }
+
+// TestAuthWithResourceMetadataURL verifies that an explicit per-route PRM URL
+// is emitted verbatim in resource_metadata, taking precedence over the URL
+// derived from WithBaseURL. This is the path used by main.go to advertise
+// per-route PRMs (MCP Authorization Spec 2025-06-18).
+func TestAuthWithResourceMetadataURL(t *testing.T) {
+	const routePRM = "https://gateway.example.com/.well-known/oauth-protected-resource/mcp/copilot-review"
+	cases := []struct {
+		name      string
+		validator *mockValidator
+		setAuth   bool
+	}{
+		{name: "missing token", validator: &mockValidator{login: "alice"}, setAuth: false},
+		{name: "invalid token", validator: &mockValidator{err: fmt.Errorf("bad token")}, setAuth: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := Auth(tc.validator,
+				WithBaseURL("https://gateway.example.com"),
+				WithResourceMetadataURL(routePRM),
+			)(http.HandlerFunc(okHandler))
+			r := httptest.NewRequest(http.MethodGet, "/mcp/copilot-review", nil)
+			if tc.setAuth {
+				r.Header.Set("Authorization", "Bearer bad-token")
+			}
+			w := httptest.NewRecorder()
+
+			h.ServeHTTP(w, r)
+
+			if w.Code != http.StatusUnauthorized {
+				t.Fatalf("status: got %d, want %d", w.Code, http.StatusUnauthorized)
+			}
+			wwwAuth := w.Header().Get("WWW-Authenticate")
+			want := fmt.Sprintf(`resource_metadata=%q`, routePRM)
+			if !strings.Contains(wwwAuth, want) {
+				t.Errorf("WWW-Authenticate: got %q, want substring %q", wwwAuth, want)
+			}
+			// The gateway-wide /.well-known/oauth-protected-resource must NOT
+			// leak into the header when a per-route URL is configured.
+			if strings.Contains(wwwAuth, `resource_metadata="https://gateway.example.com/.well-known/oauth-protected-resource"`) {
+				t.Errorf("per-route URL should override gateway-wide PRM URL: %q", wwwAuth)
+			}
+		})
+	}
+}
