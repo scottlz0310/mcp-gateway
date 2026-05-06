@@ -27,6 +27,19 @@ func TestParseTrustedProxyCIDRs(t *testing.T) {
 	}
 }
 
+func TestParseTrustedProxyCIDRsIgnoresEmptyItems(t *testing.T) {
+	got, err := ParseTrustedProxyCIDRs([]string{"", "  , 127.0.0.1/32, "})
+	if err != nil {
+		t.Fatalf("ParseTrustedProxyCIDRs returned error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("prefix count: got %d, want 1", len(got))
+	}
+	if !got[0].Contains(netip.MustParseAddr("127.0.0.1")) {
+		t.Errorf("prefix does not contain 127.0.0.1: %v", got[0])
+	}
+}
+
 func TestParseTrustedProxyCIDRsRejectsInvalidCIDR(t *testing.T) {
 	_, err := ParseTrustedProxyCIDRs([]string{"127.0.0.1"})
 	if err == nil {
@@ -142,6 +155,66 @@ func TestProxyHeadersInvalidForwardedValuesAreIgnored(t *testing.T) {
 	}
 	if got.remoteAddr != "127.0.0.1:4567" {
 		t.Errorf("remote_addr should remain original: got %q", got.remoteAddr)
+	}
+}
+
+func TestProxyHeadersTrustedRemoteAddrWithoutPort(t *testing.T) {
+	trusted := []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")}
+	var got string
+	h := ProxyHeaders(trusted)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Host
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	r := httptest.NewRequest(http.MethodGet, "http://internal.local/mcp", nil)
+	r.RemoteAddr = "127.0.0.1"
+	r.Header.Set("X-Forwarded-Host", "mcp.example.com")
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, r)
+
+	if got != "mcp.example.com" {
+		t.Errorf("host: got %q, want mcp.example.com", got)
+	}
+}
+
+func TestProxyHeadersInvalidRemoteAddrStripsForwardedValues(t *testing.T) {
+	trusted := []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")}
+	var got string
+	h := ProxyHeaders(trusted)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("X-Forwarded-Host")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	r := httptest.NewRequest(http.MethodGet, "http://internal.local/mcp", nil)
+	r.RemoteAddr = "not-a-remote-addr"
+	r.Header.Set("X-Forwarded-Host", "mcp.example.com")
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, r)
+
+	if got != "" {
+		t.Errorf("X-Forwarded-Host should be stripped, got %q", got)
+	}
+}
+
+func TestProxyHeadersTrustedEmptyForwardedForLeavesRemoteAddr(t *testing.T) {
+	trusted := []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")}
+	var got string
+	h := ProxyHeaders(trusted)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.RemoteAddr
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	r := httptest.NewRequest(http.MethodGet, "http://internal.local/mcp", nil)
+	r.RemoteAddr = "127.0.0.1:4567"
+	r.Header.Set("X-Forwarded-For", " ")
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, r)
+
+	if got != "127.0.0.1:4567" {
+		t.Errorf("remote_addr should remain original: got %q", got)
 	}
 }
 
