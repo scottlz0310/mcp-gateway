@@ -113,6 +113,11 @@ func NewHandler(cfg Config, p provider.Provider) (*Handler, error) {
 	} else {
 		ts = NewMemTokenStore()
 		tokensTTL = cfg.CacheTTL
+		if cfg.TokenAudienceStrict {
+			slog.Warn("token_audience_strict is enabled without a persistent token store; " +
+				"audience metadata is lost on cache eviction, making affected tokens unusable — " +
+				"set token_store_path for durable storage")
+		}
 	}
 
 	return &Handler{

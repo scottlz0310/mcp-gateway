@@ -7,14 +7,19 @@
 
 ### Added
 
-- `grant_type=refresh_token` がオプションの `resource` パラメータ（RFC 8707 §2）を受け付け、再発行トークンの audience を狭める
-  - 指定した resource は元のリフレッシュトークンに記録された audience と同一か、そのサブパスでなければならない。拡大・別ルートへの変更は `invalid_target` で拒否
-  - audience トラッキング以前に発行されたレガシートークン（保存 audience が空）は任意の登録済み resource を受け入れ、スムーズな移行を可能にする
+- すべてのトークン取得フローで RFC 8707 `resource` パラメータをサポート（[#57](https://github.com/scottlz0310/mcp-gateway/issues/57), #49 PR-C）
+  - `/authorize`、`/device_authorization`、`grant_type=refresh_token` のいずれも、オプションの `resource` パラメータを受け付け、発行トークンの audience を特定の値に結びつける
+  - ディスカバリメタデータに `resource_parameter_supported: true` を追加
+  - `grant_type=refresh_token` での `resource` は、元のリフレッシュトークンに記録された audience と同一かそのサブパスでなければならない。拡大・別ルートへの変更は `invalid_target` で拒否
+  - audience トラッキング以前のレガシートークン（保存 audience が空）はグレースピリオド中は任意の登録済み resource を受け入れる
   - 検証失敗時は消費済みリフレッシュトークンを復元するため、クライアントは修正後の `resource` で再試行できる
 
 ### 移行ガイド
 
-- **`token_audience_strict`**: audience トラッキングを含まない最後のデプロイから **90 日後** に `MCP_GATEWAY_TOKEN_AUDIENCE_STRICT=true`（または設定ファイルの `token_audience_strict: true`）を有効にしてください。リフレッシュトークンのデフォルト TTL は 90 日であり、その期間が過ぎると流通中のすべてのトークンに audience メタデータが付与されます。それまでは audience メタデータを持たないトークンに警告ログを出力しますが、拒否はしません。
+- **`token_audience_strict`**: `MCP_GATEWAY_TOKEN_AUDIENCE_STRICT=true`（または `token_audience_strict: true`）を有効にするには、**以下のすべてが満たされている**必要があります:
+  1. **永続トークンストアが必須** — `MCP_GATEWAY_TOKEN_STORE_PATH` / `token_store_path` を設定してください。インメモリストアではキャッシュ失効時に audience メタデータが消滅し、該当トークンが使用不能になります。インメモリストアで strict モードを有効にすると、起動時に警告ログを出力します。
+  2. **すべての有効トークンが audience メタデータを持つこと** — このリリース以前に発行されたトークンには audience が記録されていません。`resource` パラメータ**なし**で refresh すると、トークンはローテーションされますが audience なし（レガシー）のまま残ります。90 日の TTL ウィンドウは**自動的に十分ではありません** — このリリース以降にすべてのアクティブクライアントが `resource` 付きで refresh するか再認証した場合に限り有効です。
+  3. **推奨手順** — `"token without audience accepted during grace period"` ログエントリを監視してください。最長セッションのクライアントでこのログが消えたら、strict モードを安全に有効化できます。
 
 ### ロードマップ
 
