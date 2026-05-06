@@ -10,14 +10,5 @@
     "github>scottlz0310/renovate-config//presets/options/automerge",
     "github>scottlz0310/renovate-config//presets/options/schedule",
     "github>scottlz0310/renovate-config//presets/options/security"
-  ],
-  "packageRules": [
-    {
-      "matchManagers": ["github-actions"],
-      "groupName": "GitHub Actions",
-      "semanticCommitType": "ci",
-      "semanticCommitScope": "actions",
-      "labels": ["github-actions"]
-    }
   ]
 }

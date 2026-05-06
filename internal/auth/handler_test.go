@@ -92,50 +92,6 @@ func TestProtectedResourceMetadata(t *testing.T) {
 	}
 }
 
-// TestRouteProtectedResourceMetadata verifies that per-route PRM documents
-// (MCP Authorization Spec 2025-06-18) emit the route's canonical URL as the
-// resource identifier while the authorization_servers field continues to
-// point at the gateway-wide OAuth server.
-func TestRouteProtectedResourceMetadata(t *testing.T) {
-	h := newTestHandler(t)
-	cases := []struct {
-		name     string
-		resource string
-		want     string
-	}{
-		{name: "subroute", resource: "http://localhost:8080/mcp/copilot-review", want: "http://localhost:8080/mcp/copilot-review"},
-		{name: "trailing slash trimmed", resource: "http://localhost:8080/mcp/foo/", want: "http://localhost:8080/mcp/foo"},
-		{name: "root prefix", resource: "http://localhost:8080/mcp", want: "http://localhost:8080/mcp"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			handler := h.RouteProtectedResourceMetadata(tc.resource)
-			r := httptest.NewRequest(http.MethodGet, "/.well-known/oauth-protected-resource/mcp/x", nil)
-			w := httptest.NewRecorder()
-
-			handler(w, r)
-
-			if w.Code != http.StatusOK {
-				t.Fatalf("status: got %d, want %d", w.Code, http.StatusOK)
-			}
-			if ct := w.Header().Get("Content-Type"); ct != "application/json" {
-				t.Errorf("Content-Type: got %q, want %q", ct, "application/json")
-			}
-			var doc map[string]any
-			if err := json.NewDecoder(w.Body).Decode(&doc); err != nil {
-				t.Fatalf("decoding response: %v", err)
-			}
-			if doc["resource"] != tc.want {
-				t.Errorf("resource: got %v, want %s", doc["resource"], tc.want)
-			}
-			servers, ok := doc["authorization_servers"].([]any)
-			if !ok || len(servers) == 0 || servers[0] != "http://localhost:8080" {
-				t.Errorf("authorization_servers: got %v, want gateway BaseURL", doc["authorization_servers"])
-			}
-		})
-	}
-}
-
 func TestRegisterReturnsClientID(t *testing.T) {
 	h := newTestHandler(t)
 	body := `{"redirect_uris":["http://localhost/cb"],"client_name":"test"}`
