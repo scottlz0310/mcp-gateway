@@ -21,7 +21,7 @@ const ContextKeyToken contextKey = "auth_token"
 
 // TokenValidator is implemented by auth.Handler.
 type TokenValidator interface {
-	ValidateToken(ctx context.Context, token string) (string, error)
+	ValidateToken(ctx context.Context, token, audience string) (string, error)
 }
 
 type upstreamErrorer interface {
@@ -32,6 +32,7 @@ type upstreamErrorer interface {
 type authOptions struct {
 	baseURL             string
 	resourceMetadataURL string
+	audience            string
 }
 
 // AuthOption configures the Auth middleware.
@@ -59,6 +60,11 @@ func WithResourceMetadataURL(u string) AuthOption {
 	return func(o *authOptions) { o.resourceMetadataURL = strings.TrimSpace(u) }
 }
 
+// WithAudience sets the expected token audience for the protected resource.
+func WithAudience(u string) AuthOption {
+	return func(o *authOptions) { o.audience = strings.TrimRight(strings.TrimSpace(u), "/") }
+}
+
 // Auth returns a middleware that validates Bearer tokens via the configured
 // OAuth provider.
 func Auth(v TokenValidator, opts ...AuthOption) func(http.Handler) http.Handler {
@@ -67,6 +73,7 @@ func Auth(v TokenValidator, opts ...AuthOption) func(http.Handler) http.Handler 
 		opt(&options)
 	}
 	resourceMetadataURL := resolveResourceMetadataURL(options)
+	audience := resolveAudience(options)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			token := extractBearer(r)
@@ -77,7 +84,7 @@ func Auth(v TokenValidator, opts ...AuthOption) func(http.Handler) http.Handler 
 				return
 			}
 
-			subject, err := v.ValidateToken(r.Context(), token)
+			subject, err := v.ValidateToken(r.Context(), token, audience)
 			if err != nil {
 				var ue upstreamErrorer
 				if errors.As(err, &ue) {
@@ -102,6 +109,16 @@ func Auth(v TokenValidator, opts ...AuthOption) func(http.Handler) http.Handler 
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+func resolveAudience(o authOptions) string {
+	if o.audience != "" {
+		return o.audience
+	}
+	if o.baseURL != "" {
+		return strings.TrimRight(o.baseURL, "/")
+	}
+	return ""
 }
 
 // resolveResourceMetadataURL chooses the resource_metadata URL for the

@@ -10,7 +10,7 @@ import (
 func TestStoreSessionLifecycle(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 
-	s.SaveSession("state1", "http://localhost/cb", "")
+	s.SaveSession("state1", "http://localhost/cb", "", "https://gw.example/mcp")
 	if !s.HasSession("state1") {
 		t.Fatal("expected session to exist")
 	}
@@ -21,7 +21,7 @@ func TestStoreSessionLifecycle(t *testing.T) {
 
 func TestStoreCompleteCallback(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
-	s.SaveSession("state2", "http://localhost/cb", "")
+	s.SaveSession("state2", "http://localhost/cb", "", "https://gw.example/mcp")
 
 	code, err := s.CompleteCallback("state2", "token123", "repo,user")
 	if err != nil {
@@ -42,6 +42,9 @@ func TestStoreCompleteCallback(t *testing.T) {
 	if sess.Scope != "repo,user" {
 		t.Errorf("scope: got %q, want %q", sess.Scope, "repo,user")
 	}
+	if sess.Audience != "https://gw.example/mcp" {
+		t.Errorf("audience: got %q", sess.Audience)
+	}
 }
 
 func TestStoreCompleteCallbackUnknownState(t *testing.T) {
@@ -54,18 +57,21 @@ func TestStoreCompleteCallbackUnknownState(t *testing.T) {
 
 func TestStoreExchangeCodeOneTimeUse(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
-	s.SaveSession("state3", "http://localhost/cb", "")
+	s.SaveSession("state3", "http://localhost/cb", "", "https://gw.example/mcp")
 
 	code, _ := s.CompleteCallback("state3", "tok", "")
-	token, _, err := s.ExchangeCode(code, "http://localhost/cb", "")
+	token, _, audience, err := s.ExchangeCode(code, "http://localhost/cb", "")
 	if err != nil {
 		t.Fatalf("ExchangeCode: %v", err)
 	}
 	if token != "tok" {
 		t.Errorf("token: got %q, want %q", token, "tok")
 	}
+	if audience != "https://gw.example/mcp" {
+		t.Errorf("audience: got %q", audience)
+	}
 
-	_, _, err = s.ExchangeCode(code, "http://localhost/cb", "")
+	_, _, _, err = s.ExchangeCode(code, "http://localhost/cb", "")
 	if err == nil {
 		t.Fatal("expected error on second exchange (one-time use)")
 	}
@@ -73,10 +79,10 @@ func TestStoreExchangeCodeOneTimeUse(t *testing.T) {
 
 func TestStoreExchangeCodeRedirectURIMismatch(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
-	s.SaveSession("state4", "http://localhost/cb", "")
+	s.SaveSession("state4", "http://localhost/cb", "", "https://gw.example/mcp")
 
 	code, _ := s.CompleteCallback("state4", "tok", "")
-	_, _, err := s.ExchangeCode(code, "http://localhost/other", "")
+	_, _, _, err := s.ExchangeCode(code, "http://localhost/other", "")
 	if err == nil {
 		t.Fatal("expected error for redirect_uri mismatch")
 	}
@@ -88,18 +94,18 @@ func TestStorePKCE(t *testing.T) {
 	challenge := "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
 
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
-	s.SaveSession("state5", "http://localhost/cb", challenge)
+	s.SaveSession("state5", "http://localhost/cb", challenge, "https://gw.example/mcp")
 	code, _ := s.CompleteCallback("state5", "tok", "")
 
 	// Wrong verifier: code is NOT consumed on PKCE failure so we can retry.
 	wrongVerifier := "wrongverifier_wrongverifier_wrongverifier_wrong"
-	_, _, err := s.ExchangeCode(code, "http://localhost/cb", wrongVerifier)
+	_, _, _, err := s.ExchangeCode(code, "http://localhost/cb", wrongVerifier)
 	if err == nil {
 		t.Fatal("expected PKCE failure with wrong verifier")
 	}
 
 	// Correct verifier should succeed.
-	_, _, err = s.ExchangeCode(code, "http://localhost/cb", verifier)
+	_, _, _, err = s.ExchangeCode(code, "http://localhost/cb", verifier)
 	if err != nil {
 		t.Fatalf("PKCE exchange with correct verifier: %v", err)
 	}
@@ -109,10 +115,10 @@ func TestStorePKCEInvalidVerifierLength(t *testing.T) {
 	challenge := "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
 
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
-	s.SaveSession("state6", "http://localhost/cb", challenge)
+	s.SaveSession("state6", "http://localhost/cb", challenge, "https://gw.example/mcp")
 	code, _ := s.CompleteCallback("state6", "tok", "")
 
-	_, _, err := s.ExchangeCode(code, "http://localhost/cb", "tooshort")
+	_, _, _, err := s.ExchangeCode(code, "http://localhost/cb", "tooshort")
 	if err == nil {
 		t.Fatal("expected error for verifier that is too short")
 	}
@@ -122,7 +128,7 @@ func TestStoreDeviceLifecycle(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	expiresAt := time.Now().Add(15 * time.Minute)
 
-	code, err := s.CreateDevice("gh-dev-code", "ABCD-1234", "https://github.com/login/device", expiresAt, 5)
+	code, err := s.CreateDevice("gh-dev-code", "ABCD-1234", "https://github.com/login/device", expiresAt, 5, "https://gw.example/mcp")
 	if err != nil {
 		t.Fatalf("CreateDevice: %v", err)
 	}
@@ -139,6 +145,9 @@ func TestStoreDeviceLifecycle(t *testing.T) {
 	}
 	if d.Status != devicePending {
 		t.Errorf("status: got %v, want pending", d.Status)
+	}
+	if d.Audience != "https://gw.example/mcp" {
+		t.Errorf("audience: got %q", d.Audience)
 	}
 
 	consumed, ok := s.AuthorizeAndConsumeDevice(code, "gha_token", "repo,user")
@@ -157,7 +166,7 @@ func TestStoreDeviceDeny(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	expiresAt := time.Now().Add(15 * time.Minute)
 
-	code, err := s.CreateDevice("gh-dev", "WXYZ-5678", "https://github.com/login/device", expiresAt, 5)
+	code, err := s.CreateDevice("gh-dev", "WXYZ-5678", "https://github.com/login/device", expiresAt, 5, "https://gw.example/mcp")
 	if err != nil {
 		t.Fatalf("CreateDevice: %v", err)
 	}
@@ -184,13 +193,16 @@ func TestStoreDeviceNotFound(t *testing.T) {
 func TestTokenCache(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 
-	s.CacheToken("tok1", "alice")
-	login, ok := s.LookupToken("tok1")
+	s.CacheToken("tok1", "alice", "https://gw.example/mcp")
+	rec, ok := s.LookupToken("tok1")
 	if !ok {
 		t.Fatal("expected cache hit")
 	}
-	if login != "alice" {
-		t.Errorf("login: got %q, want %q", login, "alice")
+	if rec.Subject != "alice" {
+		t.Errorf("login: got %q, want %q", rec.Subject, "alice")
+	}
+	if !rec.HasAudience("https://gw.example/mcp") {
+		t.Errorf("audiences: got %#v", rec.Audiences)
 	}
 
 	s.InvalidateCachedToken("tok1")
@@ -204,42 +216,44 @@ func TestTokenCache(t *testing.T) {
 // the error-logging paths in CacheToken and InvalidateCachedToken.
 type errTokenStore struct{ mem *memTokenStore }
 
-func (e *errTokenStore) Save(_, _ string, _ time.Time) error { return fmt.Errorf("injected save error") }
-func (e *errTokenStore) Lookup(token string) (string, bool)  { return e.mem.Lookup(token) }
-func (e *errTokenStore) Delete(_ string) error               { return fmt.Errorf("injected delete error") }
-func (e *errTokenStore) Sweep() error                        { return e.mem.Sweep() }
+func (e *errTokenStore) Save(_, _ string, _ []string, _ time.Time) error {
+	return fmt.Errorf("injected save error")
+}
+func (e *errTokenStore) Lookup(token string) (TokenRecord, bool) { return e.mem.Lookup(token) }
+func (e *errTokenStore) Delete(_ string) error                   { return fmt.Errorf("injected delete error") }
+func (e *errTokenStore) Sweep() error                            { return e.mem.Sweep() }
 
 // TestNewStoreNilTokenStore verifies that a nil TokenStore defaults to memTokenStore.
 func TestNewStoreNilTokenStore(t *testing.T) {
-s := NewStore(10*time.Minute, 5*time.Minute, nil)
-s.CacheToken("tok-nil", "niluser")
-if _, ok := s.LookupToken("tok-nil"); !ok {
-t.Fatal("expected cache hit: nil TokenStore should default to mem store")
-}
+	s := NewStore(10*time.Minute, 5*time.Minute, nil)
+	s.CacheToken("tok-nil", "niluser", "https://gw.example/mcp")
+	if _, ok := s.LookupToken("tok-nil"); !ok {
+		t.Fatal("expected cache hit: nil TokenStore should default to mem store")
+	}
 }
 
 // TestCacheTokenSaveError verifies that CacheToken logs (does not panic) when the
 // underlying store returns a Save error.
 func TestCacheTokenSaveError(t *testing.T) {
-ts := &errTokenStore{mem: NewMemTokenStore().(*memTokenStore)}
-s := NewStore(10*time.Minute, 5*time.Minute, ts)
-// Must not panic; error is logged via slog.Warn.
-s.CacheToken("tok-err", "user")
+	ts := &errTokenStore{mem: NewMemTokenStore().(*memTokenStore)}
+	s := NewStore(10*time.Minute, 5*time.Minute, ts)
+	// Must not panic; error is logged via slog.Warn.
+	s.CacheToken("tok-err", "user", "https://gw.example/mcp")
 }
 
 // TestInvalidateCachedTokenDeleteError verifies that InvalidateCachedToken logs
 // (does not panic) when the underlying store returns a Delete error.
 func TestInvalidateCachedTokenDeleteError(t *testing.T) {
-ts := &errTokenStore{mem: NewMemTokenStore().(*memTokenStore)}
-s := NewStore(10*time.Minute, 5*time.Minute, ts)
-// Must not panic; error is logged via slog.Warn.
-s.InvalidateCachedToken("tok-err")
+	ts := &errTokenStore{mem: NewMemTokenStore().(*memTokenStore)}
+	s := NewStore(10*time.Minute, 5*time.Minute, ts)
+	// Must not panic; error is logged via slog.Warn.
+	s.InvalidateCachedToken("tok-err")
 }
 
 func TestCreateAndUseRefreshToken(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 
-	rt, err := s.CreateRefreshToken("access-token-abc", time.Hour)
+	rt, err := s.CreateRefreshToken("access-token-abc", "https://gw.example/mcp", time.Hour)
 	if err != nil {
 		t.Fatalf("CreateRefreshToken: %v", err)
 	}
@@ -259,7 +273,7 @@ func TestCreateAndUseRefreshToken(t *testing.T) {
 func TestUseRefreshTokenIsOneTimeUse(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 
-	rt, err := s.CreateRefreshToken("tok", time.Hour)
+	rt, err := s.CreateRefreshToken("tok", "https://gw.example/mcp", time.Hour)
 	if err != nil {
 		t.Fatalf("CreateRefreshToken: %v", err)
 	}
@@ -275,7 +289,7 @@ func TestUseRefreshTokenIsOneTimeUse(t *testing.T) {
 func TestUseRefreshTokenExpired(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 
-	rt, err := s.CreateRefreshToken("tok", -time.Second) // already expired
+	rt, err := s.CreateRefreshToken("tok", "https://gw.example/mcp", -time.Second) // already expired
 	if err != nil {
 		t.Fatalf("CreateRefreshToken: %v", err)
 	}
@@ -296,7 +310,7 @@ func TestUseRefreshTokenUnknown(t *testing.T) {
 func TestPeekRefreshTokenDoesNotConsume(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 
-	rt, err := s.CreateRefreshToken("tok", time.Hour)
+	rt, err := s.CreateRefreshToken("tok", "https://gw.example/mcp", time.Hour)
 	if err != nil {
 		t.Fatalf("CreateRefreshToken: %v", err)
 	}
@@ -321,7 +335,7 @@ func TestPeekRefreshTokenDoesNotConsume(t *testing.T) {
 func TestConsumeRefreshToken(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 
-	rt, err := s.CreateRefreshToken("tok", time.Hour)
+	rt, err := s.CreateRefreshToken("tok", "https://gw.example/mcp", time.Hour)
 	if err != nil {
 		t.Fatalf("CreateRefreshToken: %v", err)
 	}
@@ -342,20 +356,23 @@ func TestConsumeRefreshTokenNoOp(t *testing.T) {
 func TestReserveRefreshToken(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 
-	rt, err := s.CreateRefreshToken("access-tok", time.Hour)
+	rt, err := s.CreateRefreshToken("access-tok", "https://gw.example/mcp", time.Hour)
 	if err != nil {
 		t.Fatalf("CreateRefreshToken: %v", err)
 	}
 
-	got, _, err := s.ReserveRefreshToken(rt)
+	got, audience, _, err := s.ReserveRefreshToken(rt)
 	if err != nil {
 		t.Fatalf("ReserveRefreshToken: %v", err)
 	}
 	if got != "access-tok" {
 		t.Errorf("access token: got %q, want %q", got, "access-tok")
 	}
+	if audience != "https://gw.example/mcp" {
+		t.Errorf("audience: got %q", audience)
+	}
 	// Token must be gone after reservation (concurrent callers must fail).
-	if _, _, err2 := s.ReserveRefreshToken(rt); err2 == nil {
+	if _, _, _, err2 := s.ReserveRefreshToken(rt); err2 == nil {
 		t.Fatal("expected error on second ReserveRefreshToken (atomic one-time removal)")
 	}
 }
@@ -363,11 +380,11 @@ func TestReserveRefreshToken(t *testing.T) {
 func TestReserveRefreshTokenExpired(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 
-	rt, err := s.CreateRefreshToken("tok", -time.Second) // already expired
+	rt, err := s.CreateRefreshToken("tok", "https://gw.example/mcp", -time.Second) // already expired
 	if err != nil {
 		t.Fatalf("CreateRefreshToken: %v", err)
 	}
-	if _, _, err := s.ReserveRefreshToken(rt); err == nil {
+	if _, _, _, err := s.ReserveRefreshToken(rt); err == nil {
 		t.Fatal("expected error for expired refresh token")
 	}
 }
@@ -375,17 +392,17 @@ func TestReserveRefreshTokenExpired(t *testing.T) {
 func TestRestoreRefreshToken(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 
-	rt, err := s.CreateRefreshToken("tok-restore", time.Hour)
+	rt, err := s.CreateRefreshToken("tok-restore", "https://gw.example/mcp", time.Hour)
 	if err != nil {
 		t.Fatalf("CreateRefreshToken: %v", err)
 	}
 
-	_, expiresAt, err := s.ReserveRefreshToken(rt)
+	_, audience, expiresAt, err := s.ReserveRefreshToken(rt)
 	if err != nil {
 		t.Fatalf("ReserveRefreshToken: %v", err)
 	}
 	// Simulate rotation failure: restore the token.
-	s.RestoreRefreshToken(rt, "tok-restore", expiresAt)
+	s.RestoreRefreshToken(rt, "tok-restore", audience, expiresAt)
 
 	// Token must be accessible again via Peek after restoration.
 	got, err := s.PeekRefreshToken(rt)
@@ -401,7 +418,7 @@ func TestAcquireDevicePollingSerializes(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	expiresAt := time.Now().Add(15 * time.Minute)
 
-	code, err := s.CreateDevice("gh-dev", "ABCD-9999", "https://github.com/login/device", expiresAt, 0)
+	code, err := s.CreateDevice("gh-dev", "ABCD-9999", "https://github.com/login/device", expiresAt, 0, "https://gw.example/mcp")
 	if err != nil {
 		t.Fatalf("CreateDevice: %v", err)
 	}
@@ -428,7 +445,7 @@ func TestAcquireDevicePollingConcurrent(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	expiresAt := time.Now().Add(15 * time.Minute)
 
-	code, err := s.CreateDevice("gh-dev-concurrent", "EFGH-0001", "https://github.com/login/device", expiresAt, 0)
+	code, err := s.CreateDevice("gh-dev-concurrent", "EFGH-0001", "https://github.com/login/device", expiresAt, 0, "https://gw.example/mcp")
 	if err != nil {
 		t.Fatalf("CreateDevice: %v", err)
 	}
@@ -487,7 +504,7 @@ func TestAcquireDevicePollingEnforcesInterval(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	expiresAt := time.Now().Add(15 * time.Minute)
 
-	code, err := s.CreateDevice("gh-dev-interval", "IJKL-0002", "https://github.com/login/device", expiresAt, 5)
+	code, err := s.CreateDevice("gh-dev-interval", "IJKL-0002", "https://github.com/login/device", expiresAt, 5, "https://gw.example/mcp")
 	if err != nil {
 		t.Fatalf("CreateDevice: %v", err)
 	}

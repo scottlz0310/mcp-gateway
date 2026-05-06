@@ -7,7 +7,22 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.3.0] - 2026-05-20
+### Added
+
+- `grant_type=refresh_token` now accepts an optional `resource` parameter (RFC 8707 §2) to narrow the audience of the re-issued token
+  - The requested resource must equal or be a sub-path of the audience originally recorded on the refresh token; broadening or cross-route changes are rejected with `invalid_target`
+  - Legacy refresh tokens issued before audience tracking was introduced (empty stored audience) accept any registered resource, enabling a smooth migration
+  - The consumed refresh token is restored on validation failure so clients can retry with a corrected `resource` value
+
+### Migration
+
+- **`token_audience_strict`**: Enable `MCP_GATEWAY_TOKEN_AUDIENCE_STRICT=true` (or `token_audience_strict: true` in config) **90 days after your last deployment without audience tracking**.  The default TTL for refresh tokens is 90 days, so after that window all tokens in circulation will carry audience metadata and strict enforcement is safe.  Until then the gateway logs a warning for tokens without audience metadata but does not reject them.
+
+### Roadmap
+
+- Multi-audience tokens (a single opaque token carrying multiple `aud` values, e.g., `["https://gw.example/mcp/a", "https://gw.example/mcp/b"]`) are recorded as a future candidate and are not part of the current release.
+
+
 
 ### Added
 

@@ -54,6 +54,9 @@ type GatewayConfig struct {
 	// TrustedProxies is a CIDR allowlist for reverse proxies whose
 	// X-Forwarded-* headers may be reflected into downstream requests.
 	TrustedProxies []string `yaml:"trusted_proxies,omitempty"`
+	// TokenAudienceStrict rejects tokens that lack per-route audience metadata.
+	// Leave false during the migration grace period for tokens issued before #57.
+	TokenAudienceStrict bool `yaml:"token_audience_strict,omitempty"`
 }
 
 // LoadConfig reads AppConfig from path.

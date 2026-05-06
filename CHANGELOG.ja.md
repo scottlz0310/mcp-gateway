@@ -7,7 +7,20 @@
 
 ### Added
 
-- 信頼済みリバースプロキシヘッダ対応（[#56](https://github.com/scottlz0310/mcp-gateway/issues/56), #49 PR-B）
+- `grant_type=refresh_token` がオプションの `resource` パラメータ（RFC 8707 §2）を受け付け、再発行トークンの audience を狭める
+  - 指定した resource は元のリフレッシュトークンに記録された audience と同一か、そのサブパスでなければならない。拡大・別ルートへの変更は `invalid_target` で拒否
+  - audience トラッキング以前に発行されたレガシートークン（保存 audience が空）は任意の登録済み resource を受け入れ、スムーズな移行を可能にする
+  - 検証失敗時は消費済みリフレッシュトークンを復元するため、クライアントは修正後の `resource` で再試行できる
+
+### 移行ガイド
+
+- **`token_audience_strict`**: audience トラッキングを含まない最後のデプロイから **90 日後** に `MCP_GATEWAY_TOKEN_AUDIENCE_STRICT=true`（または設定ファイルの `token_audience_strict: true`）を有効にしてください。リフレッシュトークンのデフォルト TTL は 90 日であり、その期間が過ぎると流通中のすべてのトークンに audience メタデータが付与されます。それまでは audience メタデータを持たないトークンに警告ログを出力しますが、拒否はしません。
+
+### ロードマップ
+
+- マルチ audience トークン（1 つの opaque token に複数の `aud` 値、例：`["https://gw.example/mcp/a", "https://gw.example/mcp/b"]`）は将来の候補として記録しており、現リリースには含まれない。
+
+
   - `MCP_GATEWAY_TRUSTED_PROXIES` / `gateway.trusted_proxies` による CIDR allowlist を追加
   - 信頼済み送信元からの `X-Forwarded-Proto` / `X-Forwarded-Host` / `X-Forwarded-For` のみを後段 request に反映
   - 未信頼送信元からの forwarded headers は削除し、spoofing を防止

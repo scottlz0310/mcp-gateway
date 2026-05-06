@@ -22,6 +22,7 @@ type Session struct {
 	State         string
 	RedirectURI   string
 	CodeChallenge string
+	Audience      string
 	InternalCode  string
 	AccessToken   string
 	Scope         string
@@ -32,7 +33,7 @@ type deviceStatus int
 
 const (
 	devicePending deviceStatus = iota
-	deviceDenied                // user denied or access_denied from GitHub
+	deviceDenied               // user denied or access_denied from GitHub
 )
 
 // DeviceSession tracks a Device Authorization Grant (RFC 8628) flow and its current status.
@@ -45,6 +46,7 @@ type DeviceSession struct {
 	Interval        int // minimum seconds between client polls (from GitHub)
 	AccessToken     string
 	Scope           string
+	Audience        string
 	Status          deviceStatus
 	pollingInFlight bool // true while one request is actively polling GitHub
 	nextPollAfter   time.Time
@@ -53,11 +55,11 @@ type DeviceSession struct {
 // Store holds OAuth flow state (sessions, codes, devices) and delegates token
 // validation persistence to a TokenStore.
 type Store struct {
-	mu           sync.RWMutex
-	sessions     map[string]*Session
-	codes        map[string]*Session
-	devices      map[string]*DeviceSession // keyed by gateway-internal device code
-	ttl          time.Duration
+	mu       sync.RWMutex
+	sessions map[string]*Session
+	codes    map[string]*Session
+	devices  map[string]*DeviceSession // keyed by gateway-internal device code
+	ttl      time.Duration
 
 	tokens       TokenStore
 	tokensTTL    time.Duration // TTL applied when saving a validated token
@@ -110,13 +112,14 @@ func (s *Store) Stop() {
 }
 
 // SaveSession stores a new OAuth session keyed by state.
-func (s *Store) SaveSession(state, redirectURI, codeChallenge string) {
+func (s *Store) SaveSession(state, redirectURI, codeChallenge, audience string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sessions[state] = &Session{
 		State:         state,
 		RedirectURI:   redirectURI,
 		CodeChallenge: codeChallenge,
+		Audience:      audience,
 		ExpiresAt:     time.Now().Add(s.ttl),
 	}
 }
@@ -151,35 +154,36 @@ func (s *Store) CompleteCallback(state, accessToken, scope string) (string, erro
 	return code, nil
 }
 
-// ExchangeCode validates PKCE and returns the access token and granted scope.
-// The code is consumed on success (one-time use).
-func (s *Store) ExchangeCode(code, redirectURI, codeVerifier string) (string, string, error) {
+// ExchangeCode validates PKCE and returns the access token, granted scope, and
+// requested audience. The code is consumed on success (one-time use).
+func (s *Store) ExchangeCode(code, redirectURI, codeVerifier string) (string, string, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	sess, ok := s.codes[code]
 	if !ok || time.Now().After(sess.ExpiresAt) {
 		delete(s.codes, code)
-		return "", "", fmt.Errorf("code not found or expired")
+		return "", "", "", fmt.Errorf("code not found or expired")
 	}
 	if sess.RedirectURI != redirectURI {
-		return "", "", fmt.Errorf("redirect_uri mismatch")
+		return "", "", "", fmt.Errorf("redirect_uri mismatch")
 	}
 	if sess.CodeChallenge != "" {
 		if err := verifyPKCE(codeVerifier, sess.CodeChallenge); err != nil {
-			return "", "", err
+			return "", "", "", err
 		}
 	}
 
 	token := sess.AccessToken
 	scope := sess.Scope
+	audience := sess.Audience
 	delete(s.codes, code)
 	delete(s.sessions, sess.State)
-	return token, scope, nil
+	return token, scope, audience, nil
 }
 
 // CreateDevice stores a new Device Authorization Grant session and returns the gateway-internal device code.
-func (s *Store) CreateDevice(githubDevCode, userCode, verificationURI string, expiresAt time.Time, interval int) (string, error) {
+func (s *Store) CreateDevice(githubDevCode, userCode, verificationURI string, expiresAt time.Time, interval int, audience string) (string, error) {
 	code, err := generateCode()
 	if err != nil {
 		return "", err
@@ -193,6 +197,7 @@ func (s *Store) CreateDevice(githubDevCode, userCode, verificationURI string, ex
 		VerificationURI: verificationURI,
 		ExpiresAt:       expiresAt,
 		Interval:        interval,
+		Audience:        audience,
 		Status:          devicePending,
 	}
 	return code, nil
@@ -287,12 +292,12 @@ func (s *Store) ReleaseDevicePolling(internalCode string) {
 // (MCP_GATEWAY_TOKEN_STORE_PATH is set), the associated access token value is
 // written to disk in the .refresh sibling file (mode 0600); see the
 // MCP_GATEWAY_TOKEN_STORE_PATH documentation for security considerations.
-func (s *Store) CreateRefreshToken(accessToken string, ttl time.Duration) (string, error) {
+func (s *Store) CreateRefreshToken(accessToken, audience string, ttl time.Duration) (string, error) {
 	code, err := generateCode()
 	if err != nil {
 		return "", fmt.Errorf("generating refresh token: %w", err)
 	}
-	if err := s.refreshStore.Save(code, accessToken, time.Now().Add(ttl)); err != nil {
+	if err := s.refreshStore.Save(code, accessToken, audience, time.Now().Add(ttl)); err != nil {
 		return "", fmt.Errorf("saving refresh token: %w", err)
 	}
 	return code, nil
@@ -305,7 +310,7 @@ func (s *Store) CreateRefreshToken(accessToken string, ttl time.Duration) (strin
 func (s *Store) UseRefreshToken(refreshToken string) (string, error) {
 	s.refreshMu.Lock()
 	defer s.refreshMu.Unlock()
-	accessToken, _, ok := s.refreshStore.Lookup(refreshToken)
+	accessToken, _, _, ok := s.refreshStore.Lookup(refreshToken)
 	if !ok {
 		return "", fmt.Errorf("refresh token not found or expired")
 	}
@@ -320,7 +325,7 @@ func (s *Store) UseRefreshToken(refreshToken string) (string, error) {
 // when the token is unknown or has expired.  Use ConsumeRefreshToken to
 // delete the token only after the full rotation has succeeded.
 func (s *Store) PeekRefreshToken(refreshToken string) (string, error) {
-	accessToken, _, ok := s.refreshStore.Lookup(refreshToken)
+	accessToken, _, _, ok := s.refreshStore.Lookup(refreshToken)
 	if !ok {
 		return "", fmt.Errorf("refresh token not found or expired")
 	}
@@ -341,40 +346,54 @@ func (s *Store) ConsumeRefreshToken(refreshToken string) {
 // receive an error here, preventing double-rotation.  On any subsequent
 // failure in the rotation flow, call RestoreRefreshToken to put the token
 // back so the client can retry.
-func (s *Store) ReserveRefreshToken(refreshToken string) (string, time.Time, error) {
+func (s *Store) ReserveRefreshToken(refreshToken string) (string, string, time.Time, error) {
 	s.refreshMu.Lock()
 	defer s.refreshMu.Unlock()
-	accessToken, expiresAt, ok := s.refreshStore.Lookup(refreshToken)
+	accessToken, audience, expiresAt, ok := s.refreshStore.Lookup(refreshToken)
 	if !ok {
-		return "", time.Time{}, fmt.Errorf("refresh token not found or expired")
+		return "", "", time.Time{}, fmt.Errorf("refresh token not found or expired")
 	}
 	if err := s.refreshStore.Delete(refreshToken); err != nil {
-		return "", time.Time{}, fmt.Errorf("%w: %w", ErrRefreshTokenDeleteFailed, err)
+		return "", "", time.Time{}, fmt.Errorf("%w: %w", ErrRefreshTokenDeleteFailed, err)
 	}
-	return accessToken, expiresAt, nil
+	return accessToken, audience, expiresAt, nil
 }
 
 // RestoreRefreshToken puts a previously reserved refresh token back into the
 // store.  Call this when the rotation flow fails after ReserveRefreshToken so
 // that the client can retry without full re-authentication.
-func (s *Store) RestoreRefreshToken(refreshToken, accessToken string, expiresAt time.Time) {
-	if err := s.refreshStore.Save(refreshToken, accessToken, expiresAt); err != nil {
+func (s *Store) RestoreRefreshToken(refreshToken, accessToken, audience string, expiresAt time.Time) {
+	if err := s.refreshStore.Save(refreshToken, accessToken, audience, expiresAt); err != nil {
 		slog.Warn("refresh token restore failed", "err", err)
 	}
 }
 
-// CacheToken records that token maps to subject (e.g. GitHub login) and is valid
-// for tokensTTL from now. The entry survives process restarts when a persistent
+// RegisterTokenAudience records the audience granted to a newly issued token.
+// The subject may be filled later after the first provider validation.
+func (s *Store) RegisterTokenAudience(token, audience string) {
+	s.saveTokenRecord(token, "", audience)
+}
+
+// CacheToken records that token maps to subject (e.g. GitHub login) and merges
+// any supplied audience. The entry survives process restarts when a persistent
 // TokenStore is configured.
-func (s *Store) CacheToken(token, subject string) {
-	if err := s.tokens.Save(token, subject, time.Now().Add(s.tokensTTL)); err != nil {
+func (s *Store) CacheToken(token, subject, audience string) {
+	s.saveTokenRecord(token, subject, audience)
+}
+
+func (s *Store) saveTokenRecord(token, subject, audience string) {
+	var audiences []string
+	if audience != "" {
+		audiences = []string{audience}
+	}
+	if err := s.tokens.Save(token, subject, audiences, time.Now().Add(s.tokensTTL)); err != nil {
 		// Non-fatal: next request will re-validate against the upstream provider.
 		slog.Warn("token store save failed", "err", err)
 	}
 }
 
-// LookupToken returns (subject, true) if token is cached and not expired.
-func (s *Store) LookupToken(token string) (string, bool) {
+// LookupToken returns cached metadata if token is known and not expired.
+func (s *Store) LookupToken(token string) (TokenRecord, bool) {
 	return s.tokens.Lookup(token)
 }
 
