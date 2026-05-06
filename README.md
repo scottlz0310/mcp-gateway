@@ -171,6 +171,8 @@ gateway:
   public_url: "http://127.0.0.1:8080"
   port: "8080"
   oauth_scopes: "repo,user"
+  trusted_proxies:
+    - "127.0.0.1/32"
 ```
 
 All `gateway:` fields are optional — values fall back to the corresponding env vars and then to the built-in defaults.
@@ -222,6 +224,7 @@ ROUTE_COPILOT_REVIEW=/mcp/copilot-review|http://copilot-review-mcp:8083
 | `MCP_GATEWAY_MASTER_KEY` | — | Master key for deterministic key derivation (≥32 bytes; see [Secret Encryption](#secret-encryption)) |
 | `MCP_GATEWAY_PUBLIC_URL` | `http://127.0.0.1:8080` | Canonical base URL for OAuth callback, discovery metadata, and PRM (replaces `MCP_GATEWAY_BASE_URL`) |
 | `MCP_GATEWAY_BIND_ADDR` | `127.0.0.1:8080` | TCP address the HTTP listener binds to. Set to `0.0.0.0:<port>` for Docker deployments. For reverse-proxy on the same host, keep the default `127.0.0.1:<port>` |
+| `MCP_GATEWAY_TRUSTED_PROXIES` | — | Comma-separated CIDR allowlist for reverse proxies whose `X-Forwarded-*` headers are trusted (e.g. `127.0.0.1/32,10.0.0.0/8`) |
 | `MCP_GATEWAY_BASE_URL` | — | **Deprecated** — alias for `MCP_GATEWAY_PUBLIC_URL`; will be removed in a future release |
 | `MCP_GATEWAY_PORT` | `8080` | Default port used when deriving `bind_addr` and `public_url`. The actual listen address is controlled by `MCP_GATEWAY_BIND_ADDR` |
 | `MCP_GATEWAY_TOKEN_STORE_PATH` | `/data/tokens.json` | Path to the persistent token store file (see [Persistent Auth State](#persistent-auth-state)) |
@@ -231,6 +234,47 @@ ROUTE_COPILOT_REVIEW=/mcp/copilot-review|http://copilot-review-mcp:8083
 | `TOKEN_CACHE_TTL_MIN` | `30` | Token validation cache TTL in minutes — used only when `MCP_GATEWAY_TOKEN_STORE_PATH` is explicitly set to empty |
 | `TOKEN_EXPIRES_IN_SEC` | `7776000` | Token lifetime advertised to clients (seconds; default 90 days). Also used as the TTL for persistent token entries |
 | `GITHUB_MCP_UPSTREAM_URL` | — | **Deprecated** — single upstream fallback when no `ROUTE_*` is set |
+
+### Reverse Proxy Headers
+
+When TLS terminates in front of mcp-gateway (nginx, Caddy, fly.io edge proxy, etc.),
+set `MCP_GATEWAY_PUBLIC_URL` / `gateway.public_url` to the externally visible
+URL and configure trusted proxy CIDRs:
+
+```bash
+MCP_GATEWAY_PUBLIC_URL=https://mcp.example.com
+MCP_GATEWAY_BIND_ADDR=127.0.0.1:8080
+MCP_GATEWAY_TRUSTED_PROXIES=127.0.0.1/32,10.0.0.0/8
+```
+
+Equivalent `config.yaml`:
+
+```yaml
+gateway:
+  public_url: "https://mcp.example.com"
+  bind_addr: "127.0.0.1:8080"
+  trusted_proxies:
+    - "127.0.0.1/32"
+    - "10.0.0.0/8"
+```
+
+Only requests whose immediate peer IP matches `trusted_proxies` may influence the
+request seen by downstream handlers:
+
+| Header | Effect |
+|--------|--------|
+| `X-Forwarded-Proto` | Sets the request scheme when the value is `http` or `https` |
+| `X-Forwarded-Host` | Sets `r.Host` after basic host validation |
+| `X-Forwarded-For` | Sets `r.RemoteAddr` to the rightmost valid IP supplied by the trusted proxy |
+
+If the peer is not trusted, incoming forwarded headers are stripped before later
+middleware and handlers run. `trusted_proxies` entries must be valid CIDR strings;
+invalid values cause startup to fail.
+
+Configure your reverse proxy to overwrite or sanitize `X-Forwarded-For` instead of
+passing client-provided values through unchanged. The gateway reads the header from the
+right as a defense against appended spoofed entries, but the proxy should still own this
+header.
 
 ### Persistent Auth State
 
@@ -300,14 +344,15 @@ type Identity struct {
 }
 ```
 
-The proxy forwards two headers to upstream MCP servers:
+The proxy forwards two identity headers to upstream MCP servers:
 
 | Header | Value |
 |--------|-------|
 | `X-Authenticated-User` | `Identity.Subject` (canonical, provider-agnostic) |
 | `X-GitHub-Login` | same as `X-Authenticated-User` (legacy compatibility; both set from `Identity.Subject`) |
 
-Spoofable incoming headers (`X-Authenticated-User`, `X-GitHub-Login`) are stripped before proxying.
+Spoofable incoming headers (`X-Authenticated-User`, `X-GitHub-Login`, `Forwarded`,
+`X-Forwarded-*`, `X-Real-IP`) are stripped before proxying.
 
 ## Quick Start
 

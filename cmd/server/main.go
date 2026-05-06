@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"strconv"
@@ -117,9 +118,17 @@ func main() {
 	if strings.TrimSpace(os.Getenv("GITHUB_MCP_OAUTH_SCOPES")) == "" && strings.TrimSpace(appCfg.Gateway.OAuthScopes) != "" {
 		cfg.oauthScopes = appCfg.Gateway.OAuthScopes
 	}
+	if strings.TrimSpace(os.Getenv("MCP_GATEWAY_TRUSTED_PROXIES")) == "" && len(appCfg.Gateway.TrustedProxies) > 0 {
+		cfg.trustedProxyCIDRs = appCfg.Gateway.TrustedProxies
+	}
+	trustedProxies, err := middleware.ParseTrustedProxyCIDRs(cfg.trustedProxyCIDRs)
+	if err != nil {
+		slog.Error("invalid trusted proxy configuration", "err", err)
+		os.Exit(1)
+	}
 
 	if setup.IsSetupRequired(appCfg, envClientID, envSecret, envRoutes) {
-		runSetupWizard(cfg, appCfg, km, envClientID, envSecret, len(envRoutes) > 0)
+		runSetupWizard(cfg, appCfg, km, envClientID, envSecret, len(envRoutes) > 0, trustedProxies)
 		// runSetupWizard only returns if the listener fails immediately.
 		os.Exit(1)
 	}
@@ -250,11 +259,12 @@ func main() {
 		"public_url", cfg.publicURL,
 		"provider", prov.Name(),
 		"routes", len(routes),
+		"trusted_proxies", len(trustedProxies),
 	)
 
 	server := &http.Server{
 		Addr:              cfg.bindAddr,
-		Handler:           middleware.Logger()(mux),
+		Handler:           serverMiddleware(mux, trustedProxies),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      0, // unlimited: MCP streaming responses may be long-lived
@@ -269,7 +279,7 @@ func main() {
 // runSetupWizard starts an HTTP server that serves only the /setup endpoint.
 // It blocks until a successful POST /setup causes the process to exit (so the
 // supervisor can restart in normal mode), or until the listener fails.
-func runSetupWizard(cfg config, appCfg *appconfig.AppConfig, km *appconfig.KeyMaterial, envClientID, envSecret string, hasEnvRoutes bool) {
+func runSetupWizard(cfg config, appCfg *appconfig.AppConfig, km *appconfig.KeyMaterial, envClientID, envSecret string, hasEnvRoutes bool, trustedProxies []netip.Prefix) {
 	mgr, err := setup.New()
 	if err != nil {
 		slog.Error("failed to create setup token", "err", err)
@@ -295,7 +305,7 @@ func runSetupWizard(cfg config, appCfg *appconfig.AppConfig, km *appconfig.KeyMa
 
 	server := &http.Server{
 		Addr:              cfg.bindAddr,
-		Handler:           middleware.Logger()(mux),
+		Handler:           serverMiddleware(mux, trustedProxies),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -307,24 +317,29 @@ func runSetupWizard(cfg config, appCfg *appconfig.AppConfig, km *appconfig.KeyMa
 	}
 }
 
+func serverMiddleware(h http.Handler, trustedProxies []netip.Prefix) http.Handler {
+	return middleware.ProxyHeaders(trustedProxies)(middleware.Logger()(h))
+}
+
 type config struct {
 	githubClientID     string
 	githubClientSecret string
 	// publicURL is the canonical base URL visible to OAuth / MCP clients.
 	// Replaces the deprecated baseURL / MCP_GATEWAY_BASE_URL.
-	publicURL          string
+	publicURL string
 	// bindAddr is the TCP address the HTTP listener binds to (host:port).
-	bindAddr           string
-	oauthScopes        string
-	port               string
-	logLevel           string
-	upstreamURL        string // deprecated; prefer ROUTE_* env vars
-	sessionTTLMin      int
-	tokenCacheTTLMin   int
-	tokenExpiresInSec  int
-	tokenStorePath     string
-	keyPath            string
-	configPath         string
+	bindAddr          string
+	oauthScopes       string
+	port              string
+	logLevel          string
+	upstreamURL       string // deprecated; prefer ROUTE_* env vars
+	trustedProxyCIDRs []string
+	sessionTTLMin     int
+	tokenCacheTTLMin  int
+	tokenExpiresInSec int
+	tokenStorePath    string
+	keyPath           string
+	configPath        string
 }
 
 func loadConfig() config {
@@ -346,6 +361,7 @@ func loadConfig() config {
 		oauthScopes:       getEnv("GITHUB_MCP_OAUTH_SCOPES", "repo,user"),
 		logLevel:          getEnv("LOG_LEVEL", "info"),
 		upstreamURL:       getEnv("GITHUB_MCP_UPSTREAM_URL", ""),
+		trustedProxyCIDRs: splitCSV(os.Getenv("MCP_GATEWAY_TRUSTED_PROXIES")),
 		sessionTTLMin:     getEnvInt("SESSION_TTL_MIN", 10),
 		tokenCacheTTLMin:  getEnvInt("TOKEN_CACHE_TTL_MIN", 30),
 		tokenExpiresInSec: getEnvInt("TOKEN_EXPIRES_IN_SEC", 7776000), // 90 days
@@ -353,6 +369,18 @@ func loadConfig() config {
 		keyPath:           getEnv("MCP_GATEWAY_KEY_PATH", "./gateway.key"),
 		configPath:        getEnv("MCP_CONFIG_FILE", "./config.yaml"),
 	}
+}
+
+func splitCSV(value string) []string {
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 func getEnv(key, fallback string) string {

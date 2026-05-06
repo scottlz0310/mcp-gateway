@@ -171,6 +171,8 @@ gateway:
   public_url: "http://127.0.0.1:8080"
   port: "8080"
   oauth_scopes: "repo,user"
+  trusted_proxies:
+    - "127.0.0.1/32"
 ```
 
 `gateway:` 配下はすべてオプションで、対応する環境変数またはデフォルト値にフォールバックします。
@@ -229,6 +231,7 @@ ROUTE_PUBLIC=/public|http://public-svc:8083|auth=none
 | `MCP_GATEWAY_MASTER_KEY` | — | 決定論的キー導出に使用するマスターキー（≥32 バイト; [シークレット暗号化](#シークレット暗号化) 参照） |
 | `MCP_GATEWAY_PUBLIC_URL` | `http://127.0.0.1:8080` | OAuth コールバック・discovery メタデータ・PRM に使用する外部公開 URL（`MCP_GATEWAY_BASE_URL` の後継） |
 | `MCP_GATEWAY_BIND_ADDR` | `127.0.0.1:8080` | HTTP リスナーのバインドアドレス。Docker デプロイでは `0.0.0.0:<port>` に変更する。同一ホスト上のリバースプロキシ経由の場合はデフォルト `127.0.0.1:<port>` のままで良い |
+| `MCP_GATEWAY_TRUSTED_PROXIES` | — | `X-Forwarded-*` を信頼するリバースプロキシの CIDR リスト（カンマ区切り。例: `127.0.0.1/32,10.0.0.0/8`） |
 | `MCP_GATEWAY_BASE_URL` | — | **非推奨** — `MCP_GATEWAY_PUBLIC_URL` のエイリアス。将来のリリースで削除予定 |
 | `MCP_GATEWAY_PORT` | `8080` | `bind_addr` と `public_url` のデフォルト値を導出する際のポート番号。実際の待受アドレスは `MCP_GATEWAY_BIND_ADDR` で制御する |
 | `MCP_GATEWAY_TOKEN_STORE_PATH` | `/data/tokens.json` | 永続トークンストアのファイルパス（[認証状態の永続化](#認証状態の永続化) 参照） |
@@ -238,6 +241,26 @@ ROUTE_PUBLIC=/public|http://public-svc:8083|auth=none
 | `TOKEN_CACHE_TTL_MIN` | `30` | トークン検証キャッシュ TTL（分）— `MCP_GATEWAY_TOKEN_STORE_PATH` を空文字に明示設定した場合のみ使用 |
 | `TOKEN_EXPIRES_IN_SEC` | `7776000` | クライアントへ通知するトークン有効期限（秒、デフォルト 90 日）。永続ストアのエントリ TTL にも使用 |
 | `GITHUB_MCP_UPSTREAM_URL` | — | **非推奨**: 単一アップストリーム（`ROUTE_*` 未設定時のフォールバック） |
+
+### リバースプロキシヘッダ
+
+nginx / Caddy / fly.io edge proxy などで TLS を gateway の手前で終端する場合は、
+`MCP_GATEWAY_PUBLIC_URL` / `gateway.public_url` をクライアントから見える外部 URL に設定し、
+信頼するプロキシの CIDR を指定します。
+
+```bash
+MCP_GATEWAY_PUBLIC_URL=https://mcp.example.com
+MCP_GATEWAY_BIND_ADDR=127.0.0.1:8080
+MCP_GATEWAY_TRUSTED_PROXIES=127.0.0.1/32,10.0.0.0/8
+```
+
+信頼済みプロキシからのリクエストだけが `X-Forwarded-Proto` / `X-Forwarded-Host` /
+`X-Forwarded-For` を後段の request に反映できます。未信頼の送信元から届いた forwarded
+headers は削除されます。不正な CIDR は起動時エラーになります。
+
+信頼済みプロキシは、クライアント由来の `X-Forwarded-For` をそのまま渡さず、上書きまたは
+サニタイズしてください。gateway は XFF を右側から読みますが、このヘッダの所有者は
+プロキシに限定する前提です。
 
 ### 認証状態の永続化
 
