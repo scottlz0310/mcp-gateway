@@ -26,7 +26,8 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Migration notes
 
-Docker Compose users **must** add `MCP_GATEWAY_BIND_ADDR: 0.0.0.0:8080` so the container
+Docker Compose users **must** add `MCP_GATEWAY_BIND_ADDR: 0.0.0.0:<port>` (replacing
+`<port>` with the port your gateway uses, typically `8080`) so the container
 binds on all interfaces and Docker port-forwarding continues to work. See
 [`docs/operations.md`](docs/operations.md) for the full cutover procedure.
 

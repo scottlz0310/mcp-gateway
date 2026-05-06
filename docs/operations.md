@@ -37,20 +37,22 @@ advertised to OAuth clients—there was no way to configure the bind address ind
 
 | Old | New |
 |-----|-----|
-| `MCP_GATEWAY_BASE_URL=http://localhost:8080` | `MCP_GATEWAY_PUBLIC_URL=http://127.0.0.1:8080` |
-| *(implicit: bind on all interfaces `:8080`)* | `MCP_GATEWAY_BIND_ADDR=127.0.0.1:8080` (local) or `0.0.0.0:8080` (Docker) |
+| `MCP_GATEWAY_BASE_URL=http://localhost:<port>` | `MCP_GATEWAY_PUBLIC_URL=http://127.0.0.1:<port>` |
+| *(implicit: bind on all interfaces `:<port>`)* | `MCP_GATEWAY_BIND_ADDR=127.0.0.1:<port>` (local) or `0.0.0.0:<port>` (Docker) |
+
+> Replace `<port>` with the port your gateway uses (default: `8080`).
 
 ### 2. Update config.yaml (if used)
 
 ```yaml
 # Before
 gateway:
-  base_url: "http://localhost:8080"
+  base_url: "http://localhost:<port>"   # replace <port> with your actual port
 
 # After
 gateway:
-  public_url: "http://127.0.0.1:8080"
-  bind_addr: "127.0.0.1:8080"   # omit for Docker; set to 0.0.0.0:8080 there
+  public_url: "http://127.0.0.1:<port>"
+  bind_addr: "127.0.0.1:<port>"   # omit for Docker; set to 0.0.0.0:<port> there
 ```
 
 ### 3. Update the GitHub OAuth App callback URL
@@ -59,7 +61,7 @@ Go to **GitHub → Settings → Developer settings → OAuth Apps → [your app]
 
 | Field | Old value | New value |
 |-------|-----------|-----------|
-| Authorization callback URL | `http://localhost:8080/callback` | `http://127.0.0.1:8080/callback` |
+| Authorization callback URL | `http://localhost:<port>/callback` | `http://127.0.0.1:<port>/callback` |
 
 > **Note:** `localhost` and `127.0.0.1` are treated the same by most browsers, but GitHub
 > OAuth validates the exact callback URL, so the registered URL must match what the gateway

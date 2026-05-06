@@ -230,7 +230,7 @@ ROUTE_PUBLIC=/public|http://public-svc:8083|auth=none
 | `MCP_GATEWAY_PUBLIC_URL` | `http://127.0.0.1:8080` | OAuth コールバック・discovery メタデータ・PRM に使用する外部公開 URL（`MCP_GATEWAY_BASE_URL` の後継） |
 | `MCP_GATEWAY_BIND_ADDR` | `127.0.0.1:8080` | HTTP リスナーのバインドアドレス。Docker デプロイでは `0.0.0.0:<port>` に変更する。同一ホスト上のリバースプロキシ経由の場合はデフォルト `127.0.0.1:<port>` のままで良い |
 | `MCP_GATEWAY_BASE_URL` | — | **非推奨** — `MCP_GATEWAY_PUBLIC_URL` のエイリアス。将来のリリースで削除予定 |
-| `MCP_GATEWAY_PORT` | `8080` | リスンポート |
+| `MCP_GATEWAY_PORT` | `8080` | `bind_addr` と `public_url` のデフォルト値を導出する際のポート番号。実際の待受アドレスは `MCP_GATEWAY_BIND_ADDR` で制御する |
 | `MCP_GATEWAY_TOKEN_STORE_PATH` | `/data/tokens.json` | 永続トークンストアのファイルパス（[認証状態の永続化](#認証状態の永続化) 参照） |
 | `GITHUB_MCP_OAUTH_SCOPES` | `repo,user` | GitHub OAuth スコープ |
 | `LOG_LEVEL` | `info` | ログレベル (`debug`/`info`/`warn`/`error`) |

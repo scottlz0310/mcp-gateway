@@ -223,7 +223,7 @@ ROUTE_COPILOT_REVIEW=/mcp/copilot-review|http://copilot-review-mcp:8083
 | `MCP_GATEWAY_PUBLIC_URL` | `http://127.0.0.1:8080` | Canonical base URL for OAuth callback, discovery metadata, and PRM (replaces `MCP_GATEWAY_BASE_URL`) |
 | `MCP_GATEWAY_BIND_ADDR` | `127.0.0.1:8080` | TCP address the HTTP listener binds to. Set to `0.0.0.0:<port>` for Docker deployments. For reverse-proxy on the same host, keep the default `127.0.0.1:<port>` |
 | `MCP_GATEWAY_BASE_URL` | — | **Deprecated** — alias for `MCP_GATEWAY_PUBLIC_URL`; will be removed in a future release |
-| `MCP_GATEWAY_PORT` | `8080` | Listen port |
+| `MCP_GATEWAY_PORT` | `8080` | Default port used when deriving `bind_addr` and `public_url`. The actual listen address is controlled by `MCP_GATEWAY_BIND_ADDR` |
 | `MCP_GATEWAY_TOKEN_STORE_PATH` | `/data/tokens.json` | Path to the persistent token store file (see [Persistent Auth State](#persistent-auth-state)) |
 | `GITHUB_MCP_OAUTH_SCOPES` | `repo,user` | GitHub OAuth scopes |
 | `LOG_LEVEL` | `info` | Log level: `debug` / `info` / `warn` / `error` |
