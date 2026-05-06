@@ -27,6 +27,14 @@ var (
 	ErrTokenAudienceMissing  = errors.New("token audience metadata missing")
 )
 
+// audienceCheckError wraps audience validation sentinels so middleware can
+// distinguish them from generic token errors without importing this package.
+type audienceCheckError struct{ inner error }
+
+func (e audienceCheckError) Error() string         { return e.inner.Error() }
+func (e audienceCheckError) Unwrap() error         { return e.inner }
+func (e audienceCheckError) IsAudienceError() bool { return true }
+
 // githubClient is the HTTP client used for GitHub Device Flow API calls.
 // Exposed as a package-level var so tests can substitute a test server transport.
 var githubClient = &http.Client{Timeout: 15 * time.Second}
@@ -712,20 +720,18 @@ func (h *Handler) InvalidateCachedToken(token string) {
 }
 
 func (h *Handler) resolveRequestedAudience(resources []string) (string, error) {
-	var requested []string
-	for _, resource := range resources {
-		resource = normalizeAudience(resource)
-		if resource != "" {
-			requested = append(requested, resource)
+	for _, raw := range resources {
+		if strings.TrimSpace(raw) == "" {
+			return "", fmt.Errorf("resource parameter must not be empty")
 		}
 	}
-	if len(requested) == 0 {
+	if len(resources) == 0 {
 		return h.cfg.BaseURL, nil
 	}
-	if len(requested) > 1 {
+	if len(resources) > 1 {
 		return "", fmt.Errorf("multiple resource parameters are not supported")
 	}
-	resource := requested[0]
+	resource := normalizeAudience(resources[0])
 	u, err := url.Parse(resource)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.Fragment != "" {
 		return "", fmt.Errorf("resource must be an absolute http/https URL without fragment")
@@ -745,7 +751,7 @@ func (h *Handler) validateAudience(token string, record TokenRecord, audience st
 	}
 	if len(record.Audiences) == 0 {
 		if h.cfg.TokenAudienceStrict {
-			return ErrTokenAudienceMissing
+			return audienceCheckError{ErrTokenAudienceMissing}
 		}
 		slog.Warn("token without audience accepted during grace period",
 			"token_hash", tokenFingerprint(token),
@@ -753,7 +759,7 @@ func (h *Handler) validateAudience(token string, record TokenRecord, audience st
 		)
 		return nil
 	}
-	return ErrTokenAudienceMismatch
+	return audienceCheckError{ErrTokenAudienceMismatch}
 }
 
 func normalizeAllowedAudiences(baseURL string, audiences []string) []string {

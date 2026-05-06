@@ -28,6 +28,12 @@ type upstreamErrorer interface {
 	IsUpstreamError() bool
 }
 
+// audienceErrorer is satisfied by auth.audienceCheckError, which wraps
+// ErrTokenAudienceMismatch / ErrTokenAudienceMissing.
+type audienceErrorer interface {
+	IsAudienceError() bool
+}
+
 // authOptions holds optional configuration for the Auth middleware.
 type authOptions struct {
 	baseURL             string
@@ -98,6 +104,13 @@ func Auth(v TokenValidator, opts ...AuthOption) func(http.Handler) http.Handler 
 					return
 				}
 				slog.Warn("auth failed", "err", err, "path", r.URL.Path)
+				var ae audienceErrorer
+				if errors.As(err, &ae) {
+					writeUnauthorized(w, "invalid_token",
+						"Access token is not valid for this resource. Re-authenticate with the correct resource scope.",
+						resourceMetadataURL)
+					return
+				}
 				writeUnauthorized(w, "invalid_token",
 					"Access token expired or invalid. Re-authenticate via the gateway OAuth flow.",
 					resourceMetadataURL)

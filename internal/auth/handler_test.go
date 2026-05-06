@@ -1229,3 +1229,57 @@ func TestTokenRefreshResourceLegacyToken(t *testing.T) {
 		t.Fatalf("status: got %d, want 200; body: %s", w.Code, w.Body.String())
 	}
 }
+
+// TestTokenRefreshResourceEmptyValue verifies that resource= (empty value) is
+// rejected as invalid_target (RFC 8707 requires a non-empty absolute URI).
+func TestTokenRefreshResourceEmptyValue(t *testing.T) {
+	h, _ := newTestRefreshHandlerWithGitHub(t, []string{"http://localhost:8080/mcp/route-a"})
+
+	rt, err := h.store.CreateRefreshToken("gha_token", "http://localhost:8080", h.refreshTokenTTL())
+	if err != nil {
+		t.Fatalf("seeding refresh token: %v", err)
+	}
+
+	body := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(rt) + "&resource="
+	r := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	h.Token(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d, want 400; body: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]string
+	_ = json.NewDecoder(w.Body).Decode(&resp)
+	if resp["error"] != "invalid_target" {
+		t.Errorf("error: got %v, want invalid_target", resp["error"])
+	}
+}
+
+// TestTokenRefreshResourceMultipleRaw verifies that resource=&resource=https://x
+// (one empty, one valid) is rejected — raw count check ignores empty filtering.
+func TestTokenRefreshResourceMultipleRaw(t *testing.T) {
+	const routeAud = "http://localhost:8080/mcp/route-a"
+	h, _ := newTestRefreshHandlerWithGitHub(t, []string{routeAud})
+
+	rt, err := h.store.CreateRefreshToken("gha_token", "http://localhost:8080", h.refreshTokenTTL())
+	if err != nil {
+		t.Fatalf("seeding refresh token: %v", err)
+	}
+
+	// resource= (empty) is present first — should be rejected before multi-check
+	body := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(rt) + "&resource=&resource=" + url.QueryEscape(routeAud)
+	r := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	h.Token(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d, want 400; body: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]string
+	_ = json.NewDecoder(w.Body).Decode(&resp)
+	if resp["error"] != "invalid_target" {
+		t.Errorf("error: got %v, want invalid_target", resp["error"])
+	}
+}
