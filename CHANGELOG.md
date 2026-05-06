@@ -14,12 +14,13 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 - `MCP_GATEWAY_PUBLIC_URL` / `gateway.public_url` — canonical URL used for OAuth callbacks, discovery metadata, and PRM ([#48](https://github.com/scottlz0310/mcp-gateway/issues/48))
 - `MCP_GATEWAY_BIND_ADDR` / `gateway.bind_addr` — HTTP listener bind address, separate from the public URL ([#48](https://github.com/scottlz0310/mcp-gateway/issues/48))
 - `docs/operations.md` — migration guide: `bind_addr` vs `public_url`, GitHub OAuth App callback URL update, Docker and bare-binary deployment notes
-- Per-route Protected Resource Metadata documents (MCP Authorization Spec 2025-06-18, RFC 9728 §3.1) ([#49](https://github.com/scottlz0310/mcp-gateway/issues/49))
+- Per-route Protected Resource Metadata documents (MCP Authorization Spec 2025-06-18, RFC 9728 §3.1) — partial delivery of [#49](https://github.com/scottlz0310/mcp-gateway/issues/49) (PR-A of 3)
   - Each authenticated route with a non-root prefix now exposes `GET /.well-known/oauth-protected-resource{prefix}` whose `resource` field is the route's canonical absolute URL (e.g. `<public_url>/mcp/copilot-review`)
   - `WWW-Authenticate.resource_metadata` on 401 responses points clients at the route-scoped PRM URL instead of the gateway-wide one
   - Root-prefix routes (`/`) intentionally skip per-route PRM registration and continue to use the gateway-wide `/.well-known/oauth-protected-resource`, since `resource == public_url` is identical and a per-route trailing-slash pattern would shadow other PRM URLs in `http.ServeMux`
   - The gateway-wide `GET /.well-known/oauth-protected-resource` is preserved for backward compatibility
   - `auth.Handler.RouteProtectedResourceMetadata(resource string) http.HandlerFunc` and `middleware.WithResourceMetadataURL(url string)` added
+  - **Note**: #49 spans three PRs and is intentionally not closed by PR-A alone. PR-B ([#56](https://github.com/scottlz0310/mcp-gateway/issues/56), reverse-proxy / `trusted_proxies` / `X-Forwarded-*`) and PR-C ([#57](https://github.com/scottlz0310/mcp-gateway/issues/57), token `aud` claim and grace period) follow in subsequent releases. #49 will be closed once all three PRs are merged.
 
 ### Changed
 
@@ -36,6 +37,13 @@ Docker Compose users **must** add `MCP_GATEWAY_BIND_ADDR: 0.0.0.0:<port>` (repla
 `<port>` with the port your gateway uses, typically `8080`) so the container
 binds on all interfaces and Docker port-forwarding continues to work. See
 [`docs/operations.md`](docs/operations.md) for the full cutover procedure.
+
+**Per-route PRM (#49 PR-A) — upgrade hints for MCP clients**
+
+- MCP clients that already cache `/.well-known/oauth-protected-resource` continue to work unchanged: the gateway-wide PRM is preserved and its `resource` field is unchanged (= `public_url`).
+- Strict spec-2025-06-18 clients that fetch per-route PRM (`/.well-known/oauth-protected-resource{prefix}`) now receive a route-scoped `resource` value (`<public_url>{prefix}`) and should re-acquire tokens scoped to that resource if they previously cached gateway-wide tokens.
+- 401 responses on authenticated, non-root routes now advertise the route-scoped PRM in `WWW-Authenticate.resource_metadata`. Clients that follow this header to discover the AS endpoint will end up with route-scoped tokens automatically; no client-side configuration change is required.
+- No token invalidation is performed by this release. Audience checking will land in PR-C ([#57](https://github.com/scottlz0310/mcp-gateway/issues/57)) with a grace period for previously-issued tokens; review that PR's release notes when it ships.
 
 ## [0.2.0] - 2026-05-05
 
