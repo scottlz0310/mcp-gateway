@@ -19,6 +19,7 @@ services:
       GITHUB_MCP_CLIENT_ID: ${GITHUB_MCP_CLIENT_ID}
       GITHUB_MCP_CLIENT_SECRET: ${GITHUB_MCP_CLIENT_SECRET}
       # Bind on all interfaces so Docker port-forwarding works (container → host).
+      # Port in MCP_GATEWAY_BIND_ADDR must match MCP_GATEWAY_PORT (both default to 8080).
       MCP_GATEWAY_BIND_ADDR: ${MCP_GATEWAY_BIND_ADDR:-0.0.0.0:8080}
       # Public URL is what the user's browser (and GitHub OAuth) calls.
       MCP_GATEWAY_PUBLIC_URL: ${MCP_GATEWAY_PUBLIC_URL:-http://127.0.0.1:8080}

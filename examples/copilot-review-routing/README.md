@@ -67,10 +67,13 @@ Add to your MCP client configuration (e.g., `claude_desktop_config.json`):
 `X-Authenticated-User` header injected by mcp-gateway and skips its own GitHub API call,
 so there is only one token validation per request (in mcp-gateway).
 
-Standalone mode (direct access without mcp-gateway) is no longer supported.
+To run `copilot-review-mcp` in standalone mode (direct access without mcp-gateway), set
+`COPILOT_REVIEW_AUTH_MODE=standalone` in `.env`. Standalone mode requires its own OAuth App
+credentials (`GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` for copilot-review-mcp) in addition
+to the mcp-gateway credentials. See `.env.example` for details.
 
 ### Shared OAuth App credentials
 
 `GITHUB_MCP_CLIENT_ID`/`GITHUB_MCP_CLIENT_SECRET` (mcp-gateway) and
-`GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET` (copilot-review-mcp) can point to the **same**
-GitHub OAuth App.
+`GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET` (copilot-review-mcp, standalone mode only)
+can point to the **same** GitHub OAuth App.
