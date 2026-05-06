@@ -14,15 +14,18 @@ func testTokenStoreContract(t *testing.T, ts TokenStore) {
 	t.Helper()
 
 	// Save and Lookup — hit
-	if err := ts.Save("tok1", "alice", time.Now().Add(time.Hour)); err != nil {
+	if err := ts.Save("tok1", "alice", []string{"https://gw.example/mcp"}, time.Now().Add(time.Hour)); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	subj, ok := ts.Lookup("tok1")
+	rec, ok := ts.Lookup("tok1")
 	if !ok {
 		t.Fatal("Lookup: expected hit after Save")
 	}
-	if subj != "alice" {
-		t.Errorf("Lookup: subject got %q, want %q", subj, "alice")
+	if rec.Subject != "alice" {
+		t.Errorf("Lookup: subject got %q, want %q", rec.Subject, "alice")
+	}
+	if !rec.HasAudience("https://gw.example/mcp") {
+		t.Errorf("Lookup: audiences got %#v, want https://gw.example/mcp", rec.Audiences)
 	}
 
 	// Lookup — miss for unknown token
@@ -39,7 +42,7 @@ func testTokenStoreContract(t *testing.T, ts TokenStore) {
 	}
 
 	// Expired entries are not returned by Lookup
-	if err := ts.Save("tok2", "bob", time.Now().Add(-time.Second)); err != nil {
+	if err := ts.Save("tok2", "bob", nil, time.Now().Add(-time.Second)); err != nil {
 		t.Fatalf("Save expired: %v", err)
 	}
 	if _, ok := ts.Lookup("tok2"); ok {
@@ -63,7 +66,7 @@ func TestMemTokenStoreMultiple(t *testing.T) {
 
 	for i, name := range []string{"alice", "bob", "carol"} {
 		token := string(rune('a' + i))
-		if err := ts.Save(token, name, time.Now().Add(time.Hour)); err != nil {
+		if err := ts.Save(token, name, nil, time.Now().Add(time.Hour)); err != nil {
 			t.Fatalf("Save %q: %v", token, err)
 		}
 	}
@@ -74,8 +77,8 @@ func TestMemTokenStoreMultiple(t *testing.T) {
 		if !ok {
 			t.Fatalf("Lookup %q: expected hit", token)
 		}
-		if got != want {
-			t.Errorf("Lookup %q: got %q, want %q", token, got, want)
+		if got.Subject != want {
+			t.Errorf("Lookup %q: got %q, want %q", token, got.Subject, want)
 		}
 	}
 }
@@ -105,7 +108,7 @@ func TestFileTokenStorePersistence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("initial NewFileTokenStore: %v", err)
 	}
-	if err := ts1.Save("persist-tok", "dave", time.Now().Add(time.Hour)); err != nil {
+	if err := ts1.Save("persist-tok", "dave", []string{"https://gw.example/mcp"}, time.Now().Add(time.Hour)); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 
@@ -114,12 +117,15 @@ func TestFileTokenStorePersistence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reloaded NewFileTokenStore: %v", err)
 	}
-	subj, ok := ts2.Lookup("persist-tok")
+	rec, ok := ts2.Lookup("persist-tok")
 	if !ok {
 		t.Fatal("after reload: expected cache hit for previously saved token")
 	}
-	if subj != "dave" {
-		t.Errorf("after reload: subject got %q, want %q", subj, "dave")
+	if rec.Subject != "dave" {
+		t.Errorf("after reload: subject got %q, want %q", rec.Subject, "dave")
+	}
+	if !rec.HasAudience("https://gw.example/mcp") {
+		t.Errorf("after reload: audiences got %#v", rec.Audiences)
 	}
 }
 
@@ -133,7 +139,7 @@ func TestFileTokenStoreExpiredNotLoaded(t *testing.T) {
 		t.Fatalf("initial NewFileTokenStore: %v", err)
 	}
 	// Save an entry that is already expired.
-	if err := ts1.Save("expired-tok", "eve", time.Now().Add(-time.Second)); err != nil {
+	if err := ts1.Save("expired-tok", "eve", nil, time.Now().Add(-time.Second)); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 
@@ -158,7 +164,7 @@ func TestFileTokenStoreFilePermissions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewFileTokenStore: %v", err)
 	}
-	if err := ts.Save("tok", "frank", time.Now().Add(time.Hour)); err != nil {
+	if err := ts.Save("tok", "frank", nil, time.Now().Add(time.Hour)); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 
@@ -224,10 +230,10 @@ func TestFileTokenStoreSweepWritesToDisk(t *testing.T) {
 		t.Fatalf("NewFileTokenStore: %v", err)
 	}
 	// One valid, one expired.
-	if err := ts1.Save("valid-tok", "grace", time.Now().Add(time.Hour)); err != nil {
+	if err := ts1.Save("valid-tok", "grace", nil, time.Now().Add(time.Hour)); err != nil {
 		t.Fatalf("Save valid token: %v", err)
 	}
-	if err := ts1.Save("stale-tok", "harry", time.Now().Add(-time.Second)); err != nil {
+	if err := ts1.Save("stale-tok", "harry", nil, time.Now().Add(-time.Second)); err != nil {
 		t.Fatalf("Save stale token: %v", err)
 	}
 	if err := ts1.Sweep(); err != nil {
@@ -254,22 +260,25 @@ func testRefreshTokenStoreContract(t *testing.T, rts RefreshTokenStore) {
 
 	// Save and Lookup — hit
 	exp := time.Now().Add(time.Hour)
-	if err := rts.Save("rt1", "access-tok-1", exp); err != nil {
+	if err := rts.Save("rt1", "access-tok-1", "https://gw.example/mcp", exp); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	got, gotExp, ok := rts.Lookup("rt1")
+	got, gotAudience, gotExp, ok := rts.Lookup("rt1")
 	if !ok {
 		t.Fatal("Lookup: expected hit after Save")
 	}
 	if got != "access-tok-1" {
 		t.Errorf("Lookup: accessToken got %q, want %q", got, "access-tok-1")
 	}
+	if gotAudience != "https://gw.example/mcp" {
+		t.Errorf("Lookup: audience got %q, want %q", gotAudience, "https://gw.example/mcp")
+	}
 	if gotExp.IsZero() {
 		t.Error("Lookup: expiresAt should not be zero")
 	}
 
 	// Lookup — miss for unknown token
-	if _, _, ok := rts.Lookup("unknown"); ok {
+	if _, _, _, ok := rts.Lookup("unknown"); ok {
 		t.Error("Lookup: expected miss for unknown token")
 	}
 
@@ -277,15 +286,15 @@ func testRefreshTokenStoreContract(t *testing.T, rts RefreshTokenStore) {
 	if err := rts.Delete("rt1"); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
-	if _, _, ok := rts.Lookup("rt1"); ok {
+	if _, _, _, ok := rts.Lookup("rt1"); ok {
 		t.Error("Lookup: expected miss after Delete")
 	}
 
 	// Expired entries are not returned by Lookup
-	if err := rts.Save("rt2", "access-tok-2", time.Now().Add(-time.Second)); err != nil {
+	if err := rts.Save("rt2", "access-tok-2", "", time.Now().Add(-time.Second)); err != nil {
 		t.Fatalf("Save expired: %v", err)
 	}
-	if _, _, ok := rts.Lookup("rt2"); ok {
+	if _, _, _, ok := rts.Lookup("rt2"); ok {
 		t.Error("Lookup: expected miss for expired entry")
 	}
 
@@ -326,7 +335,7 @@ func TestFileRefreshTokenStorePersistence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("initial NewFileRefreshTokenStore: %v", err)
 	}
-	if err := rts1.Save("persist-rt", "access-tok-persist", time.Now().Add(time.Hour)); err != nil {
+	if err := rts1.Save("persist-rt", "access-tok-persist", "https://gw.example/mcp", time.Now().Add(time.Hour)); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 
@@ -335,12 +344,15 @@ func TestFileRefreshTokenStorePersistence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reloaded NewFileRefreshTokenStore: %v", err)
 	}
-	accessTok, _, ok := rts2.Lookup("persist-rt")
+	accessTok, audience, _, ok := rts2.Lookup("persist-rt")
 	if !ok {
 		t.Fatal("after reload: expected hit for previously saved refresh token")
 	}
 	if accessTok != "access-tok-persist" {
 		t.Errorf("after reload: accessToken got %q, want %q", accessTok, "access-tok-persist")
+	}
+	if audience != "https://gw.example/mcp" {
+		t.Errorf("after reload: audience got %q", audience)
 	}
 }
 
@@ -353,7 +365,7 @@ func TestFileRefreshTokenStoreExpiredNotLoaded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("initial NewFileRefreshTokenStore: %v", err)
 	}
-	if err := rts1.Save("expired-rt", "access-tok-old", time.Now().Add(-time.Second)); err != nil {
+	if err := rts1.Save("expired-rt", "access-tok-old", "", time.Now().Add(-time.Second)); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 
@@ -362,7 +374,7 @@ func TestFileRefreshTokenStoreExpiredNotLoaded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reloaded NewFileRefreshTokenStore: %v", err)
 	}
-	if _, _, ok := rts2.Lookup("expired-rt"); ok {
+	if _, _, _, ok := rts2.Lookup("expired-rt"); ok {
 		t.Error("after reload: expired refresh token should not be returned")
 	}
 }
@@ -378,7 +390,7 @@ func TestFileRefreshTokenStoreFilePermissions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewFileRefreshTokenStore: %v", err)
 	}
-	if err := rts.Save("rt", "at", time.Now().Add(time.Hour)); err != nil {
+	if err := rts.Save("rt", "at", "", time.Now().Add(time.Hour)); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 
@@ -459,10 +471,10 @@ func TestFileRefreshTokenStoreSweepWritesToDisk(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewFileRefreshTokenStore: %v", err)
 	}
-	if err := rts1.Save("valid-rt", "valid-at", time.Now().Add(time.Hour)); err != nil {
+	if err := rts1.Save("valid-rt", "valid-at", "", time.Now().Add(time.Hour)); err != nil {
 		t.Fatalf("Save valid: %v", err)
 	}
-	if err := rts1.Save("stale-rt", "stale-at", time.Now().Add(-time.Second)); err != nil {
+	if err := rts1.Save("stale-rt", "stale-at", "", time.Now().Add(-time.Second)); err != nil {
 		t.Fatalf("Save stale: %v", err)
 	}
 	if err := rts1.Sweep(); err != nil {
@@ -474,10 +486,10 @@ func TestFileRefreshTokenStoreSweepWritesToDisk(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reloaded NewFileRefreshTokenStore: %v", err)
 	}
-	if _, _, ok := rts2.Lookup("valid-rt"); !ok {
+	if _, _, _, ok := rts2.Lookup("valid-rt"); !ok {
 		t.Error("after sweep+reload: valid refresh token should still be present")
 	}
-	if _, _, ok := rts2.Lookup("stale-rt"); ok {
+	if _, _, _, ok := rts2.Lookup("stale-rt"); ok {
 		t.Error("after sweep+reload: stale refresh token should have been removed")
 	}
 }
@@ -492,11 +504,11 @@ type alwaysFailRefreshStore struct{}
 
 var errInjectedStoreFailure = errors.New("test: injected store failure")
 
-func (f *alwaysFailRefreshStore) Save(_, _ string, _ time.Time) error {
+func (f *alwaysFailRefreshStore) Save(_, _, _ string, _ time.Time) error {
 	return errInjectedStoreFailure
 }
-func (f *alwaysFailRefreshStore) Lookup(_ string) (string, time.Time, bool) {
-	return "", time.Time{}, false
+func (f *alwaysFailRefreshStore) Lookup(_ string) (string, string, time.Time, bool) {
+	return "", "", time.Time{}, false
 }
 func (f *alwaysFailRefreshStore) Delete(_ string) error { return errInjectedStoreFailure }
 func (f *alwaysFailRefreshStore) Sweep() error          { return nil }
@@ -506,7 +518,7 @@ func (f *alwaysFailRefreshStore) Sweep() error          { return nil }
 func TestCreateRefreshTokenSaveError(t *testing.T) {
 	store := NewStore(time.Minute, time.Minute, NewMemTokenStore(),
 		WithRefreshTokenStore(&alwaysFailRefreshStore{}))
-	_, err := store.CreateRefreshToken("access-tok", time.Minute)
+	_, err := store.CreateRefreshToken("access-tok", "https://gw.example/mcp", time.Minute)
 	if err == nil {
 		t.Fatal("expected Save error, got nil")
 	}
@@ -527,5 +539,5 @@ func TestRestoreRefreshTokenSaveError(t *testing.T) {
 	store := NewStore(time.Minute, time.Minute, NewMemTokenStore(),
 		WithRefreshTokenStore(&alwaysFailRefreshStore{}))
 	// Save always fails; RestoreRefreshToken must log and return without panicking.
-	store.RestoreRefreshToken("refresh-tok", "access-tok", time.Now().Add(time.Hour))
+	store.RestoreRefreshToken("refresh-tok", "access-tok", "https://gw.example/mcp", time.Now().Add(time.Hour))
 }

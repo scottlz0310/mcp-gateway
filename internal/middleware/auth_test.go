@@ -12,11 +12,15 @@ import (
 
 // mockValidator implements TokenValidator for testing.
 type mockValidator struct {
-	login string
-	err   error
+	login       string
+	err         error
+	gotToken    string
+	gotAudience string
 }
 
-func (m *mockValidator) ValidateToken(_ context.Context, _ string) (string, error) {
+func (m *mockValidator) ValidateToken(_ context.Context, token, audience string) (string, error) {
+	m.gotToken = token
+	m.gotAudience = audience
 	return m.login, m.err
 }
 
@@ -95,6 +99,29 @@ func TestAuthValidToken(t *testing.T) {
 	}
 	if gotToken != "my-token" {
 		t.Errorf("token in context: got %q, want %q", gotToken, "my-token")
+	}
+}
+
+func TestAuthPassesExpectedAudience(t *testing.T) {
+	validator := &mockValidator{login: "alice"}
+	h := Auth(validator,
+		WithBaseURL("https://gateway.example.com"),
+		WithAudience("https://gateway.example.com/mcp/copilot-review"),
+	)(http.HandlerFunc(okHandler))
+	r := httptest.NewRequest(http.MethodGet, "/mcp/copilot-review", nil)
+	r.Header.Set("Authorization", "Bearer my-token")
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status: got %d, want %d", w.Code, http.StatusOK)
+	}
+	if validator.gotToken != "my-token" {
+		t.Errorf("token: got %q, want my-token", validator.gotToken)
+	}
+	if validator.gotAudience != "https://gateway.example.com/mcp/copilot-review" {
+		t.Errorf("audience: got %q", validator.gotAudience)
 	}
 }
 

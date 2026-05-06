@@ -1,7 +1,9 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -237,6 +239,161 @@ func TestAuthorizeRedirectsToGitHub(t *testing.T) {
 	}
 }
 
+func TestAuthorizeResourceAudienceStoredOnToken(t *testing.T) {
+	const routeAudience = "http://localhost:8080/mcp/foo"
+	p := &provider.Mock{
+		ClientIDValue: "test-client-id",
+		ScopesValue:   "repo,user",
+		ExchangeCodeFunc: func(_ context.Context, _ string) (string, []string, error) {
+			return "opaque-route-token", []string{"repo", "user"}, nil
+		},
+		ValidateFunc: func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Provider: "mock", Subject: "alice"}, nil
+		},
+	}
+	h, err := NewHandler(Config{
+		BaseURL:          "http://localhost:8080",
+		SessionTTL:       10 * time.Minute,
+		CacheTTL:         5 * time.Minute,
+		ExpiresIn:        90 * 24 * time.Hour,
+		AllowedAudiences: []string{routeAudience},
+	}, p)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	authReq := httptest.NewRequest(http.MethodGet,
+		"/authorize?response_type=code&state=state-aud&redirect_uri=http://localhost/cb&resource="+url.QueryEscape(routeAudience), nil)
+	authRec := httptest.NewRecorder()
+	h.Authorize(authRec, authReq)
+	if authRec.Code != http.StatusFound {
+		t.Fatalf("authorize status: got %d, want 302; body: %s", authRec.Code, authRec.Body.String())
+	}
+
+	cbReq := httptest.NewRequest(http.MethodGet, "/callback?code=provider-code&state=state-aud", nil)
+	cbRec := httptest.NewRecorder()
+	h.Callback(cbRec, cbReq)
+	if cbRec.Code != http.StatusFound {
+		t.Fatalf("callback status: got %d, want 302; body: %s", cbRec.Code, cbRec.Body.String())
+	}
+	redirectURL, err := url.Parse(cbRec.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parsing callback redirect: %v", err)
+	}
+	internalCode := redirectURL.Query().Get("code")
+	if internalCode == "" {
+		t.Fatal("callback redirect missing internal code")
+	}
+
+	body := "grant_type=authorization_code&redirect_uri=http%3A%2F%2Flocalhost%2Fcb&code=" + url.QueryEscape(internalCode)
+	tokenReq := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
+	tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	tokenRec := httptest.NewRecorder()
+	h.Token(tokenRec, tokenReq)
+	if tokenRec.Code != http.StatusOK {
+		t.Fatalf("token status: got %d, want 200; body: %s", tokenRec.Code, tokenRec.Body.String())
+	}
+
+	rec, ok := h.store.LookupToken("opaque-route-token")
+	if !ok {
+		t.Fatal("issued token should be registered in token store")
+	}
+	if !rec.HasAudience(routeAudience) {
+		t.Fatalf("token audiences: got %#v, want %q", rec.Audiences, routeAudience)
+	}
+	subject, err := h.ValidateToken(context.Background(), "opaque-route-token", routeAudience)
+	if err != nil {
+		t.Fatalf("ValidateToken: %v", err)
+	}
+	if subject != "alice" {
+		t.Errorf("subject: got %q, want alice", subject)
+	}
+}
+
+func TestAuthorizeRejectsUnknownResource(t *testing.T) {
+	h := newTestHandler(t)
+	r := httptest.NewRequest(http.MethodGet,
+		"/authorize?response_type=code&state=s&redirect_uri=http://localhost/cb&resource=http%3A%2F%2Flocalhost%3A8080%2Fmcp%2Fmissing", nil)
+	w := httptest.NewRecorder()
+
+	h.Authorize(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d, want 400", w.Code)
+	}
+	var resp map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	if resp["error"] != "invalid_target" {
+		t.Errorf("error: got %q, want invalid_target", resp["error"])
+	}
+}
+
+func TestValidateTokenAudienceMismatch(t *testing.T) {
+	h := newTestHandler(t)
+	h.store.RegisterTokenAudience("route-token", "http://localhost:8080/mcp/a")
+	h.store.CacheToken("route-token", "alice", "")
+
+	_, err := h.ValidateToken(context.Background(), "route-token", "http://localhost:8080/mcp/b")
+	if !errors.Is(err, ErrTokenAudienceMismatch) {
+		t.Fatalf("ValidateToken err: got %v, want ErrTokenAudienceMismatch", err)
+	}
+}
+
+func TestValidateTokenLegacyGraceAndStrictModes(t *testing.T) {
+	const audience = "http://localhost:8080/mcp/foo"
+	var calls int
+	p := &provider.Mock{
+		ClientIDValue: "test-client-id",
+		ValidateFunc: func(_ context.Context, _ string) (provider.Identity, error) {
+			calls++
+			return provider.Identity{Provider: "mock", Subject: "legacy-user"}, nil
+		},
+	}
+	grace, err := NewHandler(Config{
+		BaseURL:          "http://localhost:8080",
+		SessionTTL:       10 * time.Minute,
+		CacheTTL:         5 * time.Minute,
+		AllowedAudiences: []string{audience},
+	}, p)
+	if err != nil {
+		t.Fatalf("NewHandler grace: %v", err)
+	}
+	subject, err := grace.ValidateToken(context.Background(), "legacy-token", audience)
+	if err != nil {
+		t.Fatalf("grace ValidateToken: %v", err)
+	}
+	if subject != "legacy-user" {
+		t.Errorf("subject: got %q", subject)
+	}
+	if calls != 1 {
+		t.Errorf("provider calls in grace mode: got %d, want 1", calls)
+	}
+	rec, ok := grace.store.LookupToken("legacy-token")
+	if !ok || rec.Subject != "legacy-user" || len(rec.Audiences) != 0 {
+		t.Fatalf("legacy cache record: got %#v ok=%v", rec, ok)
+	}
+
+	strict, err := NewHandler(Config{
+		BaseURL:             "http://localhost:8080",
+		SessionTTL:          10 * time.Minute,
+		CacheTTL:            5 * time.Minute,
+		AllowedAudiences:    []string{audience},
+		TokenAudienceStrict: true,
+	}, p)
+	if err != nil {
+		t.Fatalf("NewHandler strict: %v", err)
+	}
+	_, err = strict.ValidateToken(context.Background(), "legacy-token", audience)
+	if !errors.Is(err, ErrTokenAudienceMissing) {
+		t.Fatalf("strict ValidateToken err: got %v, want ErrTokenAudienceMissing", err)
+	}
+	if calls != 1 {
+		t.Errorf("strict mode should reject before provider validation; calls=%d", calls)
+	}
+}
+
 func TestDiscoveryIncludesDeviceEndpoints(t *testing.T) {
 	h := newTestHandler(t)
 	r := httptest.NewRequest(http.MethodGet, "/.well-known/oauth-authorization-server", nil)
@@ -341,7 +498,7 @@ func TestTokenDeviceGrantPending(t *testing.T) {
 
 	// Create a pending device session directly in the store.
 	expiresAt := time.Now().Add(15 * time.Minute)
-	internalCode, err := h.store.CreateDevice("gh-dev-code", "WDJB-MJHT", "https://github.com/login/device", expiresAt, 5)
+	internalCode, err := h.store.CreateDevice("gh-dev-code", "WDJB-MJHT", "https://github.com/login/device", expiresAt, 5, "http://localhost:8080")
 	if err != nil {
 		t.Fatalf("creating device session: %v", err)
 	}
@@ -382,7 +539,7 @@ func TestTokenDeviceGrantConcurrentPollingDoesNotSlowDown(t *testing.T) {
 	h := newTestHandler(t)
 
 	expiresAt := time.Now().Add(15 * time.Minute)
-	internalCode, err := h.store.CreateDevice("gh-dev-code", "WDJB-MJHT", "https://github.com/login/device", expiresAt, 5)
+	internalCode, err := h.store.CreateDevice("gh-dev-code", "WDJB-MJHT", "https://github.com/login/device", expiresAt, 5, "http://localhost:8080/mcp")
 	if err != nil {
 		t.Fatalf("creating device session: %v", err)
 	}
@@ -449,7 +606,7 @@ func TestTokenDeviceGrantSuccess(t *testing.T) {
 	h := newTestHandler(t)
 
 	expiresAt := time.Now().Add(15 * time.Minute)
-	internalCode, err := h.store.CreateDevice("gh-dev-code", "WDJB-MJHT", "https://github.com/login/device", expiresAt, 5)
+	internalCode, err := h.store.CreateDevice("gh-dev-code", "WDJB-MJHT", "https://github.com/login/device", expiresAt, 5, "http://localhost:8080")
 	if err != nil {
 		t.Fatalf("creating device session: %v", err)
 	}
@@ -505,7 +662,7 @@ func TestTokenRefreshSuccess(t *testing.T) {
 	}
 
 	// Seed a refresh token for an existing access token.
-	rt, err := h.store.CreateRefreshToken("gha_existing_token", h.refreshTokenTTL())
+	rt, err := h.store.CreateRefreshToken("gha_existing_token", "http://localhost:8080/mcp", h.refreshTokenTTL())
 	if err != nil {
 		t.Fatalf("seeding refresh token: %v", err)
 	}
@@ -608,7 +765,7 @@ func TestTokenRefreshUpstreamErrorPreservesToken(t *testing.T) {
 		t.Fatalf("NewHandler: %v", err)
 	}
 
-	rt, err := h.store.CreateRefreshToken("gha_token", h.refreshTokenTTL())
+	rt, err := h.store.CreateRefreshToken("gha_token", "http://localhost:8080/mcp", h.refreshTokenTTL())
 	if err != nil {
 		t.Fatalf("CreateRefreshToken: %v", err)
 	}
@@ -662,7 +819,7 @@ func TestTokenRefreshConcurrentSameToken(t *testing.T) {
 		t.Fatalf("NewHandler: %v", err)
 	}
 
-	rt, err := h.store.CreateRefreshToken("gha_concurrent_token", h.refreshTokenTTL())
+	rt, err := h.store.CreateRefreshToken("gha_concurrent_token", "http://localhost:8080/mcp", h.refreshTokenTTL())
 	if err != nil {
 		t.Fatalf("CreateRefreshToken: %v", err)
 	}
@@ -756,7 +913,7 @@ func TestHandlerRefreshTokenSurvivesRestart(t *testing.T) {
 	}
 
 	h1 := newHandlerWithPath(t, storePath)
-	rt, err := h1.store.CreateRefreshToken("gha_access_token", 24*time.Hour)
+	rt, err := h1.store.CreateRefreshToken("gha_access_token", "http://localhost:8080/mcp", 24*time.Hour)
 	if err != nil {
 		t.Fatalf("CreateRefreshToken: %v", err)
 	}
@@ -809,10 +966,10 @@ type deleteFailRefreshStore struct {
 	inner *memRefreshTokenStore
 }
 
-func (d *deleteFailRefreshStore) Save(rt, at string, exp time.Time) error {
-	return d.inner.Save(rt, at, exp)
+func (d *deleteFailRefreshStore) Save(rt, at, aud string, exp time.Time) error {
+	return d.inner.Save(rt, at, aud, exp)
 }
-func (d *deleteFailRefreshStore) Lookup(rt string) (string, time.Time, bool) {
+func (d *deleteFailRefreshStore) Lookup(rt string) (string, string, time.Time, bool) {
 	return d.inner.Lookup(rt)
 }
 func (d *deleteFailRefreshStore) Delete(_ string) error { return fmt.Errorf("disk I/O error") }
@@ -831,7 +988,7 @@ func TestTokenRefreshDeleteFailed503(t *testing.T) {
 
 	inner := &memRefreshTokenStore{entries: make(map[string]memRTEntry)}
 	failStore := &deleteFailRefreshStore{inner: inner}
-	_ = inner.Save("test-rt", "test-at", time.Now().Add(time.Hour))
+	_ = inner.Save("test-rt", "test-at", "http://localhost:8080/mcp", time.Now().Add(time.Hour))
 
 	store := NewStore(time.Minute, 90*24*time.Hour, NewMemTokenStore(),
 		WithRefreshTokenStore(failStore))
@@ -881,5 +1038,248 @@ func TestNewHandlerRefreshStoreInitError(t *testing.T) {
 	}, p)
 	if err == nil {
 		t.Fatal("expected error when refresh token store init fails, got nil")
+	}
+}
+
+// newTestRefreshHandlerWithGitHub creates a Handler wired to a stub GitHub user API
+// and configured with extra allowed audiences.
+func newTestRefreshHandlerWithGitHub(t *testing.T, extraAudiences []string) (*Handler, *httptest.Server) {
+	t.Helper()
+	ghServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"login":"alice","name":"Alice"}`)
+	}))
+	t.Cleanup(ghServer.Close)
+	p := provider.NewGitHub(provider.GitHubConfig{
+		ClientID:     "test-client-id",
+		ClientSecret: "test-client-secret",
+		RedirectURI:  "http://localhost:8080/callback",
+		Scopes:       "repo,user",
+		UserAPI:      ghServer.URL + "/user",
+		HTTPClient:   ghServer.Client(),
+	})
+	h, err := NewHandler(Config{
+		BaseURL:          "http://localhost:8080",
+		SessionTTL:       10 * time.Minute,
+		CacheTTL:         5 * time.Minute,
+		ExpiresIn:        90 * 24 * time.Hour,
+		AllowedAudiences: extraAudiences,
+	}, p)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	return h, ghServer
+}
+
+// TestTokenRefreshResourceSameAudience verifies that a resource matching the
+// original audience is accepted and returns 200.
+func TestTokenRefreshResourceSameAudience(t *testing.T) {
+	const audience = "http://localhost:8080/mcp/route-a"
+	h, _ := newTestRefreshHandlerWithGitHub(t, []string{audience})
+
+	rt, err := h.store.CreateRefreshToken("gha_token", audience, h.refreshTokenTTL())
+	if err != nil {
+		t.Fatalf("seeding refresh token: %v", err)
+	}
+
+	body := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(rt) + "&resource=" + url.QueryEscape(audience)
+	r := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	h.Token(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	_ = json.NewDecoder(w.Body).Decode(&resp)
+	if resp["refresh_token"] == nil {
+		t.Error("expected rotated refresh_token in response")
+	}
+}
+
+// TestTokenRefreshResourceNarrowing verifies that a client may narrow a
+// gateway-wide audience to a per-route sub-path on refresh.
+func TestTokenRefreshResourceNarrowing(t *testing.T) {
+	const routeAud = "http://localhost:8080/mcp/route-a"
+	h, _ := newTestRefreshHandlerWithGitHub(t, []string{routeAud})
+
+	// Original token is gateway-wide.
+	rt, err := h.store.CreateRefreshToken("gha_token", "http://localhost:8080", h.refreshTokenTTL())
+	if err != nil {
+		t.Fatalf("seeding refresh token: %v", err)
+	}
+
+	body := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(rt) + "&resource=" + url.QueryEscape(routeAud)
+	r := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	h.Token(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestTokenRefreshResourceCrossRoute verifies that switching from one route
+// audience to a sibling route is rejected with 400 invalid_target.
+func TestTokenRefreshResourceCrossRoute(t *testing.T) {
+	h, _ := newTestRefreshHandlerWithGitHub(t, []string{
+		"http://localhost:8080/mcp/route-a",
+		"http://localhost:8080/mcp/route-b",
+	})
+
+	rt, err := h.store.CreateRefreshToken("gha_token", "http://localhost:8080/mcp/route-a", h.refreshTokenTTL())
+	if err != nil {
+		t.Fatalf("seeding refresh token: %v", err)
+	}
+
+	body := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(rt) + "&resource=" + url.QueryEscape("http://localhost:8080/mcp/route-b")
+	r := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	h.Token(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d, want 400; body: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	_ = json.NewDecoder(w.Body).Decode(&resp)
+	if resp["error"] != "invalid_target" {
+		t.Errorf("error: got %v, want invalid_target", resp["error"])
+	}
+}
+
+// TestTokenRefreshResourceWidening verifies that broadening a per-route
+// audience to gateway-wide is rejected with 400 invalid_target.
+func TestTokenRefreshResourceWidening(t *testing.T) {
+	const routeAud = "http://localhost:8080/mcp/route-a"
+	h, _ := newTestRefreshHandlerWithGitHub(t, []string{routeAud})
+
+	rt, err := h.store.CreateRefreshToken("gha_token", routeAud, h.refreshTokenTTL())
+	if err != nil {
+		t.Fatalf("seeding refresh token: %v", err)
+	}
+
+	body := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(rt) + "&resource=" + url.QueryEscape("http://localhost:8080")
+	r := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	h.Token(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d, want 400; body: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	_ = json.NewDecoder(w.Body).Decode(&resp)
+	if resp["error"] != "invalid_target" {
+		t.Errorf("error: got %v, want invalid_target", resp["error"])
+	}
+}
+
+// TestTokenRefreshResourceUnknown verifies that an unregistered resource is
+// rejected with 400 invalid_target and the refresh token is restored.
+func TestTokenRefreshResourceUnknown(t *testing.T) {
+	h, _ := newTestRefreshHandlerWithGitHub(t, nil)
+
+	rt, err := h.store.CreateRefreshToken("gha_token", "http://localhost:8080", h.refreshTokenTTL())
+	if err != nil {
+		t.Fatalf("seeding refresh token: %v", err)
+	}
+
+	body := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(rt) + "&resource=" + url.QueryEscape("https://unknown.example/mcp")
+	r := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	h.Token(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d, want 400; body: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	_ = json.NewDecoder(w.Body).Decode(&resp)
+	if resp["error"] != "invalid_target" {
+		t.Errorf("error: got %v, want invalid_target", resp["error"])
+	}
+	// Token must be restored so the client can retry with a valid resource.
+	if _, err := h.store.UseRefreshToken(rt); err != nil {
+		t.Error("refresh token should be restored after invalid resource rejection")
+	}
+}
+
+// TestTokenRefreshResourceLegacyToken verifies that a legacy token (empty
+// stored audience) accepts any registered resource as a valid narrowing.
+func TestTokenRefreshResourceLegacyToken(t *testing.T) {
+	const routeAud = "http://localhost:8080/mcp/route-a"
+	h, _ := newTestRefreshHandlerWithGitHub(t, []string{routeAud})
+
+	// Empty audience simulates a pre-audience (legacy) refresh token.
+	rt, err := h.store.CreateRefreshToken("gha_token", "", h.refreshTokenTTL())
+	if err != nil {
+		t.Fatalf("seeding refresh token: %v", err)
+	}
+
+	body := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(rt) + "&resource=" + url.QueryEscape(routeAud)
+	r := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	h.Token(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestTokenRefreshResourceEmptyValue verifies that resource= (empty value) is
+// rejected as invalid_target (RFC 8707 requires a non-empty absolute URI).
+func TestTokenRefreshResourceEmptyValue(t *testing.T) {
+	h, _ := newTestRefreshHandlerWithGitHub(t, []string{"http://localhost:8080/mcp/route-a"})
+
+	rt, err := h.store.CreateRefreshToken("gha_token", "http://localhost:8080", h.refreshTokenTTL())
+	if err != nil {
+		t.Fatalf("seeding refresh token: %v", err)
+	}
+
+	body := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(rt) + "&resource="
+	r := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	h.Token(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d, want 400; body: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]string
+	_ = json.NewDecoder(w.Body).Decode(&resp)
+	if resp["error"] != "invalid_target" {
+		t.Errorf("error: got %v, want invalid_target", resp["error"])
+	}
+}
+
+// TestTokenRefreshResourceMultipleRaw verifies that resource=&resource=https://x
+// (one empty, one valid) is rejected — raw count check ignores empty filtering.
+func TestTokenRefreshResourceMultipleRaw(t *testing.T) {
+	const routeAud = "http://localhost:8080/mcp/route-a"
+	h, _ := newTestRefreshHandlerWithGitHub(t, []string{routeAud})
+
+	rt, err := h.store.CreateRefreshToken("gha_token", "http://localhost:8080", h.refreshTokenTTL())
+	if err != nil {
+		t.Fatalf("seeding refresh token: %v", err)
+	}
+
+	// resource= (empty) is present first — should be rejected before multi-check
+	body := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(rt) + "&resource=&resource=" + url.QueryEscape(routeAud)
+	r := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	h.Token(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d, want 400; body: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]string
+	_ = json.NewDecoder(w.Body).Decode(&resp)
+	if resp["error"] != "invalid_target" {
+		t.Errorf("error: got %v, want invalid_target", resp["error"])
 	}
 }

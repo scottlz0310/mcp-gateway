@@ -22,6 +22,19 @@ import (
 // token expiry without requiring full re-authentication.
 const refreshTokenGracePeriod = 30 * 24 * time.Hour
 
+var (
+	ErrTokenAudienceMismatch = errors.New("token audience mismatch")
+	ErrTokenAudienceMissing  = errors.New("token audience metadata missing")
+)
+
+// audienceCheckError wraps audience validation sentinels so middleware can
+// distinguish them from generic token errors without importing this package.
+type audienceCheckError struct{ inner error }
+
+func (e audienceCheckError) Error() string         { return e.inner.Error() }
+func (e audienceCheckError) Unwrap() error         { return e.inner }
+func (e audienceCheckError) IsAudienceError() bool { return true }
+
 // githubClient is the HTTP client used for GitHub Device Flow API calls.
 // Exposed as a package-level var so tests can substitute a test server transport.
 var githubClient = &http.Client{Timeout: 15 * time.Second}
@@ -43,14 +56,21 @@ type Config struct {
 	// When set, validated tokens survive container restarts; the file is written
 	// with mode 0600 and only hashed token keys are stored.
 	TokenStorePath string
+	// AllowedAudiences is the set of RFC 8707 resource indicator values accepted
+	// by this gateway. BaseURL is always allowed.
+	AllowedAudiences []string
+	// TokenAudienceStrict rejects tokens without audience metadata. The default
+	// false value is a grace mode for tokens issued before this metadata existed.
+	TokenAudienceStrict bool
 }
 
 // Handler implements the OAuth façade endpoints, delegating provider-specific
 // operations to a provider.Provider.
 type Handler struct {
-	cfg      Config
-	provider provider.Provider
-	store    *Store
+	cfg              Config
+	provider         provider.Provider
+	store            *Store
+	allowedAudiences map[string]struct{}
 }
 
 // NewHandler creates a new OAuth Handler with the given configuration and provider.
@@ -66,6 +86,7 @@ func NewHandler(cfg Config, p provider.Provider) (*Handler, error) {
 		return nil, fmt.Errorf("auth.NewHandler: provider must not be nil")
 	}
 	cfg.BaseURL = strings.TrimRight(cfg.BaseURL, "/")
+	cfg.AllowedAudiences = normalizeAllowedAudiences(cfg.BaseURL, cfg.AllowedAudiences)
 	if len(cfg.AllowedRedirectHosts) == 0 {
 		cfg.AllowedRedirectHosts = []string{"localhost", "127.0.0.1", "vscode.dev"}
 	}
@@ -92,12 +113,18 @@ func NewHandler(cfg Config, p provider.Provider) (*Handler, error) {
 	} else {
 		ts = NewMemTokenStore()
 		tokensTTL = cfg.CacheTTL
+		if cfg.TokenAudienceStrict {
+			slog.Warn("token_audience_strict is enabled without a persistent token store; " +
+				"audience metadata is lost on cache eviction, making affected tokens unusable — " +
+				"set token_store_path for durable storage")
+		}
 	}
 
 	return &Handler{
-		cfg:      cfg,
-		provider: p,
-		store:    NewStore(cfg.SessionTTL, tokensTTL, ts, storeOpts...),
+		cfg:              cfg,
+		provider:         p,
+		store:            NewStore(cfg.SessionTTL, tokensTTL, ts, storeOpts...),
+		allowedAudiences: audienceSet(cfg.AllowedAudiences),
 	}, nil
 }
 
@@ -157,6 +184,7 @@ func (h *Handler) Discovery(w http.ResponseWriter, r *http.Request) {
 		"response_types_supported":         []string{"code"},
 		"grant_types_supported":            []string{"authorization_code", "urn:ietf:params:oauth:grant-type:device_code", "refresh_token"},
 		"code_challenge_methods_supported": []string{"S256"},
+		"resource_parameter_supported":     true,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(doc)
@@ -207,6 +235,11 @@ func (h *Handler) Authorize(w http.ResponseWriter, r *http.Request) {
 	codeChallenge := q.Get("code_challenge")
 	responseType := q.Get("response_type")
 	codeChallengeMethod := q.Get("code_challenge_method")
+	audience, audErr := h.resolveRequestedAudience(q["resource"])
+	if audErr != nil {
+		oauthError(w, "invalid_target", audErr.Error(), http.StatusBadRequest)
+		return
+	}
 
 	if responseType != "code" {
 		oauthError(w, "unsupported_response_type", "response_type must be 'code'", http.StatusBadRequest)
@@ -234,7 +267,7 @@ func (h *Handler) Authorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.store.SaveSession(state, redirectURI, codeChallenge)
+	h.store.SaveSession(state, redirectURI, codeChallenge, audience)
 
 	http.Redirect(w, r, h.provider.AuthorizeURL(state, codeChallenge), http.StatusFound)
 }
@@ -304,7 +337,7 @@ func (h *Handler) Token(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) tokenAuthCode(w http.ResponseWriter, r *http.Request) {
-	token, grantedScope, err := h.store.ExchangeCode(
+	token, grantedScope, audience, err := h.store.ExchangeCode(
 		r.FormValue("code"),
 		r.FormValue("redirect_uri"),
 		r.FormValue("code_verifier"),
@@ -314,7 +347,8 @@ func (h *Handler) tokenAuthCode(w http.ResponseWriter, r *http.Request) {
 		oauthError(w, "invalid_grant", err.Error(), http.StatusBadRequest)
 		return
 	}
-	refreshToken, rtErr := h.store.CreateRefreshToken(token, h.refreshTokenTTL())
+	h.store.RegisterTokenAudience(token, audience)
+	refreshToken, rtErr := h.store.CreateRefreshToken(token, audience, h.refreshTokenTTL())
 	if rtErr != nil {
 		slog.Warn("failed to create refresh token", "err", rtErr)
 	}
@@ -379,11 +413,13 @@ func (h *Handler) tokenDeviceGrant(w http.ResponseWriter, r *http.Request) {
 
 	switch result.Error {
 	case "":
-		if _, ok := h.store.AuthorizeAndConsumeDevice(deviceCode, result.AccessToken, result.Scope); !ok {
+		completed, ok := h.store.AuthorizeAndConsumeDevice(deviceCode, result.AccessToken, result.Scope)
+		if !ok {
 			oauthError(w, "invalid_grant", "device code already consumed", http.StatusBadRequest)
 			return
 		}
-		refreshToken, rtErr := h.store.CreateRefreshToken(result.AccessToken, h.refreshTokenTTL())
+		h.store.RegisterTokenAudience(result.AccessToken, completed.Audience)
+		refreshToken, rtErr := h.store.CreateRefreshToken(result.AccessToken, completed.Audience, h.refreshTokenTTL())
 		if rtErr != nil {
 			slog.Warn("failed to create refresh token", "err", rtErr)
 		}
@@ -439,7 +475,7 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 
 	// Atomically reserve (remove) the token. Concurrent callers presenting the
 	// same token will fail here, preventing double-rotation.
-	accessToken, rtExpiresAt, err := h.store.ReserveRefreshToken(rt)
+	accessToken, audience, rtExpiresAt, err := h.store.ReserveRefreshToken(rt)
 	if err != nil {
 		if errors.Is(err, ErrRefreshTokenDeleteFailed) {
 			slog.Warn("refresh token store failure", "err", err)
@@ -451,6 +487,29 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// originalAudience holds the audience recorded on the reserved token. It is
+	// used for all RestoreRefreshToken calls so that a failure never permanently
+	// narrows the old token to a narrower audience.
+	originalAudience := audience
+
+	// RFC 8707 §2: optional resource parameter narrows the audience for the
+	// re-issued token. The requested audience must be equal to or a strict
+	// sub-path of the audience recorded on the original refresh token.
+	if resources := r.Form["resource"]; len(resources) > 0 {
+		resolved, audErr := h.resolveRequestedAudience(resources)
+		if audErr != nil {
+			h.store.RestoreRefreshToken(rt, accessToken, originalAudience, rtExpiresAt)
+			oauthError(w, "invalid_target", audErr.Error(), http.StatusBadRequest)
+			return
+		}
+		if !isSubAudience(resolved, originalAudience) {
+			h.store.RestoreRefreshToken(rt, accessToken, originalAudience, rtExpiresAt)
+			oauthError(w, "invalid_target", "resource is not a valid narrowing of the original audience", http.StatusBadRequest)
+			return
+		}
+		audience = resolved
+	}
+
 	// Re-validate the underlying token directly against the upstream provider,
 	// bypassing the local cache. Using the cache here could allow refresh to
 	// succeed for a revoked token until cache expiry.
@@ -459,8 +518,9 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 		var upstreamErr *provider.UpstreamError
 		if errors.As(valErr, &upstreamErr) {
 			slog.Warn("refresh rejected: transient upstream error", "err", valErr)
-			// Restore the token so the client can retry later.
-			h.store.RestoreRefreshToken(rt, accessToken, rtExpiresAt)
+			// Restore the token with its original audience so the client can retry,
+			// potentially with a different resource value.
+			h.store.RestoreRefreshToken(rt, accessToken, originalAudience, rtExpiresAt)
 			oauthError(w, "temporarily_unavailable", "upstream provider unreachable, retry later", http.StatusServiceUnavailable)
 		} else {
 			slog.Warn("refresh rejected: underlying token invalid", "err", valErr)
@@ -470,14 +530,14 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Re-cache the freshly validated token.
-	h.store.CacheToken(accessToken, id.Subject)
+	h.store.CacheToken(accessToken, id.Subject, audience)
 
 	// Issue the rotated refresh token. The original is already consumed (reserved).
-	newRT, rtErr := h.store.CreateRefreshToken(accessToken, h.refreshTokenTTL())
+	newRT, rtErr := h.store.CreateRefreshToken(accessToken, audience, h.refreshTokenTTL())
 	if rtErr != nil {
 		slog.Error("failed to rotate refresh token", "err", rtErr)
-		// Restore the original token so the client can retry later.
-		h.store.RestoreRefreshToken(rt, accessToken, rtExpiresAt)
+		// Restore the original token (with its original audience) so the client can retry.
+		h.store.RestoreRefreshToken(rt, accessToken, originalAudience, rtExpiresAt)
 		oauthError(w, "server_error", "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -494,6 +554,11 @@ func (h *Handler) DeviceAuthorize(w http.ResponseWriter, r *http.Request) {
 		oauthError(w, "invalid_request", "malformed request body", http.StatusBadRequest)
 		return
 	}
+	audience, audErr := h.resolveRequestedAudience(r.Form["resource"])
+	if audErr != nil {
+		oauthError(w, "invalid_target", audErr.Error(), http.StatusBadRequest)
+		return
+	}
 
 	// Always use configured scopes to prevent clients from escalating to broader permissions.
 	scope := h.provider.Scopes()
@@ -506,7 +571,7 @@ func (h *Handler) DeviceAuthorize(w http.ResponseWriter, r *http.Request) {
 	}
 
 	expiresAt := time.Now().Add(time.Duration(ghResp.ExpiresIn) * time.Second)
-	internalCode, err := h.store.CreateDevice(ghResp.DeviceCode, ghResp.UserCode, ghResp.VerificationURI, expiresAt, ghResp.Interval)
+	internalCode, err := h.store.CreateDevice(ghResp.DeviceCode, ghResp.UserCode, ghResp.VerificationURI, expiresAt, ghResp.Interval, audience)
 	if err != nil {
 		slog.Error("device session creation failed", "err", err)
 		oauthError(w, "server_error", "internal error", http.StatusInternalServerError)
@@ -626,23 +691,128 @@ func (h *Handler) pollGitHubDeviceToken(ctx context.Context, githubDevCode strin
 	}, nil
 }
 
-// ValidateToken checks the bearer token via the provider (with cache).
+// ValidateToken checks the bearer token via the provider (with cache) and
+// validates that its stored audience matches the protected resource.
 // The returned subject is the Identity.Subject from the provider.
-func (h *Handler) ValidateToken(ctx context.Context, token string) (string, error) {
-	if subject, ok := h.store.LookupToken(token); ok {
-		return subject, nil
+func (h *Handler) ValidateToken(ctx context.Context, token, audience string) (string, error) {
+	audience = normalizeAudience(audience)
+	record, cached := h.store.LookupToken(token)
+	if cached {
+		if err := h.validateAudience(token, record, audience); err != nil {
+			return "", err
+		}
+		if record.Subject != "" {
+			return record.Subject, nil
+		}
+	} else if err := h.validateAudience(token, TokenRecord{}, audience); err != nil {
+		return "", err
 	}
 	id, err := h.provider.ValidateToken(ctx, token)
 	if err != nil {
 		return "", err
 	}
-	h.store.CacheToken(token, id.Subject)
+	cacheAudience := ""
+	if cached && record.HasAudience(audience) {
+		cacheAudience = audience
+	}
+	h.store.CacheToken(token, id.Subject, cacheAudience)
 	return id.Subject, nil
 }
 
 // InvalidateCachedToken delegates cache invalidation to the underlying store.
 func (h *Handler) InvalidateCachedToken(token string) {
 	h.store.InvalidateCachedToken(token)
+}
+
+func (h *Handler) resolveRequestedAudience(resources []string) (string, error) {
+	for _, raw := range resources {
+		if strings.TrimSpace(raw) == "" {
+			return "", fmt.Errorf("resource parameter must not be empty")
+		}
+	}
+	if len(resources) == 0 {
+		return h.cfg.BaseURL, nil
+	}
+	if len(resources) > 1 {
+		return "", fmt.Errorf("multiple resource parameters are not supported")
+	}
+	resource := normalizeAudience(resources[0])
+	u, err := url.Parse(resource)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.Fragment != "" {
+		return "", fmt.Errorf("resource must be an absolute http/https URL without fragment")
+	}
+	if _, ok := h.allowedAudiences[resource]; !ok {
+		return "", fmt.Errorf("resource is not registered with this gateway")
+	}
+	return resource, nil
+}
+
+func (h *Handler) validateAudience(token string, record TokenRecord, audience string) error {
+	if audience == "" {
+		return nil
+	}
+	if record.HasAudience(audience) {
+		return nil
+	}
+	if len(record.Audiences) == 0 {
+		if h.cfg.TokenAudienceStrict {
+			return audienceCheckError{ErrTokenAudienceMissing}
+		}
+		slog.Warn("token without audience accepted during grace period",
+			"token_hash", tokenFingerprint(token),
+			"expected_audience", audience,
+		)
+		return nil
+	}
+	return audienceCheckError{ErrTokenAudienceMismatch}
+}
+
+func normalizeAllowedAudiences(baseURL string, audiences []string) []string {
+	out := make([]string, 0, len(audiences)+1)
+	seen := map[string]struct{}{}
+	for _, audience := range append([]string{baseURL}, audiences...) {
+		audience = normalizeAudience(audience)
+		if audience == "" {
+			continue
+		}
+		if _, ok := seen[audience]; ok {
+			continue
+		}
+		seen[audience] = struct{}{}
+		out = append(out, audience)
+	}
+	return out
+}
+
+func audienceSet(audiences []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(audiences))
+	for _, audience := range audiences {
+		set[audience] = struct{}{}
+	}
+	return set
+}
+
+func normalizeAudience(audience string) string {
+	return strings.TrimRight(strings.TrimSpace(audience), "/")
+}
+
+// isSubAudience reports whether requested is equal to or a strict narrowing of
+// original (i.e. requested starts with original+"/"). When original is empty
+// the token was issued without audience metadata (legacy grace-period token),
+// and any registered audience is accepted.
+func isSubAudience(requested, original string) bool {
+	if original == "" {
+		return true
+	}
+	return requested == original || strings.HasPrefix(requested, original+"/")
+}
+
+func tokenFingerprint(token string) string {
+	key := tokenKey(token)
+	if len(key) <= 8 {
+		return key
+	}
+	return key[:8]
 }
 
 func isAllowedRedirectHost(hostname string, allowed []string) bool {

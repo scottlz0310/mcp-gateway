@@ -121,6 +121,9 @@ func main() {
 	if strings.TrimSpace(os.Getenv("MCP_GATEWAY_TRUSTED_PROXIES")) == "" && len(appCfg.Gateway.TrustedProxies) > 0 {
 		cfg.trustedProxyCIDRs = appCfg.Gateway.TrustedProxies
 	}
+	if strings.TrimSpace(os.Getenv("MCP_GATEWAY_TOKEN_AUDIENCE_STRICT")) == "" {
+		cfg.tokenAudienceStrict = appCfg.Gateway.TokenAudienceStrict
+	}
 	trustedProxies, err := middleware.ParseTrustedProxyCIDRs(cfg.trustedProxyCIDRs)
 	if err != nil {
 		slog.Error("invalid trusted proxy configuration", "err", err)
@@ -185,11 +188,13 @@ func main() {
 	}
 
 	oauthHandler, err := auth.NewHandler(auth.Config{
-		BaseURL:        cfg.publicURL,
-		SessionTTL:     time.Duration(cfg.sessionTTLMin) * time.Minute,
-		CacheTTL:       time.Duration(cfg.tokenCacheTTLMin) * time.Minute,
-		ExpiresIn:      time.Duration(cfg.tokenExpiresInSec) * time.Second,
-		TokenStorePath: cfg.tokenStorePath,
+		BaseURL:             cfg.publicURL,
+		SessionTTL:          time.Duration(cfg.sessionTTLMin) * time.Minute,
+		CacheTTL:            time.Duration(cfg.tokenCacheTTLMin) * time.Minute,
+		ExpiresIn:           time.Duration(cfg.tokenExpiresInSec) * time.Second,
+		TokenStorePath:      cfg.tokenStorePath,
+		AllowedAudiences:    routeAudiences(strings.TrimRight(cfg.publicURL, "/"), routes),
+		TokenAudienceStrict: cfg.tokenAudienceStrict,
 	}, prov)
 	if err != nil {
 		slog.Error("auth handler init failed", "err", err)
@@ -228,15 +233,21 @@ func main() {
 		if route.NoAuth {
 			wrapped = h
 		} else {
+			routeResource := publicURL
+			if route.Prefix != "/" {
+				routeResource = publicURL + route.Prefix
+			}
 			// For a root prefix ("/"), the gateway-wide PRM registered above
 			// already covers the route (resource == public_url). Skip per-route
 			// registration to avoid (a) ServeMux duplicate-pattern panic, and
 			// (b) a trailing-slash subtree pattern that would shadow other
 			// per-route PRM URLs. The middleware then falls back to the
 			// gateway-wide resource_metadata URL via WithBaseURL.
-			authOpts := []middleware.AuthOption{middleware.WithBaseURL(cfg.publicURL)}
+			authOpts := []middleware.AuthOption{
+				middleware.WithBaseURL(cfg.publicURL),
+				middleware.WithAudience(routeResource),
+			}
 			if route.Prefix != "/" {
-				routeResource := publicURL + route.Prefix
 				routePRMPath := "/.well-known/oauth-protected-resource" + route.Prefix
 				mux.HandleFunc("GET "+routePRMPath, oauthHandler.RouteProtectedResourceMetadata(routeResource))
 				authOpts = append(authOpts, middleware.WithResourceMetadataURL(publicURL+routePRMPath))
@@ -260,6 +271,7 @@ func main() {
 		"provider", prov.Name(),
 		"routes", len(routes),
 		"trusted_proxies", len(trustedProxies),
+		"token_audience_strict", cfg.tokenAudienceStrict,
 	)
 
 	server := &http.Server{
@@ -328,18 +340,19 @@ type config struct {
 	// Replaces the deprecated baseURL / MCP_GATEWAY_BASE_URL.
 	publicURL string
 	// bindAddr is the TCP address the HTTP listener binds to (host:port).
-	bindAddr          string
-	oauthScopes       string
-	port              string
-	logLevel          string
-	upstreamURL       string // deprecated; prefer ROUTE_* env vars
-	trustedProxyCIDRs []string
-	sessionTTLMin     int
-	tokenCacheTTLMin  int
-	tokenExpiresInSec int
-	tokenStorePath    string
-	keyPath           string
-	configPath        string
+	bindAddr            string
+	oauthScopes         string
+	port                string
+	logLevel            string
+	upstreamURL         string // deprecated; prefer ROUTE_* env vars
+	trustedProxyCIDRs   []string
+	sessionTTLMin       int
+	tokenCacheTTLMin    int
+	tokenExpiresInSec   int
+	tokenAudienceStrict bool
+	tokenStorePath      string
+	keyPath             string
+	configPath          string
 }
 
 func loadConfig() config {
@@ -355,19 +368,20 @@ func loadConfig() config {
 
 	return config{
 		// githubClientID and githubClientSecret are resolved after key/config loading in main().
-		publicURL:         publicURL,
-		bindAddr:          bindAddr,
-		port:              port,
-		oauthScopes:       getEnv("GITHUB_MCP_OAUTH_SCOPES", "repo,user"),
-		logLevel:          getEnv("LOG_LEVEL", "info"),
-		upstreamURL:       getEnv("GITHUB_MCP_UPSTREAM_URL", ""),
-		trustedProxyCIDRs: splitCSV(os.Getenv("MCP_GATEWAY_TRUSTED_PROXIES")),
-		sessionTTLMin:     getEnvInt("SESSION_TTL_MIN", 10),
-		tokenCacheTTLMin:  getEnvInt("TOKEN_CACHE_TTL_MIN", 30),
-		tokenExpiresInSec: getEnvInt("TOKEN_EXPIRES_IN_SEC", 7776000), // 90 days
-		tokenStorePath:    lookupEnv("MCP_GATEWAY_TOKEN_STORE_PATH", "/data/tokens.json"),
-		keyPath:           getEnv("MCP_GATEWAY_KEY_PATH", "./gateway.key"),
-		configPath:        getEnv("MCP_CONFIG_FILE", "./config.yaml"),
+		publicURL:           publicURL,
+		bindAddr:            bindAddr,
+		port:                port,
+		oauthScopes:         getEnv("GITHUB_MCP_OAUTH_SCOPES", "repo,user"),
+		logLevel:            getEnv("LOG_LEVEL", "info"),
+		upstreamURL:         getEnv("GITHUB_MCP_UPSTREAM_URL", ""),
+		trustedProxyCIDRs:   splitCSV(os.Getenv("MCP_GATEWAY_TRUSTED_PROXIES")),
+		sessionTTLMin:       getEnvInt("SESSION_TTL_MIN", 10),
+		tokenCacheTTLMin:    getEnvInt("TOKEN_CACHE_TTL_MIN", 30),
+		tokenExpiresInSec:   getEnvInt("TOKEN_EXPIRES_IN_SEC", 7776000), // 90 days
+		tokenAudienceStrict: getEnvBool("MCP_GATEWAY_TOKEN_AUDIENCE_STRICT", false),
+		tokenStorePath:      lookupEnv("MCP_GATEWAY_TOKEN_STORE_PATH", "/data/tokens.json"),
+		keyPath:             getEnv("MCP_GATEWAY_KEY_PATH", "./gateway.key"),
+		configPath:          getEnv("MCP_CONFIG_FILE", "./config.yaml"),
 	}
 }
 
@@ -381,6 +395,26 @@ func splitCSV(value string) []string {
 		}
 	}
 	return out
+}
+
+func routeAudiences(publicURL string, routes []router.Route) []string {
+	audiences := []string{publicURL}
+	seen := map[string]struct{}{publicURL: {}}
+	for _, route := range routes {
+		if route.NoAuth {
+			continue
+		}
+		audience := publicURL
+		if route.Prefix != "/" {
+			audience += route.Prefix
+		}
+		if _, ok := seen[audience]; ok {
+			continue
+		}
+		seen[audience] = struct{}{}
+		audiences = append(audiences, audience)
+	}
+	return audiences
 }
 
 func getEnv(key, fallback string) string {
@@ -407,6 +441,21 @@ func getEnvInt(key string, fallback int) int {
 		}
 	}
 	return fallback
+}
+
+func getEnvBool(key string, fallback bool) bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	if v == "" {
+		return fallback
+	}
+	switch v {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
+	}
 }
 
 func parseLogLevel(level string) slog.Level {

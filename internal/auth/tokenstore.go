@@ -8,18 +8,38 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
 
-// TokenStore persists validated token → identity mappings.
+// TokenRecord is the cached metadata for an access token. Audiences is empty
+// for legacy entries written before per-route audience metadata existed.
+type TokenRecord struct {
+	Subject   string
+	Audiences []string
+}
+
+// HasAudience reports whether the token record is scoped to audience.
+func (r TokenRecord) HasAudience(audience string) bool {
+	for _, aud := range r.Audiences {
+		if aud == audience {
+			return true
+		}
+	}
+	return false
+}
+
+// TokenStore persists access token metadata.
 // Two implementations are provided: memTokenStore (default, in-process) and
 // fileTokenStore (JSON file, survives container restarts).
 type TokenStore interface {
-	// Save records that token maps to subject and is valid until expiresAt.
-	Save(token, subject string, expiresAt time.Time) error
-	// Lookup returns the subject for a non-expired token, or ("", false).
-	Lookup(token string) (subject string, ok bool)
+	// Save records that token maps to subject/audiences and is valid until expiresAt.
+	// Re-saving an existing non-expired token merges audiences and preserves a
+	// previously cached subject when subject is empty.
+	Save(token, subject string, audiences []string, expiresAt time.Time) error
+	// Lookup returns metadata for a non-expired token, or (zero, false).
+	Lookup(token string) (TokenRecord, bool)
 	// Delete removes a single token entry immediately.
 	Delete(token string) error
 	// Sweep removes all expired entries. Called periodically by the Store janitor.
@@ -37,6 +57,7 @@ func tokenKey(token string) string {
 
 type memEntry struct {
 	subject   string
+	audiences []string
 	expiresAt time.Time
 }
 
@@ -51,21 +72,31 @@ func NewMemTokenStore() TokenStore {
 	return &memTokenStore{entries: make(map[string]memEntry)}
 }
 
-func (m *memTokenStore) Save(token, subject string, expiresAt time.Time) error {
+func (m *memTokenStore) Save(token, subject string, audiences []string, expiresAt time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.entries[tokenKey(token)] = memEntry{subject: subject, expiresAt: expiresAt}
+	key := tokenKey(token)
+	entry := memEntry{}
+	if current, ok := m.entries[key]; ok && time.Now().Before(current.expiresAt) {
+		entry = current
+	}
+	if subject != "" {
+		entry.subject = subject
+	}
+	entry.audiences = mergeAudiences(entry.audiences, audiences)
+	entry.expiresAt = expiresAt
+	m.entries[key] = entry
 	return nil
 }
 
-func (m *memTokenStore) Lookup(token string) (string, bool) {
+func (m *memTokenStore) Lookup(token string) (TokenRecord, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	e, ok := m.entries[tokenKey(token)]
 	if !ok || time.Now().After(e.expiresAt) {
-		return "", false
+		return TokenRecord{}, false
 	}
-	return e.subject, true
+	return TokenRecord{Subject: e.subject, Audiences: cloneStrings(e.audiences)}, true
 }
 
 func (m *memTokenStore) Delete(token string) error {
@@ -93,6 +124,7 @@ func (m *memTokenStore) Sweep() error {
 // The map key is tokenKey(rawToken), so raw tokens never appear in the file.
 type fileEntry struct {
 	Subject   string    `json:"s"`
+	Audiences []string  `json:"aud,omitempty"`
 	ExpiresAt time.Time `json:"e"`
 }
 
@@ -165,21 +197,31 @@ func NewFileTokenStore(path string) (TokenStore, error) {
 	return s, nil
 }
 
-func (f *fileTokenStore) Save(token, subject string, expiresAt time.Time) error {
+func (f *fileTokenStore) Save(token, subject string, audiences []string, expiresAt time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.entries[tokenKey(token)] = fileEntry{Subject: subject, ExpiresAt: expiresAt}
+	key := tokenKey(token)
+	entry := fileEntry{}
+	if current, ok := f.entries[key]; ok && time.Now().Before(current.ExpiresAt) {
+		entry = current
+	}
+	if subject != "" {
+		entry.Subject = subject
+	}
+	entry.Audiences = mergeAudiences(entry.Audiences, audiences)
+	entry.ExpiresAt = expiresAt
+	f.entries[key] = entry
 	return f.flush()
 }
 
-func (f *fileTokenStore) Lookup(token string) (string, bool) {
+func (f *fileTokenStore) Lookup(token string) (TokenRecord, bool) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	e, ok := f.entries[tokenKey(token)]
 	if !ok || time.Now().After(e.ExpiresAt) {
-		return "", false
+		return TokenRecord{}, false
 	}
-	return e.Subject, true
+	return TokenRecord{Subject: e.Subject, Audiences: cloneStrings(e.Audiences)}, true
 }
 
 func (f *fileTokenStore) Delete(token string) error {
@@ -273,11 +315,11 @@ func (f *fileTokenStore) flush() error {
 // RefreshTokenStore persists gateway-issued refresh token → access token mappings.
 // Two implementations: memRefreshTokenStore (default) and fileRefreshTokenStore (JSON file).
 type RefreshTokenStore interface {
-	// Save records that refreshToken maps to accessToken and is valid until expiresAt.
-	Save(refreshToken, accessToken string, expiresAt time.Time) error
-	// Lookup returns the access token and expiry for a non-expired refresh token, or ("", zero, false).
+	// Save records that refreshToken maps to accessToken/audience and is valid until expiresAt.
+	Save(refreshToken, accessToken, audience string, expiresAt time.Time) error
+	// Lookup returns the access token, audience, and expiry for a non-expired refresh token, or ("", "", zero, false).
 	// expiresAt is returned so that RestoreRefreshToken can re-save with the original expiry on rotation failure.
-	Lookup(refreshToken string) (accessToken string, expiresAt time.Time, ok bool)
+	Lookup(refreshToken string) (accessToken, audience string, expiresAt time.Time, ok bool)
 	// Delete removes a single refresh token entry immediately.
 	Delete(refreshToken string) error
 	// Sweep removes all expired entries. Called periodically by the Store janitor.
@@ -288,6 +330,7 @@ type RefreshTokenStore interface {
 
 type memRTEntry struct {
 	accessToken string
+	audience    string
 	expiresAt   time.Time
 }
 
@@ -302,21 +345,21 @@ func NewMemRefreshTokenStore() RefreshTokenStore {
 	return &memRefreshTokenStore{entries: make(map[string]memRTEntry)}
 }
 
-func (m *memRefreshTokenStore) Save(refreshToken, accessToken string, expiresAt time.Time) error {
+func (m *memRefreshTokenStore) Save(refreshToken, accessToken, audience string, expiresAt time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.entries[tokenKey(refreshToken)] = memRTEntry{accessToken: accessToken, expiresAt: expiresAt}
+	m.entries[tokenKey(refreshToken)] = memRTEntry{accessToken: accessToken, audience: audience, expiresAt: expiresAt}
 	return nil
 }
 
-func (m *memRefreshTokenStore) Lookup(refreshToken string) (string, time.Time, bool) {
+func (m *memRefreshTokenStore) Lookup(refreshToken string) (string, string, time.Time, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	e, ok := m.entries[tokenKey(refreshToken)]
 	if !ok || time.Now().After(e.expiresAt) {
-		return "", time.Time{}, false
+		return "", "", time.Time{}, false
 	}
-	return e.accessToken, e.expiresAt, true
+	return e.accessToken, e.audience, e.expiresAt, true
 }
 
 func (m *memRefreshTokenStore) Delete(refreshToken string) error {
@@ -346,6 +389,7 @@ func (m *memRefreshTokenStore) Sweep() error {
 // the gateway must re-present it to the upstream provider on token refresh.
 type fileRTEntry struct {
 	AccessToken string    `json:"a"`
+	Audience    string    `json:"aud,omitempty"`
 	ExpiresAt   time.Time `json:"e"`
 }
 
@@ -408,12 +452,12 @@ func NewFileRefreshTokenStore(path string) (RefreshTokenStore, error) {
 	return s, nil
 }
 
-func (f *fileRefreshTokenStore) Save(refreshToken, accessToken string, expiresAt time.Time) error {
+func (f *fileRefreshTokenStore) Save(refreshToken, accessToken, audience string, expiresAt time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	key := tokenKey(refreshToken)
 	prev, hasPrev := f.entries[key]
-	f.entries[key] = fileRTEntry{AccessToken: accessToken, ExpiresAt: expiresAt}
+	f.entries[key] = fileRTEntry{AccessToken: accessToken, Audience: audience, ExpiresAt: expiresAt}
 	if err := f.flush(); err != nil {
 		if hasPrev {
 			f.entries[key] = prev
@@ -425,14 +469,14 @@ func (f *fileRefreshTokenStore) Save(refreshToken, accessToken string, expiresAt
 	return nil
 }
 
-func (f *fileRefreshTokenStore) Lookup(refreshToken string) (string, time.Time, bool) {
+func (f *fileRefreshTokenStore) Lookup(refreshToken string) (string, string, time.Time, bool) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	e, ok := f.entries[tokenKey(refreshToken)]
 	if !ok || time.Now().After(e.ExpiresAt) {
-		return "", time.Time{}, false
+		return "", "", time.Time{}, false
 	}
-	return e.AccessToken, e.ExpiresAt, true
+	return e.AccessToken, e.Audience, e.ExpiresAt, true
 }
 
 func (f *fileRefreshTokenStore) Delete(refreshToken string) error {
@@ -520,4 +564,33 @@ func (f *fileRefreshTokenStore) flush() error {
 		_ = os.Remove(backup)
 	}
 	return nil
+}
+
+func mergeAudiences(existing, additions []string) []string {
+	out := cloneStrings(existing)
+	seen := make(map[string]struct{}, len(out)+len(additions))
+	for _, aud := range out {
+		seen[aud] = struct{}{}
+	}
+	for _, aud := range additions {
+		aud = strings.TrimRight(strings.TrimSpace(aud), "/")
+		if aud == "" {
+			continue
+		}
+		if _, ok := seen[aud]; ok {
+			continue
+		}
+		seen[aud] = struct{}{}
+		out = append(out, aud)
+	}
+	return out
+}
+
+func cloneStrings(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, len(in))
+	copy(out, in)
+	return out
 }

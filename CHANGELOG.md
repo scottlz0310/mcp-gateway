@@ -7,9 +7,27 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.3.0] - 2026-05-20
-
 ### Added
+
+- RFC 8707 `resource` parameter support across all token acquisition flows ([#57](https://github.com/scottlz0310/mcp-gateway/issues/57), #49 PR-C)
+  - `/authorize`, `/device_authorization`, and `grant_type=refresh_token` all accept an optional `resource` parameter to bind the issued token to a specific audience
+  - Discovery metadata now advertises `resource_parameter_supported: true`
+  - The requested `resource` on `grant_type=refresh_token` must equal or be a sub-path of the audience originally recorded on the refresh token; broadening or cross-route changes are rejected with `invalid_target`
+  - Legacy refresh tokens issued before audience tracking (empty stored audience) accept any registered resource during the grace period
+  - The consumed refresh token is restored on validation failure so clients can retry with a corrected `resource` value
+
+### Migration
+
+- **`token_audience_strict`**: Enabling `MCP_GATEWAY_TOKEN_AUDIENCE_STRICT=true` (or `token_audience_strict: true`) is only safe when **all** of the following conditions are met:
+  1. **Persistent token store required** — Set `MCP_GATEWAY_TOKEN_STORE_PATH` / `token_store_path`. With an in-memory store, audience metadata is lost on cache eviction, making those tokens unusable. The gateway now logs a startup warning if strict mode is combined with an in-memory store.
+  2. **All active tokens carry audience metadata** — Tokens issued before this release have no audience recorded. A refresh *without* a `resource` parameter rotates the token but keeps it as a legacy (no-audience) token indefinitely. The 90-day TTL window is **not** automatically sufficient — it only holds if all active clients have refreshed with `resource` or re-authenticated at least once since this release.
+  3. **Recommended approach** — Monitor the `"token without audience accepted during grace period"` log entries. Once they disappear across your longest-lived sessions, it is safe to enable strict mode.
+
+### Roadmap
+
+- Multi-audience tokens (a single opaque token carrying multiple `aud` values, e.g., `["https://gw.example/mcp/a", "https://gw.example/mcp/b"]`) are recorded as a future candidate and are not part of the current release.
+
+## [0.3.0] - 2026-05-20
 
 - `MCP_GATEWAY_PUBLIC_URL` / `gateway.public_url` — canonical URL used for OAuth callbacks, discovery metadata, and PRM ([#48](https://github.com/scottlz0310/mcp-gateway/issues/48))
 - `MCP_GATEWAY_BIND_ADDR` / `gateway.bind_addr` — HTTP listener bind address, separate from the public URL ([#48](https://github.com/scottlz0310/mcp-gateway/issues/48))
