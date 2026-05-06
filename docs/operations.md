@@ -135,7 +135,7 @@ When the immediate peer IP matches `trusted_proxies`, mcp-gateway reflects:
 |--------|-------------------------|
 | `X-Forwarded-Proto` | `r.URL.Scheme` (`http` or `https` only) |
 | `X-Forwarded-Host` | `r.Host` |
-| `X-Forwarded-For` | `r.RemoteAddr` (leftmost client IP) |
+| `X-Forwarded-For` | `r.RemoteAddr` (rightmost valid IP appended by the trusted proxy) |
 
 When the peer is not trusted, `Forwarded`, `X-Forwarded-*`, and `X-Real-IP` are stripped
 before later middleware and handlers run. This prevents direct clients from spoofing the

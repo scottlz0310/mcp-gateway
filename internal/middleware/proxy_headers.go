@@ -94,12 +94,18 @@ func remoteAddrIP(remoteAddr string) (netip.Addr, bool) {
 }
 
 func forwardedClientIP(header string) (netip.Addr, bool) {
-	raw := firstHeaderValue(header)
-	if raw == "" {
-		return netip.Addr{}, false
+	parts := strings.Split(header, ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		raw := strings.TrimSpace(parts[i])
+		if raw == "" {
+			continue
+		}
+		addr, err := netip.ParseAddr(raw)
+		if err == nil {
+			return addr, true
+		}
 	}
-	addr, err := netip.ParseAddr(raw)
-	return addr, err == nil
+	return netip.Addr{}, false
 }
 
 func firstHeaderValue(header string) string {

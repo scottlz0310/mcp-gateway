@@ -265,7 +265,7 @@ request seen by downstream handlers:
 |--------|--------|
 | `X-Forwarded-Proto` | Sets the request scheme when the value is `http` or `https` |
 | `X-Forwarded-Host` | Sets `r.Host` after basic host validation |
-| `X-Forwarded-For` | Sets `r.RemoteAddr` to the leftmost client IP |
+| `X-Forwarded-For` | Sets `r.RemoteAddr` to the rightmost valid IP appended by the trusted proxy |
 
 If the peer is not trusted, incoming forwarded headers are stripped before later
 middleware and handlers run. `trusted_proxies` entries must be valid CIDR strings;

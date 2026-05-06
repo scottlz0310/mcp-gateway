@@ -65,7 +65,7 @@ func TestProxyHeadersTrustedAppliesForwardedValues(t *testing.T) {
 	r.RemoteAddr = "127.0.0.1:4567"
 	r.Header.Set("X-Forwarded-Proto", "https")
 	r.Header.Set("X-Forwarded-Host", "mcp.example.com")
-	r.Header.Set("X-Forwarded-For", "203.0.113.9, 127.0.0.1")
+	r.Header.Set("X-Forwarded-For", "198.51.100.200, 203.0.113.9")
 	w := httptest.NewRecorder()
 
 	h.ServeHTTP(w, r)
@@ -78,6 +78,46 @@ func TestProxyHeadersTrustedAppliesForwardedValues(t *testing.T) {
 	}
 	if got.remoteAddr != "203.0.113.9" {
 		t.Errorf("remote_addr: got %q, want 203.0.113.9", got.remoteAddr)
+	}
+}
+
+func TestProxyHeadersTrustedUsesRightmostForwardedForIP(t *testing.T) {
+	trusted := []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")}
+	var got string
+	h := ProxyHeaders(trusted)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.RemoteAddr
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	r := httptest.NewRequest(http.MethodGet, "http://internal.local/mcp", nil)
+	r.RemoteAddr = "127.0.0.1:4567"
+	r.Header.Set("X-Forwarded-For", "1.2.3.4, 203.0.113.9")
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, r)
+
+	if got != "203.0.113.9" {
+		t.Errorf("remote_addr: got %q, want appended client IP 203.0.113.9", got)
+	}
+}
+
+func TestProxyHeadersTrustedSkipsInvalidForwardedForFromRight(t *testing.T) {
+	trusted := []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")}
+	var got string
+	h := ProxyHeaders(trusted)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.RemoteAddr
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	r := httptest.NewRequest(http.MethodGet, "http://internal.local/mcp", nil)
+	r.RemoteAddr = "127.0.0.1:4567"
+	r.Header.Set("X-Forwarded-For", "203.0.113.9, not-an-ip")
+	w := httptest.NewRecorder()
+
+	h.ServeHTTP(w, r)
+
+	if got != "203.0.113.9" {
+		t.Errorf("remote_addr: got %q, want 203.0.113.9", got)
 	}
 }
 
