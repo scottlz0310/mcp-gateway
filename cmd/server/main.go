@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -77,13 +78,15 @@ func main() {
 
 	// Apply config.yaml gateway overrides (priority: env var > config.yaml > loadConfig default).
 	// publicURL: MCP_GATEWAY_PUBLIC_URL > MCP_GATEWAY_BASE_URL > yaml public_url > yaml base_url > default
+	if strings.TrimSpace(appCfg.Gateway.BaseURL) != "" {
+		slog.Warn("gateway.base_url in config.yaml is deprecated; use gateway.public_url instead")
+	}
 	if strings.TrimSpace(os.Getenv("MCP_GATEWAY_PUBLIC_URL")) == "" &&
 		strings.TrimSpace(os.Getenv("MCP_GATEWAY_BASE_URL")) == "" {
 		if strings.TrimSpace(appCfg.Gateway.PublicURL) != "" {
 			cfg.publicURL = appCfg.Gateway.PublicURL
 		} else if strings.TrimSpace(appCfg.Gateway.BaseURL) != "" {
 			cfg.publicURL = appCfg.Gateway.BaseURL
-			slog.Warn("gateway.base_url in config.yaml is deprecated; use gateway.public_url instead")
 		}
 	}
 	if strings.TrimSpace(os.Getenv("MCP_GATEWAY_PORT")) == "" && strings.TrimSpace(appCfg.Gateway.Port) != "" {
@@ -97,14 +100,19 @@ func main() {
 			cfg.bindAddr = "127.0.0.1:" + cfg.port
 		}
 	}
-	// If publicURL was not explicitly set (no env, no yaml), recompute the default using the
-	// resolved port so that a yaml-only port override is reflected in OAuth redirects and
-	// discovery metadata.
+	// If publicURL was not explicitly set (no env, no yaml), recompute the default from the
+	// resolved bind address so that a non-default port in BIND_ADDR or gateway.bind_addr is
+	// reflected in OAuth redirects and discovery metadata.
 	if strings.TrimSpace(os.Getenv("MCP_GATEWAY_PUBLIC_URL")) == "" &&
 		strings.TrimSpace(os.Getenv("MCP_GATEWAY_BASE_URL")) == "" &&
 		strings.TrimSpace(appCfg.Gateway.PublicURL) == "" &&
 		strings.TrimSpace(appCfg.Gateway.BaseURL) == "" {
-		cfg.publicURL = "http://127.0.0.1:" + cfg.port
+		_, bindPort, err := net.SplitHostPort(cfg.bindAddr)
+		if err == nil && strings.TrimSpace(bindPort) != "" {
+			cfg.publicURL = "http://127.0.0.1:" + bindPort
+		} else {
+			cfg.publicURL = "http://127.0.0.1:" + cfg.port
+		}
 	}
 	if strings.TrimSpace(os.Getenv("GITHUB_MCP_OAUTH_SCOPES")) == "" && strings.TrimSpace(appCfg.Gateway.OAuthScopes) != "" {
 		cfg.oauthScopes = appCfg.Gateway.OAuthScopes

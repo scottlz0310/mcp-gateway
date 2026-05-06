@@ -13,7 +13,9 @@ mcp-gateway v0.3.0 separates the **listen address** from the **public URL**:
 | Bind address | `MCP_GATEWAY_BIND_ADDR` | `gateway.bind_addr` | `127.0.0.1:8080` | Network interface/port the HTTP server listens on |
 | Public URL | `MCP_GATEWAY_PUBLIC_URL` | `gateway.public_url` | `http://127.0.0.1:8080` | Canonical URL used in OAuth callbacks, discovery metadata, and PRM |
 
-Before v0.3.0 a single `MCP_GATEWAY_BASE_URL` / `gateway.base_url` setting filled both roles.
+Before v0.3.0, `MCP_GATEWAY_BASE_URL` / `gateway.base_url` controlled only the **public URL**
+(OAuth callbacks and discovery metadata). The server always listened on all interfaces
+(`:<port>`) regardless of this setting.
 That setting is now **deprecated** and will be removed in a future release.
 
 ### Why the split matters
@@ -23,9 +25,9 @@ reach it via port-forwarding, but the OAuth callback URL registered with GitHub 
 address that the **user's browser** can reach—typically `http://127.0.0.1:8080` on the
 developer's machine.
 
-Before v0.3.0 there was no clean way to express this difference: setting `BASE_URL` to
-`0.0.0.0` broke OAuth; setting it to `127.0.0.1` worked for OAuth but didn't help when
-the gateway needed to bind on all interfaces.
+Before v0.3.0 there was no clean way to express this difference: the server always
+listened on all interfaces (`:<port>`), but `BASE_URL` only influenced the public URL
+advertised to OAuth clients—there was no way to configure the bind address independently.
 
 ---
 

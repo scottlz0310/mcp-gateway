@@ -111,6 +111,7 @@ binds on all interfaces and Docker port-forwarding continues to work. See
 - Removed GitHub-specific HTTP calls from `auth.Handler`; delegated to `provider.Provider`.
 - Renamed middleware context key `github_login` → `authenticated_user` (internal only; external compatibility maintained).
 
-[Unreleased]: https://github.com/scottlz0310/mcp-gateway/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/scottlz0310/mcp-gateway/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/scottlz0310/mcp-gateway/releases/tag/v0.1.0
