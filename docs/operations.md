@@ -135,11 +135,15 @@ When the immediate peer IP matches `trusted_proxies`, mcp-gateway reflects:
 |--------|-------------------------|
 | `X-Forwarded-Proto` | `r.URL.Scheme` (`http` or `https` only) |
 | `X-Forwarded-Host` | `r.Host` |
-| `X-Forwarded-For` | `r.RemoteAddr` (rightmost valid IP appended by the trusted proxy) |
+| `X-Forwarded-For` | `r.RemoteAddr` (rightmost valid IP supplied by the trusted proxy) |
 
 When the peer is not trusted, `Forwarded`, `X-Forwarded-*`, and `X-Real-IP` are stripped
 before later middleware and handlers run. This prevents direct clients from spoofing the
 scheme, host, or client IP in logs and setup-mode HTTPS checks.
+
+Configure the reverse proxy to overwrite or sanitize `X-Forwarded-For` instead of passing
+client-provided values through unchanged. The gateway reads the header from the right as
+a defense against appended spoofed entries, but the proxy should still own this header.
 
 Example nginx location:
 
@@ -148,7 +152,7 @@ location / {
     proxy_set_header Host $host;
     proxy_set_header X-Forwarded-Host $host;
     proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-For $remote_addr;
     proxy_pass http://127.0.0.1:8080;
 }
 ```

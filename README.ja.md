@@ -258,6 +258,10 @@ MCP_GATEWAY_TRUSTED_PROXIES=127.0.0.1/32,10.0.0.0/8
 `X-Forwarded-For` を後段の request に反映できます。未信頼の送信元から届いた forwarded
 headers は削除されます。不正な CIDR は起動時エラーになります。
 
+信頼済みプロキシは、クライアント由来の `X-Forwarded-For` をそのまま渡さず、上書きまたは
+サニタイズしてください。gateway は XFF を右側から読みますが、このヘッダの所有者は
+プロキシに限定する前提です。
+
 ### 認証状態の永続化
 
 > **Docker デフォルト:** デフォルトのストアパス `/data/tokens.json` は Docker 運用向けです。Docker イメージは `/data` を適切なパーミッションで事前作成しています。Docker 以外（`go run` やバイナリ直接実行）では `/data` が存在しないため起動に失敗します。その場合は `MCP_GATEWAY_TOKEN_STORE_PATH` を書き込み可能なパス（例: `./tokens.json`）に設定するか、永続化を無効にするため空文字を設定してください。
