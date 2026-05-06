@@ -187,14 +187,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	publicURL := strings.TrimRight(cfg.publicURL, "/")
+	authMiddleware := middleware.Auth(oauthHandler, middleware.WithBaseURL(cfg.publicURL))
 
 	mux := http.NewServeMux()
 
 	// OAuth façade endpoints (no auth required).
-	// The path-less /.well-known/oauth-protected-resource is preserved for
-	// backward compatibility (gateway-wide PRM); per-route PRMs are registered
-	// inside the route loop below per MCP Authorization Spec 2025-06-18.
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource", oauthHandler.ProtectedResourceMetadata)
 	mux.HandleFunc("GET /.well-known/oauth-authorization-server", oauthHandler.Discovery)
 	mux.HandleFunc("GET /authorize", oauthHandler.Authorize)
@@ -210,30 +207,13 @@ func main() {
 	})
 
 	// Proxy routes — apply auth middleware unless the route opts out.
-	// Each authenticated route also exposes its own RFC 9728 PRM document at
-	// /.well-known/oauth-protected-resource{prefix}, and 401 responses point
-	// resource_metadata at that route-scoped URL.
 	for _, route := range routes {
 		h := proxy.NewHandler(route.Upstream, oauthHandler)
 		var wrapped http.Handler
 		if route.NoAuth {
 			wrapped = h
 		} else {
-			// For a root prefix ("/"), the gateway-wide PRM registered above
-			// already covers the route (resource == public_url). Skip per-route
-			// registration to avoid (a) ServeMux duplicate-pattern panic, and
-			// (b) a trailing-slash subtree pattern that would shadow other
-			// per-route PRM URLs. The middleware then falls back to the
-			// gateway-wide resource_metadata URL via WithBaseURL.
-			authOpts := []middleware.AuthOption{middleware.WithBaseURL(cfg.publicURL)}
-			if route.Prefix != "/" {
-				routeResource := publicURL + route.Prefix
-				routePRMPath := "/.well-known/oauth-protected-resource" + route.Prefix
-				mux.HandleFunc("GET "+routePRMPath, oauthHandler.RouteProtectedResourceMetadata(routeResource))
-				authOpts = append(authOpts, middleware.WithResourceMetadataURL(publicURL+routePRMPath))
-			}
-			routeAuth := middleware.Auth(oauthHandler, authOpts...)
-			wrapped = routeAuth(h)
+			wrapped = authMiddleware(h)
 		}
 		mux.Handle(route.Prefix, wrapped)
 		mux.Handle(route.Prefix+"/", wrapped)
