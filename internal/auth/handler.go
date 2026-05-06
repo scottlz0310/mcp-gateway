@@ -474,18 +474,23 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// originalAudience holds the audience recorded on the reserved token. It is
+	// used for all RestoreRefreshToken calls so that a failure never permanently
+	// narrows the old token to a narrower audience.
+	originalAudience := audience
+
 	// RFC 8707 §2: optional resource parameter narrows the audience for the
 	// re-issued token. The requested audience must be equal to or a strict
 	// sub-path of the audience recorded on the original refresh token.
 	if resources := r.Form["resource"]; len(resources) > 0 {
 		resolved, audErr := h.resolveRequestedAudience(resources)
 		if audErr != nil {
-			h.store.RestoreRefreshToken(rt, accessToken, audience, rtExpiresAt)
+			h.store.RestoreRefreshToken(rt, accessToken, originalAudience, rtExpiresAt)
 			oauthError(w, "invalid_target", audErr.Error(), http.StatusBadRequest)
 			return
 		}
-		if !isSubAudience(resolved, audience) {
-			h.store.RestoreRefreshToken(rt, accessToken, audience, rtExpiresAt)
+		if !isSubAudience(resolved, originalAudience) {
+			h.store.RestoreRefreshToken(rt, accessToken, originalAudience, rtExpiresAt)
 			oauthError(w, "invalid_target", "resource is not a valid narrowing of the original audience", http.StatusBadRequest)
 			return
 		}
@@ -500,8 +505,9 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 		var upstreamErr *provider.UpstreamError
 		if errors.As(valErr, &upstreamErr) {
 			slog.Warn("refresh rejected: transient upstream error", "err", valErr)
-			// Restore the token so the client can retry later.
-			h.store.RestoreRefreshToken(rt, accessToken, audience, rtExpiresAt)
+			// Restore the token with its original audience so the client can retry,
+			// potentially with a different resource value.
+			h.store.RestoreRefreshToken(rt, accessToken, originalAudience, rtExpiresAt)
 			oauthError(w, "temporarily_unavailable", "upstream provider unreachable, retry later", http.StatusServiceUnavailable)
 		} else {
 			slog.Warn("refresh rejected: underlying token invalid", "err", valErr)
@@ -517,8 +523,8 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 	newRT, rtErr := h.store.CreateRefreshToken(accessToken, audience, h.refreshTokenTTL())
 	if rtErr != nil {
 		slog.Error("failed to rotate refresh token", "err", rtErr)
-		// Restore the original token so the client can retry later.
-		h.store.RestoreRefreshToken(rt, accessToken, audience, rtExpiresAt)
+		// Restore the original token (with its original audience) so the client can retry.
+		h.store.RestoreRefreshToken(rt, accessToken, originalAudience, rtExpiresAt)
 		oauthError(w, "server_error", "internal error", http.StatusInternalServerError)
 		return
 	}

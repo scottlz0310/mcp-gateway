@@ -20,7 +20,7 @@
 
 - マルチ audience トークン（1 つの opaque token に複数の `aud` 値、例：`["https://gw.example/mcp/a", "https://gw.example/mcp/b"]`）は将来の候補として記録しており、現リリースには含まれない。
 
-
+- 信頼済みリバースプロキシヘッダ対応（[#56](https://github.com/scottlz0310/mcp-gateway/issues/56), #49 PR-B）
   - `MCP_GATEWAY_TRUSTED_PROXIES` / `gateway.trusted_proxies` による CIDR allowlist を追加
   - 信頼済み送信元からの `X-Forwarded-Proto` / `X-Forwarded-Host` / `X-Forwarded-For` のみを後段 request に反映
   - 未信頼送信元からの forwarded headers は削除し、spoofing を防止

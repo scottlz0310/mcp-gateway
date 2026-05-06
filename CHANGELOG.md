@@ -22,9 +22,7 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 - Multi-audience tokens (a single opaque token carrying multiple `aud` values, e.g., `["https://gw.example/mcp/a", "https://gw.example/mcp/b"]`) are recorded as a future candidate and are not part of the current release.
 
-
-
-### Added
+## [0.3.0] - 2026-05-20
 
 - `MCP_GATEWAY_PUBLIC_URL` / `gateway.public_url` — canonical URL used for OAuth callbacks, discovery metadata, and PRM ([#48](https://github.com/scottlz0310/mcp-gateway/issues/48))
 - `MCP_GATEWAY_BIND_ADDR` / `gateway.bind_addr` — HTTP listener bind address, separate from the public URL ([#48](https://github.com/scottlz0310/mcp-gateway/issues/48))
