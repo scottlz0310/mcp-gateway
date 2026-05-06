@@ -42,7 +42,7 @@ If any required value (`GITHUB_MCP_CLIENT_ID`, `GITHUB_MCP_CLIENT_SECRET`, or at
 2. A one-time setup token (15-min TTL) is printed to stdout:
    ```
    {"level":"warn","msg":"mcp-gateway starting in setup mode — configure via /setup",
-    "setup_url":"http://localhost:8080/setup?token=<TOKEN>",
+    "setup_url":"http://127.0.0.1:8080/setup?token=<TOKEN>",
     "token":"<TOKEN>"}
    ```
 3. All routes except `/setup` return `503 {"error":"setup_required","setup_url":"..."}`.
@@ -51,11 +51,11 @@ If any required value (`GITHUB_MCP_CLIENT_ID`, `GITHUB_MCP_CLIENT_SECRET`, or at
 
 ```bash
 # 1. Check what fields are missing
-curl "http://localhost:8080/setup?token=<TOKEN>"
+curl "http://127.0.0.1:8080/setup?token=<TOKEN>"
 # → {"missing":["client_id","client_secret","routes"],"hint":"POST /setup ..."}
 
 # 2. Submit your configuration
-curl -X POST "http://localhost:8080/setup?token=<TOKEN>" \
+curl -X POST "http://127.0.0.1:8080/setup?token=<TOKEN>" \
   -H "Content-Type: application/json" \
   -d '{
     "client_id": "Ov23liXXXXXXXXXX",
@@ -168,7 +168,7 @@ auth:
   github_client_id: "Ov23liXXXX"
   github_client_secret: "ENC[age:]<base64-ciphertext>"
 gateway:
-  base_url: "http://localhost:8080"
+  public_url: "http://127.0.0.1:8080"
   port: "8080"
   oauth_scopes: "repo,user"
 ```
@@ -220,8 +220,10 @@ ROUTE_COPILOT_REVIEW=/mcp/copilot-review|http://copilot-review-mcp:8083
 | `MCP_GATEWAY_KEY_PATH` | `./gateway.key` | Path to the X25519 encryption key file (see [Secret Encryption](#secret-encryption)) |
 | `MCP_CONFIG_FILE` | `./config.yaml` | Path to `config.yaml` for persisted configuration |
 | `MCP_GATEWAY_MASTER_KEY` | — | Master key for deterministic key derivation (≥32 bytes; see [Secret Encryption](#secret-encryption)) |
-| `MCP_GATEWAY_BASE_URL` | `http://localhost:8080` | Base URL used for OAuth callback and discovery metadata |
-| `MCP_GATEWAY_PORT` | `8080` | Listen port |
+| `MCP_GATEWAY_PUBLIC_URL` | `http://127.0.0.1:8080` | Canonical base URL for OAuth callback, discovery metadata, and PRM (replaces `MCP_GATEWAY_BASE_URL`) |
+| `MCP_GATEWAY_BIND_ADDR` | `127.0.0.1:8080` | TCP address the HTTP listener binds to. Set to `0.0.0.0:<port>` for Docker deployments. For reverse-proxy on the same host, keep the default `127.0.0.1:<port>` |
+| `MCP_GATEWAY_BASE_URL` | — | **Deprecated** — alias for `MCP_GATEWAY_PUBLIC_URL`; will be removed in a future release |
+| `MCP_GATEWAY_PORT` | `8080` | Default port used when deriving `bind_addr` and `public_url`. The actual listen address is controlled by `MCP_GATEWAY_BIND_ADDR` |
 | `MCP_GATEWAY_TOKEN_STORE_PATH` | `/data/tokens.json` | Path to the persistent token store file (see [Persistent Auth State](#persistent-auth-state)) |
 | `GITHUB_MCP_OAUTH_SCOPES` | `repo,user` | GitHub OAuth scopes |
 | `LOG_LEVEL` | `info` | Log level: `debug` / `info` / `warn` / `error` |
@@ -311,7 +313,7 @@ Spoofable incoming headers (`X-Authenticated-User`, `X-GitHub-Login`) are stripp
 
 Go to **GitHub → Settings → Developer settings → OAuth Apps → New OAuth App**:
 
-- **Authorization callback URL**: `http://localhost:8080/callback` (or your `MCP_GATEWAY_BASE_URL` + `/callback`)
+- **Authorization callback URL**: `http://127.0.0.1:8080/callback` (or your `MCP_GATEWAY_PUBLIC_URL` + `/callback`)
 
 ### 2. Run with Docker Compose
 
@@ -324,7 +326,8 @@ services:
     environment:
       GITHUB_MCP_CLIENT_ID: <your-client-id>
       GITHUB_MCP_CLIENT_SECRET: <your-client-secret>
-      MCP_GATEWAY_BASE_URL: http://localhost:8080
+      MCP_GATEWAY_BIND_ADDR: 0.0.0.0:8080
+      MCP_GATEWAY_PUBLIC_URL: http://127.0.0.1:8080
       ROUTE_GITHUB: /mcp/github|http://github-mcp:8082
     depends_on:
       - github-mcp
@@ -347,7 +350,8 @@ services:
     environment:
       GITHUB_MCP_CLIENT_ID: <your-client-id>
       GITHUB_MCP_CLIENT_SECRET: <your-client-secret>
-      MCP_GATEWAY_BASE_URL: http://localhost:8080
+      MCP_GATEWAY_BIND_ADDR: 0.0.0.0:8080
+      MCP_GATEWAY_PUBLIC_URL: http://127.0.0.1:8080
       ROUTE_GITHUB: /mcp/github|http://github-mcp:8082
       ROUTE_COPILOT_REVIEW: /mcp/copilot-review|http://copilot-review-mcp:8083
     depends_on:
@@ -367,11 +371,11 @@ Add to your MCP client configuration (e.g., `claude_desktop_config.json`):
 {
   "mcpServers": {
     "github": {
-      "url": "http://localhost:8080/mcp/github",
+      "url": "http://127.0.0.1:8080/mcp/github",
       "transport": "http"
     },
     "copilot-review": {
-      "url": "http://localhost:8080/mcp/copilot-review",
+      "url": "http://127.0.0.1:8080/mcp/copilot-review",
       "transport": "http"
     }
   }

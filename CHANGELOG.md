@@ -7,6 +7,30 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-20
+
+### Added
+
+- `MCP_GATEWAY_PUBLIC_URL` / `gateway.public_url` — canonical URL used for OAuth callbacks, discovery metadata, and PRM ([#48](https://github.com/scottlz0310/mcp-gateway/issues/48))
+- `MCP_GATEWAY_BIND_ADDR` / `gateway.bind_addr` — HTTP listener bind address, separate from the public URL ([#48](https://github.com/scottlz0310/mcp-gateway/issues/48))
+- `docs/operations.md` — migration guide: `bind_addr` vs `public_url`, GitHub OAuth App callback URL update, Docker and bare-binary deployment notes
+
+### Changed
+
+- Default bind address changed from all interfaces (`:<port>`) to loopback-only (`127.0.0.1:8080`); Docker users must set `MCP_GATEWAY_BIND_ADDR=0.0.0.0:8080`
+- Default public URL changed from `http://localhost:8080` to `http://127.0.0.1:8080`
+
+### Deprecated
+
+- `MCP_GATEWAY_BASE_URL` / `gateway.base_url` — replaced by `MCP_GATEWAY_PUBLIC_URL` / `gateway.public_url`. A startup warning is emitted when the deprecated setting is detected. The alias will be removed in a future release.
+
+### Migration notes
+
+Docker Compose users **must** add `MCP_GATEWAY_BIND_ADDR: 0.0.0.0:<port>` (replacing
+`<port>` with the port your gateway uses, typically `8080`) so the container
+binds on all interfaces and Docker port-forwarding continues to work. See
+[`docs/operations.md`](docs/operations.md) for the full cutover procedure.
+
 ## [0.2.0] - 2026-05-05
 
 ### Added
@@ -88,6 +112,7 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 - Removed GitHub-specific HTTP calls from `auth.Handler`; delegated to `provider.Provider`.
 - Renamed middleware context key `github_login` → `authenticated_user` (internal only; external compatibility maintained).
 
-[Unreleased]: https://github.com/scottlz0310/mcp-gateway/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/scottlz0310/mcp-gateway/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/scottlz0310/mcp-gateway/releases/tag/v0.1.0

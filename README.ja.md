@@ -42,7 +42,7 @@ mcp-gateway (:8080)
 2. ワンタイムセットアップトークン（TTL 15 分）が標準出力に出力されます:
    ```
    {"level":"warn","msg":"mcp-gateway starting in setup mode — configure via /setup",
-    "setup_url":"http://localhost:8080/setup?token=<TOKEN>",
+    "setup_url":"http://127.0.0.1:8080/setup?token=<TOKEN>",
     "token":"<TOKEN>"}
    ```
 3. `/setup` 以外のすべてのルートは `503 {"error":"setup_required","setup_url":"..."}` を返します。
@@ -51,11 +51,11 @@ mcp-gateway (:8080)
 
 ```bash
 # 1. 不足している設定項目を確認
-curl "http://localhost:8080/setup?token=<TOKEN>"
+curl "http://127.0.0.1:8080/setup?token=<TOKEN>"
 # → {"missing":["client_id","client_secret","routes"],"hint":"POST /setup ..."}
 
 # 2. 設定を送信
-curl -X POST "http://localhost:8080/setup?token=<TOKEN>" \
+curl -X POST "http://127.0.0.1:8080/setup?token=<TOKEN>" \
   -H "Content-Type: application/json" \
   -d '{
     "client_id": "Ov23liXXXXXXXXXX",
@@ -168,7 +168,7 @@ auth:
   github_client_id: "Ov23liXXXX"
   github_client_secret: "ENC[age:]<base64-ciphertext>"
 gateway:
-  base_url: "http://localhost:8080"
+  public_url: "http://127.0.0.1:8080"
   port: "8080"
   oauth_scopes: "repo,user"
 ```
@@ -227,8 +227,10 @@ ROUTE_PUBLIC=/public|http://public-svc:8083|auth=none
 | `MCP_GATEWAY_KEY_PATH` | `./gateway.key` | X25519 暗号化キーファイルのパス（[シークレット暗号化](#シークレット暗号化) 参照） |
 | `MCP_CONFIG_FILE` | `./config.yaml` | 永続設定を格納する `config.yaml` のパス |
 | `MCP_GATEWAY_MASTER_KEY` | — | 決定論的キー導出に使用するマスターキー（≥32 バイト; [シークレット暗号化](#シークレット暗号化) 参照） |
-| `MCP_GATEWAY_BASE_URL` | `http://localhost:8080` | OAuth コールバック等に使用するベース URL |
-| `MCP_GATEWAY_PORT` | `8080` | リスンポート |
+| `MCP_GATEWAY_PUBLIC_URL` | `http://127.0.0.1:8080` | OAuth コールバック・discovery メタデータ・PRM に使用する外部公開 URL（`MCP_GATEWAY_BASE_URL` の後継） |
+| `MCP_GATEWAY_BIND_ADDR` | `127.0.0.1:8080` | HTTP リスナーのバインドアドレス。Docker デプロイでは `0.0.0.0:<port>` に変更する。同一ホスト上のリバースプロキシ経由の場合はデフォルト `127.0.0.1:<port>` のままで良い |
+| `MCP_GATEWAY_BASE_URL` | — | **非推奨** — `MCP_GATEWAY_PUBLIC_URL` のエイリアス。将来のリリースで削除予定 |
+| `MCP_GATEWAY_PORT` | `8080` | `bind_addr` と `public_url` のデフォルト値を導出する際のポート番号。実際の待受アドレスは `MCP_GATEWAY_BIND_ADDR` で制御する |
 | `MCP_GATEWAY_TOKEN_STORE_PATH` | `/data/tokens.json` | 永続トークンストアのファイルパス（[認証状態の永続化](#認証状態の永続化) 参照） |
 | `GITHUB_MCP_OAUTH_SCOPES` | `repo,user` | GitHub OAuth スコープ |
 | `LOG_LEVEL` | `info` | ログレベル (`debug`/`info`/`warn`/`error`) |
@@ -287,7 +289,7 @@ MCP_GATEWAY_TOKEN_STORE_PATH=                   # 永続化を無効化（非推
 
 **GitHub → Settings → Developer settings → OAuth Apps → New OAuth App** から:
 
-- **Authorization callback URL**: `http://localhost:8080/callback` (または `MCP_GATEWAY_BASE_URL` + `/callback`)
+- **Authorization callback URL**: `http://127.0.0.1:8080/callback` (または `MCP_GATEWAY_PUBLIC_URL` + `/callback`)
 
 ### 2. Docker Compose で起動
 
@@ -300,7 +302,8 @@ services:
     environment:
       GITHUB_MCP_CLIENT_ID: <your-client-id>
       GITHUB_MCP_CLIENT_SECRET: <your-client-secret>
-      MCP_GATEWAY_BASE_URL: http://localhost:8080
+      MCP_GATEWAY_BIND_ADDR: 0.0.0.0:8080
+      MCP_GATEWAY_PUBLIC_URL: http://127.0.0.1:8080
       ROUTE_GITHUB: /mcp/github|http://github-mcp:8082
     depends_on:
       - github-mcp
@@ -320,7 +323,8 @@ services:
     environment:
       GITHUB_MCP_CLIENT_ID: <your-client-id>
       GITHUB_MCP_CLIENT_SECRET: <your-client-secret>
-      MCP_GATEWAY_BASE_URL: http://localhost:8080
+      MCP_GATEWAY_BIND_ADDR: 0.0.0.0:8080
+      MCP_GATEWAY_PUBLIC_URL: http://127.0.0.1:8080
       ROUTE_GITHUB: /mcp/github|http://github-mcp:8082
       ROUTE_COPILOT_REVIEW: /mcp/copilot-review|http://copilot-review-mcp:8083
     depends_on:
@@ -339,11 +343,11 @@ MCP クライアント設定ファイル（例: `claude_desktop_config.json`）�
 {
   "mcpServers": {
     "github": {
-      "url": "http://localhost:8080/mcp/github",
+      "url": "http://127.0.0.1:8080/mcp/github",
       "transport": "http"
     },
     "copilot-review": {
-      "url": "http://localhost:8080/mcp/copilot-review",
+      "url": "http://127.0.0.1:8080/mcp/copilot-review",
       "transport": "http"
     }
   }
