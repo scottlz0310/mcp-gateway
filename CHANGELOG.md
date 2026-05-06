@@ -17,7 +17,7 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- Default bind address changed from `localhost:8080` to `127.0.0.1:8080` (loopback-only; Docker users must set `MCP_GATEWAY_BIND_ADDR=0.0.0.0:8080`)
+- Default bind address changed from all interfaces (`:<port>`) to loopback-only (`127.0.0.1:8080`); Docker users must set `MCP_GATEWAY_BIND_ADDR=0.0.0.0:8080`
 - Default public URL changed from `http://localhost:8080` to `http://127.0.0.1:8080`
 
 ### Deprecated
@@ -30,7 +30,7 @@ Docker Compose users **must** add `MCP_GATEWAY_BIND_ADDR: 0.0.0.0:8080` so the c
 binds on all interfaces and Docker port-forwarding continues to work. See
 [`docs/operations.md`](docs/operations.md) for the full cutover procedure.
 
-## [0.2.0]- 2026-05-05
+## [0.2.0] - 2026-05-05
 
 ### Added
 

@@ -36,7 +36,7 @@ the gateway needed to bind on all interfaces.
 | Old | New |
 |-----|-----|
 | `MCP_GATEWAY_BASE_URL=http://localhost:8080` | `MCP_GATEWAY_PUBLIC_URL=http://127.0.0.1:8080` |
-| *(implicit: listen on `localhost:8080`)* | `MCP_GATEWAY_BIND_ADDR=127.0.0.1:8080` (local) or `0.0.0.0:8080` (Docker) |
+| *(implicit: bind on all interfaces `:8080`)* | `MCP_GATEWAY_BIND_ADDR=127.0.0.1:8080` (local) or `0.0.0.0:8080` (Docker) |
 
 ### 2. Update config.yaml (if used)
 

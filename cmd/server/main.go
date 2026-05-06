@@ -69,10 +69,10 @@ func main() {
 	envSecret := os.Getenv("GITHUB_MCP_CLIENT_SECRET")
 
 	// Deprecation warning: MCP_GATEWAY_BASE_URL is superseded by MCP_GATEWAY_PUBLIC_URL.
-	if strings.TrimSpace(os.Getenv("MCP_GATEWAY_BASE_URL")) != "" &&
-		strings.TrimSpace(os.Getenv("MCP_GATEWAY_PUBLIC_URL")) == "" {
+	// Warn whenever BASE_URL is set, regardless of whether PUBLIC_URL is also present.
+	if strings.TrimSpace(os.Getenv("MCP_GATEWAY_BASE_URL")) != "" {
 		slog.Warn("MCP_GATEWAY_BASE_URL is deprecated; use MCP_GATEWAY_PUBLIC_URL instead",
-			"hint", "MCP_GATEWAY_PUBLIC_URL will be removed in a future release")
+			"hint", "MCP_GATEWAY_BASE_URL will be removed in a future release")
 	}
 
 	// Apply config.yaml gateway overrides (priority: env var > config.yaml > loadConfig default).
@@ -96,6 +96,15 @@ func main() {
 		} else {
 			cfg.bindAddr = "127.0.0.1:" + cfg.port
 		}
+	}
+	// If publicURL was not explicitly set (no env, no yaml), recompute the default using the
+	// resolved port so that a yaml-only port override is reflected in OAuth redirects and
+	// discovery metadata.
+	if strings.TrimSpace(os.Getenv("MCP_GATEWAY_PUBLIC_URL")) == "" &&
+		strings.TrimSpace(os.Getenv("MCP_GATEWAY_BASE_URL")) == "" &&
+		strings.TrimSpace(appCfg.Gateway.PublicURL) == "" &&
+		strings.TrimSpace(appCfg.Gateway.BaseURL) == "" {
+		cfg.publicURL = "http://127.0.0.1:" + cfg.port
 	}
 	if strings.TrimSpace(os.Getenv("GITHUB_MCP_OAUTH_SCOPES")) == "" && strings.TrimSpace(appCfg.Gateway.OAuthScopes) != "" {
 		cfg.oauthScopes = appCfg.Gateway.OAuthScopes
