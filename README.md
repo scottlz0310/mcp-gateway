@@ -267,13 +267,15 @@ To reset all authentication state (force re-auth for all clients), delete the st
 | Path | Method | Description |
 |------|--------|-------------|
 | `/.well-known/oauth-authorization-server` | GET | RFC 8414 authorization server metadata |
+| `/.well-known/oauth-protected-resource` | GET | RFC 9728 Protected Resource Metadata for the gateway as a whole (resource = `public_url`). Also serves root-prefix (`/`) routes |
+| `/.well-known/oauth-protected-resource{prefix}` | GET | Per-route PRM (MCP Authorization Spec 2025-06-18) — `resource` is the route's absolute URL `<public_url>{prefix}` (e.g. for prefix `/mcp/copilot-review` the well-known path is `/.well-known/oauth-protected-resource/mcp/copilot-review` and the resource is `<public_url>/mcp/copilot-review`). Registered for every authenticated route **except root-prefix routes (`/`)**, which fall back to the gateway-wide PRM above |
 | `/authorize` | GET | OAuth 2.0 authorization endpoint |
 | `/callback` | GET | GitHub OAuth callback |
 | `/device_authorization` | POST | Device Authorization Grant endpoint (RFC 8628) |
 | `/token` | POST | Token endpoint — supports `authorization_code` + PKCE, `urn:ietf:params:oauth:grant-type:device_code`, and `refresh_token` grants |
 | `/register` | POST | RFC 7591 dynamic client registration (pseudo) |
 | `/health` | GET | Health check — returns `{"status":"ok"}` |
-| `/<prefix>` | ANY | Reverse proxy to the matched upstream — Bearer-validated unless `auth=none` is set for the matched route |
+| `/<prefix>` | ANY | Reverse proxy to the matched upstream — Bearer-validated unless `auth=none` is set for the matched route. 401 responses point `WWW-Authenticate.resource_metadata` at the route's per-route PRM (or at the gateway-wide PRM for root-prefix routes) |
 
 ## Internal Design
 

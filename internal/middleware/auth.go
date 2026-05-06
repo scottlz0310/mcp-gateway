@@ -30,7 +30,8 @@ type upstreamErrorer interface {
 
 // authOptions holds optional configuration for the Auth middleware.
 type authOptions struct {
-	baseURL string
+	baseURL             string
+	resourceMetadataURL string
 }
 
 // AuthOption configures the Auth middleware.
@@ -41,8 +42,21 @@ type AuthOption func(*authOptions)
 // pointing to /.well-known/oauth-protected-resource. This enables MCP
 // clients to discover the gateway OAuth flow for re-authentication instead
 // of falling back to alternative auth methods (e.g. gh CLI).
+//
+// When WithResourceMetadataURL is also supplied, it takes precedence and the
+// gateway-wide PRM URL derived from baseURL is ignored.
 func WithBaseURL(u string) AuthOption {
 	return func(o *authOptions) { o.baseURL = strings.TrimRight(u, "/") }
+}
+
+// WithResourceMetadataURL sets the absolute URL advertised in the
+// resource_metadata parameter of the 401 WWW-Authenticate header. Use this
+// per route to point clients at a route-scoped Protected Resource Metadata
+// document (MCP Authorization Spec 2025-06-18) instead of the gateway-wide
+// one. The URL is emitted verbatim, so callers should pass the full
+// well-known URL (e.g. "https://gw/.well-known/oauth-protected-resource/mcp/foo").
+func WithResourceMetadataURL(u string) AuthOption {
+	return func(o *authOptions) { o.resourceMetadataURL = strings.TrimSpace(u) }
 }
 
 // Auth returns a middleware that validates Bearer tokens via the configured
@@ -52,13 +66,14 @@ func Auth(v TokenValidator, opts ...AuthOption) func(http.Handler) http.Handler 
 	for _, opt := range opts {
 		opt(&options)
 	}
+	resourceMetadataURL := resolveResourceMetadataURL(options)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			token := extractBearer(r)
 			if token == "" {
 				writeUnauthorized(w, "invalid_request",
 					"No access token provided. Authenticate via the gateway OAuth flow.",
-					options.baseURL)
+					resourceMetadataURL)
 				return
 			}
 
@@ -78,7 +93,7 @@ func Auth(v TokenValidator, opts ...AuthOption) func(http.Handler) http.Handler 
 				slog.Warn("auth failed", "err", err, "path", r.URL.Path)
 				writeUnauthorized(w, "invalid_token",
 					"Access token expired or invalid. Re-authenticate via the gateway OAuth flow.",
-					options.baseURL)
+					resourceMetadataURL)
 				return
 			}
 
@@ -89,12 +104,27 @@ func Auth(v TokenValidator, opts ...AuthOption) func(http.Handler) http.Handler 
 	}
 }
 
+// resolveResourceMetadataURL chooses the resource_metadata URL for the
+// WWW-Authenticate header. An explicitly configured WithResourceMetadataURL
+// wins; otherwise the gateway-wide /.well-known/oauth-protected-resource is
+// derived from baseURL. Returns an empty string when neither is set, in which
+// case the parameter is omitted entirely.
+func resolveResourceMetadataURL(o authOptions) string {
+	if o.resourceMetadataURL != "" {
+		return o.resourceMetadataURL
+	}
+	if o.baseURL != "" {
+		return o.baseURL + "/.well-known/oauth-protected-resource"
+	}
+	return ""
+}
+
 // writeUnauthorized writes an RFC 6750 §3.1 compliant 401 Unauthorized response.
 // For token validation failures (invalid_token), the WWW-Authenticate header
 // includes error and error_description attributes.
-// When baseURL is non-empty, resource_metadata (RFC 9728) is added to guide
-// MCP clients to the gateway's OAuth re-authentication flow.
-func writeUnauthorized(w http.ResponseWriter, errCode, errDesc, baseURL string) {
+// When resourceMetadataURL is non-empty, resource_metadata (RFC 9728) is added
+// to guide MCP clients to the appropriate Protected Resource Metadata document.
+func writeUnauthorized(w http.ResponseWriter, errCode, errDesc, resourceMetadataURL string) {
 	parts := []string{`Bearer realm="mcp-gateway"`}
 	if errCode == "invalid_token" {
 		// By design, error= is only included for token validation failures (invalid_token).
@@ -102,8 +132,8 @@ func writeUnauthorized(w http.ResponseWriter, errCode, errDesc, baseURL string) 
 		// leaking that a credential is required on unauthenticated probes.
 		parts = append(parts, fmt.Sprintf(`error=%q, error_description=%q`, errCode, errDesc))
 	}
-	if baseURL != "" {
-		parts = append(parts, fmt.Sprintf(`resource_metadata=%q`, baseURL+"/.well-known/oauth-protected-resource"))
+	if resourceMetadataURL != "" {
+		parts = append(parts, fmt.Sprintf(`resource_metadata=%q`, resourceMetadataURL))
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Pragma", "no-cache")

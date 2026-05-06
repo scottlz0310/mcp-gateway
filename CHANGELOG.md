@@ -14,6 +14,12 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 - `MCP_GATEWAY_PUBLIC_URL` / `gateway.public_url` — canonical URL used for OAuth callbacks, discovery metadata, and PRM ([#48](https://github.com/scottlz0310/mcp-gateway/issues/48))
 - `MCP_GATEWAY_BIND_ADDR` / `gateway.bind_addr` — HTTP listener bind address, separate from the public URL ([#48](https://github.com/scottlz0310/mcp-gateway/issues/48))
 - `docs/operations.md` — migration guide: `bind_addr` vs `public_url`, GitHub OAuth App callback URL update, Docker and bare-binary deployment notes
+- Per-route Protected Resource Metadata documents (MCP Authorization Spec 2025-06-18, RFC 9728 §3.1) ([#49](https://github.com/scottlz0310/mcp-gateway/issues/49))
+  - Each authenticated route with a non-root prefix now exposes `GET /.well-known/oauth-protected-resource{prefix}` whose `resource` field is the route's canonical absolute URL (e.g. `<public_url>/mcp/copilot-review`)
+  - `WWW-Authenticate.resource_metadata` on 401 responses points clients at the route-scoped PRM URL instead of the gateway-wide one
+  - Root-prefix routes (`/`) intentionally skip per-route PRM registration and continue to use the gateway-wide `/.well-known/oauth-protected-resource`, since `resource == public_url` is identical and a per-route trailing-slash pattern would shadow other PRM URLs in `http.ServeMux`
+  - The gateway-wide `GET /.well-known/oauth-protected-resource` is preserved for backward compatibility
+  - `auth.Handler.RouteProtectedResourceMetadata(resource string) http.HandlerFunc` and `middleware.WithResourceMetadataURL(url string)` added
 
 ### Changed
 
