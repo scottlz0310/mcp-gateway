@@ -173,3 +173,28 @@ func TestLoadConfig_MissingFile(t *testing.T) {
 		t.Errorf("expected empty secret, got: %q", cfg.Auth.GitHubClientSecret)
 	}
 }
+
+func TestLoadConfig_TrustedProxies(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	data := []byte(`
+gateway:
+  trusted_proxies:
+    - 127.0.0.1/32
+    - 10.0.0.0/8
+`)
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if len(cfg.Gateway.TrustedProxies) != 2 {
+		t.Fatalf("trusted_proxies len: got %d, want 2", len(cfg.Gateway.TrustedProxies))
+	}
+	if cfg.Gateway.TrustedProxies[0] != "127.0.0.1/32" || cfg.Gateway.TrustedProxies[1] != "10.0.0.0/8" {
+		t.Errorf("trusted_proxies: got %#v", cfg.Gateway.TrustedProxies)
+	}
+}

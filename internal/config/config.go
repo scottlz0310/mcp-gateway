@@ -51,6 +51,9 @@ type GatewayConfig struct {
 	Port    string `yaml:"port,omitempty"`
 	// OAuthScopes is the GitHub OAuth scope list forwarded to the provider.
 	OAuthScopes string `yaml:"oauth_scopes,omitempty"`
+	// TrustedProxies is a CIDR allowlist for reverse proxies whose
+	// X-Forwarded-* headers may be reflected into downstream requests.
+	TrustedProxies []string `yaml:"trusted_proxies,omitempty"`
 }
 
 // LoadConfig reads AppConfig from path.

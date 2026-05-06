@@ -109,6 +109,53 @@ MCP_GATEWAY_PUBLIC_URL=https://mcp.example.com
 MCP_GATEWAY_BIND_ADDR=127.0.0.1:8080
 ```
 
+### Trusted proxy headers
+
+If the proxy terminates HTTPS or rewrites the externally visible host, also configure the
+proxy IP ranges that mcp-gateway may trust:
+
+```bash
+MCP_GATEWAY_TRUSTED_PROXIES=127.0.0.1/32,10.0.0.0/8
+```
+
+Equivalent `config.yaml`:
+
+```yaml
+gateway:
+  public_url: "https://mcp.example.com"
+  bind_addr: "127.0.0.1:8080"
+  trusted_proxies:
+    - "127.0.0.1/32"
+    - "10.0.0.0/8"
+```
+
+When the immediate peer IP matches `trusted_proxies`, mcp-gateway reflects:
+
+| Header | Reflected request field |
+|--------|-------------------------|
+| `X-Forwarded-Proto` | `r.URL.Scheme` (`http` or `https` only) |
+| `X-Forwarded-Host` | `r.Host` |
+| `X-Forwarded-For` | `r.RemoteAddr` (leftmost client IP) |
+
+When the peer is not trusted, `Forwarded`, `X-Forwarded-*`, and `X-Real-IP` are stripped
+before later middleware and handlers run. This prevents direct clients from spoofing the
+scheme, host, or client IP in logs and setup-mode HTTPS checks.
+
+Example nginx location:
+
+```nginx
+location / {
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_pass http://127.0.0.1:8080;
+}
+```
+
+`MCP_GATEWAY_PUBLIC_URL` remains the canonical OAuth/discovery/PRM URL. Keep it set to
+the same external origin that clients use, for example `https://mcp.example.com`.
+
 ---
 
 ## Non-Docker / bare binary

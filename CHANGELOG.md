@@ -20,7 +20,12 @@ and versioning follows [Semantic Versioning](https://semver.org/).
   - Root-prefix routes (`/`) intentionally skip per-route PRM registration and continue to use the gateway-wide `/.well-known/oauth-protected-resource`, since `resource == public_url` is identical and a per-route trailing-slash pattern would shadow other PRM URLs in `http.ServeMux`
   - The gateway-wide `GET /.well-known/oauth-protected-resource` is preserved for backward compatibility
   - `auth.Handler.RouteProtectedResourceMetadata(resource string) http.HandlerFunc` and `middleware.WithResourceMetadataURL(url string)` added
-  - **Note**: #49 spans three PRs and is intentionally not closed by PR-A alone. PR-B ([#56](https://github.com/scottlz0310/mcp-gateway/issues/56), reverse-proxy / `trusted_proxies` / `X-Forwarded-*`) and PR-C ([#57](https://github.com/scottlz0310/mcp-gateway/issues/57), token `aud` claim and grace period) follow in subsequent releases. #49 will be closed once all three PRs are merged.
+- Trusted reverse proxy header support — partial delivery of [#49](https://github.com/scottlz0310/mcp-gateway/issues/49) (PR-B of 3, [#56](https://github.com/scottlz0310/mcp-gateway/issues/56))
+  - `MCP_GATEWAY_TRUSTED_PROXIES` / `gateway.trusted_proxies` accepts a CIDR allowlist for immediate reverse proxy peers
+  - `internal/middleware.ProxyHeaders` applies `X-Forwarded-Proto`, `X-Forwarded-Host`, and `X-Forwarded-For` only for trusted peers, and strips forwarded headers from untrusted requests
+  - Access logs and setup-mode HTTPS checks now see the trusted forwarded client IP / scheme when the middleware is enabled
+  - Invalid trusted proxy CIDRs fail startup instead of being ignored
+  - **Note**: #49 spans three PRs and is intentionally not closed by PR-A or PR-B alone. PR-C ([#57](https://github.com/scottlz0310/mcp-gateway/issues/57), token `aud` claim and grace period) follows in a subsequent release. #49 will be closed once all three PRs are merged.
 
 ### Changed
 
@@ -44,6 +49,12 @@ binds on all interfaces and Docker port-forwarding continues to work. See
 - Strict spec-2025-06-18 clients that fetch per-route PRM (`/.well-known/oauth-protected-resource{prefix}`) now receive a route-scoped `resource` value (`<public_url>{prefix}`) and should re-acquire tokens scoped to that resource if they previously cached gateway-wide tokens.
 - 401 responses on authenticated, non-root routes now advertise the route-scoped PRM in `WWW-Authenticate.resource_metadata`. Clients that follow this header to discover the AS endpoint will end up with route-scoped tokens automatically; no client-side configuration change is required.
 - No token invalidation is performed by this release. Audience checking will land in PR-C ([#57](https://github.com/scottlz0310/mcp-gateway/issues/57)) with a grace period for previously-issued tokens; review that PR's release notes when it ships.
+
+**Reverse proxy deployments (#49 PR-B)**
+
+- If TLS terminates before mcp-gateway, keep `MCP_GATEWAY_PUBLIC_URL` / `gateway.public_url` set to the external origin clients use.
+- Add `MCP_GATEWAY_TRUSTED_PROXIES` or `gateway.trusted_proxies` with valid CIDR values for the immediate proxy peers (for example `127.0.0.1/32,10.0.0.0/8`).
+- Direct client-supplied `X-Forwarded-*` headers are ignored unless the immediate peer is trusted.
 
 ## [0.2.0] - 2026-05-05
 

@@ -29,6 +29,7 @@ func NewHandler(upstream *url.URL, inv TokenInvalidator) http.Handler {
 
 			pr.Out.Header.Del("X-Forwarded-For")
 			pr.Out.Header.Del("X-Real-Ip")
+			pr.Out.Header.Del("Forwarded")
 			pr.Out.Header.Del("X-Authenticated-User")
 			pr.Out.Header.Del("X-GitHub-Login")
 			pr.Out.Header.Del("X-Forwarded-Host")

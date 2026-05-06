@@ -64,16 +64,18 @@ func TestProxyInjectsIdentityHeaders(t *testing.T) {
 
 func TestProxyStripsClientSpoofableHeaders(t *testing.T) {
 	var got struct {
-		xff      string
-		realIP   string
-		authUser string
-		legacy   string
-		fwdHost  string
-		fwdProto string
+		xff       string
+		realIP    string
+		forwarded string
+		authUser  string
+		legacy    string
+		fwdHost   string
+		fwdProto  string
 	}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got.xff = r.Header.Get("X-Forwarded-For")
 		got.realIP = r.Header.Get("X-Real-Ip")
+		got.forwarded = r.Header.Get("Forwarded")
 		got.authUser = r.Header.Get("X-Authenticated-User")
 		got.legacy = r.Header.Get("X-GitHub-Login")
 		got.fwdHost = r.Header.Get("X-Forwarded-Host")
@@ -88,6 +90,7 @@ func TestProxyStripsClientSpoofableHeaders(t *testing.T) {
 	r := requestWithContext("bob", "tok")
 	r.Header.Set("X-Forwarded-For", "1.2.3.4")
 	r.Header.Set("X-Real-Ip", "1.2.3.4")
+	r.Header.Set("Forwarded", "for=1.2.3.4;proto=https;host=evil.example.com")
 	r.Header.Set("X-Authenticated-User", "evil-spoof")
 	r.Header.Set("X-GitHub-Login", "evil-spoof")
 	r.Header.Set("X-Forwarded-Host", "evil.example.com")
@@ -101,6 +104,9 @@ func TestProxyStripsClientSpoofableHeaders(t *testing.T) {
 	}
 	if got.realIP != "" {
 		t.Errorf("X-Real-Ip not stripped: %q", got.realIP)
+	}
+	if got.forwarded != "" {
+		t.Errorf("Forwarded not stripped: %q", got.forwarded)
 	}
 	if got.authUser != "bob" {
 		t.Errorf("X-Authenticated-User spoofed: got %q, want %q", got.authUser, "bob")
