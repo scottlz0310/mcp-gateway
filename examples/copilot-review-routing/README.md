@@ -6,8 +6,8 @@ This example shows how to route both `github-mcp-server` and `copilot-review-mcp
 
 ```
 MCP Client
-    │  url: http://localhost:8080/mcp/github          (github-mcp-server)
-    │  url: http://localhost:8080/mcp/copilot-review  (copilot-review-mcp)
+    │  url: http://127.0.0.1:8080/mcp/github          (github-mcp-server)
+    │  url: http://127.0.0.1:8080/mcp/copilot-review  (copilot-review-mcp)
     ▼
 mcp-gateway :8080  ← single OAuth façade + routing
     ├── /mcp/github          → http://github-mcp:8082          (Docker-internal)
@@ -22,8 +22,8 @@ changes** to copilot-review-mcp.
 
 - Docker & Docker Compose v2
 - A GitHub OAuth App (create at https://github.com/settings/applications/new)
-  - **Homepage URL**: `http://localhost:8080`
-  - **Authorization callback URL**: `http://localhost:8080/callback`
+  - **Homepage URL**: `http://127.0.0.1:8080`
+  - **Authorization callback URL**: `http://127.0.0.1:8080/callback`
 - A GitHub Personal Access Token (for `github-mcp-server`)
 
 ## Quick Start
@@ -48,11 +48,11 @@ Add to your MCP client configuration (e.g., `claude_desktop_config.json`):
 {
   "mcpServers": {
     "github": {
-      "url": "http://localhost:8080/mcp/github",
+      "url": "http://127.0.0.1:8080/mcp/github",
       "transport": "http"
     },
     "copilot-review": {
-      "url": "http://localhost:8080/mcp/copilot-review",
+      "url": "http://127.0.0.1:8080/mcp/copilot-review",
       "transport": "http"
     }
   }
@@ -61,24 +61,19 @@ Add to your MCP client configuration (e.g., `claude_desktop_config.json`):
 
 ## Notes
 
-### Token double-validation
+### Gateway mode (AUTH_MODE=gateway)
 
-Currently, `mcp-gateway` **and** `copilot-review-mcp` each validate the Bearer token
-against the GitHub API independently. Both services have an in-memory cache, so repeated
-requests hit the cache after the first validation.
+`copilot-review-mcp` runs in `AUTH_MODE=gateway` by default. In this mode it trusts the
+`X-Authenticated-User` header injected by mcp-gateway and skips its own GitHub API call,
+so there is only one token validation per request (in mcp-gateway).
 
-A future `AUTH_MODE=gateway` option for `copilot-review-mcp`
-([copilot-review-mcp#12](https://github.com/scottlz0310/copilot-review-mcp/issues/12))
-will trust the `X-Authenticated-User` header from mcp-gateway and skip the second
-GitHub API call.
-
-### Backward compatibility
-
-Direct access to `copilot-review-mcp` (`http://localhost:8083`) continues to work — simply
-uncomment the `ports` section in `docker-compose.yml`. No code changes required.
+To run `copilot-review-mcp` in standalone mode (direct access without mcp-gateway), set
+`COPILOT_REVIEW_AUTH_MODE=standalone` in `.env`. Standalone mode requires its own OAuth App
+credentials (`GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` for copilot-review-mcp) in addition
+to the mcp-gateway credentials. See `.env.example` for details.
 
 ### Shared OAuth App credentials
 
 `GITHUB_MCP_CLIENT_ID`/`GITHUB_MCP_CLIENT_SECRET` (mcp-gateway) and
-`GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET` (copilot-review-mcp) can point to the **same**
-GitHub OAuth App.
+`GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET` (copilot-review-mcp, standalone mode only)
+can point to the **same** GitHub OAuth App.

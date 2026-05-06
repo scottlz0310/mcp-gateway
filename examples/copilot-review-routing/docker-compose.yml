@@ -5,8 +5,8 @@
 #
 # MCP client endpoints (single OAuth façade via the gateway; backend services still
 # require their own credentials/configuration in this Compose setup):
-#   github-mcp:      http://localhost:8080/mcp/github
-#   copilot-review:  http://localhost:8080/mcp/copilot-review
+#   github-mcp:      http://127.0.0.1:8080/mcp/github
+#   copilot-review:  http://127.0.0.1:8080/mcp/copilot-review
 
 services:
   mcp-gateway:
@@ -18,7 +18,11 @@ services:
     environment:
       GITHUB_MCP_CLIENT_ID: ${GITHUB_MCP_CLIENT_ID}
       GITHUB_MCP_CLIENT_SECRET: ${GITHUB_MCP_CLIENT_SECRET}
-      MCP_GATEWAY_BASE_URL: ${MCP_GATEWAY_BASE_URL:-http://localhost:8080}
+      # Bind on all interfaces so Docker port-forwarding works (container → host).
+      # Port in MCP_GATEWAY_BIND_ADDR must match MCP_GATEWAY_PORT (both default to 8080).
+      MCP_GATEWAY_BIND_ADDR: ${MCP_GATEWAY_BIND_ADDR:-0.0.0.0:8080}
+      # Public URL is what the user's browser (and GitHub OAuth) calls.
+      MCP_GATEWAY_PUBLIC_URL: ${MCP_GATEWAY_PUBLIC_URL:-http://127.0.0.1:8080}
       MCP_GATEWAY_PORT: ${MCP_GATEWAY_PORT:-8080}
       MCP_GATEWAY_KEY_PATH: ${MCP_GATEWAY_KEY_PATH:-/data/gateway.key}
       MCP_CONFIG_FILE: ${MCP_CONFIG_FILE:-/data/config.yaml}
@@ -87,9 +91,6 @@ services:
       # gateway mode trusts X-Authenticated-User injected by mcp-gateway and
       # avoids a second GitHub token validation in copilot-review-mcp.
       AUTH_MODE: ${COPILOT_REVIEW_AUTH_MODE:-gateway}
-      # Required only when COPILOT_REVIEW_AUTH_MODE=standalone.
-      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID}
-      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET}
       BASE_URL: ${COPILOT_REVIEW_BASE_URL:-http://localhost:8083}
       MCP_PORT: ${COPILOT_REVIEW_MCP_PORT:-8083}
       GITHUB_OAUTH_SCOPES: ${GITHUB_MCP_OAUTH_SCOPES:-repo,user}
