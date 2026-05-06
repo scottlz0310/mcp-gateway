@@ -7,7 +7,30 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-05-05
+## [0.3.0] - 2026-05-20
+
+### Added
+
+- `MCP_GATEWAY_PUBLIC_URL` / `gateway.public_url` — canonical URL used for OAuth callbacks, discovery metadata, and PRM ([#48](https://github.com/scottlz0310/mcp-gateway/issues/48))
+- `MCP_GATEWAY_BIND_ADDR` / `gateway.bind_addr` — HTTP listener bind address, separate from the public URL ([#48](https://github.com/scottlz0310/mcp-gateway/issues/48))
+- `docs/operations.md` — migration guide: `bind_addr` vs `public_url`, GitHub OAuth App callback URL update, Docker and bare-binary deployment notes
+
+### Changed
+
+- Default bind address changed from `localhost:8080` to `127.0.0.1:8080` (loopback-only; Docker users must set `MCP_GATEWAY_BIND_ADDR=0.0.0.0:8080`)
+- Default public URL changed from `http://localhost:8080` to `http://127.0.0.1:8080`
+
+### Deprecated
+
+- `MCP_GATEWAY_BASE_URL` / `gateway.base_url` — replaced by `MCP_GATEWAY_PUBLIC_URL` / `gateway.public_url`. A startup warning is emitted when the deprecated setting is detected. The alias will be removed in a future release.
+
+### Migration notes
+
+Docker Compose users **must** add `MCP_GATEWAY_BIND_ADDR: 0.0.0.0:8080` so the container
+binds on all interfaces and Docker port-forwarding continues to work. See
+[`docs/operations.md`](docs/operations.md) for the full cutover procedure.
+
+## [0.2.0]- 2026-05-05
 
 ### Added
 

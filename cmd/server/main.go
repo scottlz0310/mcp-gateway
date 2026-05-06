@@ -68,13 +68,34 @@ func main() {
 	envClientID := os.Getenv("GITHUB_MCP_CLIENT_ID")
 	envSecret := os.Getenv("GITHUB_MCP_CLIENT_SECRET")
 
-	// Apply config.yaml gateway overrides before setup wizard so the printed
-	// URL uses the correct base_url/port (priority: env var > config.yaml > default).
-	if strings.TrimSpace(os.Getenv("MCP_GATEWAY_BASE_URL")) == "" && strings.TrimSpace(appCfg.Gateway.BaseURL) != "" {
-		cfg.baseURL = appCfg.Gateway.BaseURL
+	// Deprecation warning: MCP_GATEWAY_BASE_URL is superseded by MCP_GATEWAY_PUBLIC_URL.
+	if strings.TrimSpace(os.Getenv("MCP_GATEWAY_BASE_URL")) != "" &&
+		strings.TrimSpace(os.Getenv("MCP_GATEWAY_PUBLIC_URL")) == "" {
+		slog.Warn("MCP_GATEWAY_BASE_URL is deprecated; use MCP_GATEWAY_PUBLIC_URL instead",
+			"hint", "MCP_GATEWAY_PUBLIC_URL will be removed in a future release")
+	}
+
+	// Apply config.yaml gateway overrides (priority: env var > config.yaml > loadConfig default).
+	// publicURL: MCP_GATEWAY_PUBLIC_URL > MCP_GATEWAY_BASE_URL > yaml public_url > yaml base_url > default
+	if strings.TrimSpace(os.Getenv("MCP_GATEWAY_PUBLIC_URL")) == "" &&
+		strings.TrimSpace(os.Getenv("MCP_GATEWAY_BASE_URL")) == "" {
+		if strings.TrimSpace(appCfg.Gateway.PublicURL) != "" {
+			cfg.publicURL = appCfg.Gateway.PublicURL
+		} else if strings.TrimSpace(appCfg.Gateway.BaseURL) != "" {
+			cfg.publicURL = appCfg.Gateway.BaseURL
+			slog.Warn("gateway.base_url in config.yaml is deprecated; use gateway.public_url instead")
+		}
 	}
 	if strings.TrimSpace(os.Getenv("MCP_GATEWAY_PORT")) == "" && strings.TrimSpace(appCfg.Gateway.Port) != "" {
 		cfg.port = appCfg.Gateway.Port
+	}
+	// bindAddr: MCP_GATEWAY_BIND_ADDR > yaml bind_addr > 127.0.0.1:<resolved port>
+	if strings.TrimSpace(os.Getenv("MCP_GATEWAY_BIND_ADDR")) == "" {
+		if strings.TrimSpace(appCfg.Gateway.BindAddr) != "" {
+			cfg.bindAddr = appCfg.Gateway.BindAddr
+		} else {
+			cfg.bindAddr = "127.0.0.1:" + cfg.port
+		}
 	}
 	if strings.TrimSpace(os.Getenv("GITHUB_MCP_OAUTH_SCOPES")) == "" && strings.TrimSpace(appCfg.Gateway.OAuthScopes) != "" {
 		cfg.oauthScopes = appCfg.Gateway.OAuthScopes
@@ -129,7 +150,7 @@ func main() {
 		Kind:         "github",
 		ClientID:     cfg.githubClientID,
 		ClientSecret: cfg.githubClientSecret,
-		RedirectURI:  strings.TrimRight(cfg.baseURL, "/") + "/callback",
+		RedirectURI:  strings.TrimRight(cfg.publicURL, "/") + "/callback",
 		Scopes:       cfg.oauthScopes,
 	})
 	if err != nil {
@@ -138,7 +159,7 @@ func main() {
 	}
 
 	oauthHandler, err := auth.NewHandler(auth.Config{
-		BaseURL:        cfg.baseURL,
+		BaseURL:        cfg.publicURL,
 		SessionTTL:     time.Duration(cfg.sessionTTLMin) * time.Minute,
 		CacheTTL:       time.Duration(cfg.tokenCacheTTLMin) * time.Minute,
 		ExpiresIn:      time.Duration(cfg.tokenExpiresInSec) * time.Second,
@@ -149,7 +170,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	authMiddleware := middleware.Auth(oauthHandler, middleware.WithBaseURL(cfg.baseURL))
+	authMiddleware := middleware.Auth(oauthHandler, middleware.WithBaseURL(cfg.publicURL))
 
 	mux := http.NewServeMux()
 
@@ -187,16 +208,15 @@ func main() {
 		)
 	}
 
-	addr := ":" + cfg.port
 	slog.Info("mcp-gateway starting",
-		"addr", addr,
-		"base_url", cfg.baseURL,
+		"bind_addr", cfg.bindAddr,
+		"public_url", cfg.publicURL,
 		"provider", prov.Name(),
 		"routes", len(routes),
 	)
 
 	server := &http.Server{
-		Addr:              addr,
+		Addr:              cfg.bindAddr,
 		Handler:           middleware.Logger()(mux),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
@@ -219,8 +239,7 @@ func runSetupWizard(cfg config, appCfg *appconfig.AppConfig, km *appconfig.KeyMa
 		return
 	}
 
-	addr := ":" + cfg.port
-	setupURL := strings.TrimRight(cfg.baseURL, "/") + "/setup?token=" + mgr.Token()
+	setupURL := strings.TrimRight(cfg.publicURL, "/") + "/setup?token=" + mgr.Token()
 
 	slog.Warn("mcp-gateway starting in setup mode — configure via /setup",
 		"setup_url", setupURL,
@@ -238,14 +257,14 @@ func runSetupWizard(cfg config, appCfg *appconfig.AppConfig, km *appconfig.KeyMa
 	mux.Handle("/", setup.UnconfiguredHandler(setupURL))
 
 	server := &http.Server{
-		Addr:              addr,
+		Addr:              cfg.bindAddr,
 		Handler:           middleware.Logger()(mux),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
-	slog.Info("setup wizard listening", "addr", addr)
+	slog.Info("setup wizard listening", "bind_addr", cfg.bindAddr)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		slog.Error("setup server error", "err", err)
 	}
@@ -254,7 +273,11 @@ func runSetupWizard(cfg config, appCfg *appconfig.AppConfig, km *appconfig.KeyMa
 type config struct {
 	githubClientID     string
 	githubClientSecret string
-	baseURL            string
+	// publicURL is the canonical base URL visible to OAuth / MCP clients.
+	// Replaces the deprecated baseURL / MCP_GATEWAY_BASE_URL.
+	publicURL          string
+	// bindAddr is the TCP address the HTTP listener binds to (host:port).
+	bindAddr           string
 	oauthScopes        string
 	port               string
 	logLevel           string
@@ -268,11 +291,22 @@ type config struct {
 }
 
 func loadConfig() config {
+	port := getEnv("MCP_GATEWAY_PORT", "8080")
+
+	// publicURL resolution: MCP_GATEWAY_PUBLIC_URL > MCP_GATEWAY_BASE_URL > default.
+	// Deprecation warning for MCP_GATEWAY_BASE_URL is emitted in main() after logger init.
+	publicURL := getEnv("MCP_GATEWAY_PUBLIC_URL",
+		getEnv("MCP_GATEWAY_BASE_URL", "http://127.0.0.1:"+port))
+
+	// bindAddr defaults to loopback; Docker deployments should set MCP_GATEWAY_BIND_ADDR=0.0.0.0:<port>.
+	bindAddr := getEnv("MCP_GATEWAY_BIND_ADDR", "127.0.0.1:"+port)
+
 	return config{
 		// githubClientID and githubClientSecret are resolved after key/config loading in main().
-		baseURL:           getEnv("MCP_GATEWAY_BASE_URL", "http://localhost:8080"),
+		publicURL:         publicURL,
+		bindAddr:          bindAddr,
+		port:              port,
 		oauthScopes:       getEnv("GITHUB_MCP_OAUTH_SCOPES", "repo,user"),
-		port:              getEnv("MCP_GATEWAY_PORT", "8080"),
 		logLevel:          getEnv("LOG_LEVEL", "info"),
 		upstreamURL:       getEnv("GITHUB_MCP_UPSTREAM_URL", ""),
 		sessionTTLMin:     getEnvInt("SESSION_TTL_MIN", 10),

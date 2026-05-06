@@ -39,8 +39,17 @@ type AuthConfig struct {
 
 // GatewayConfig holds gateway-level settings that can be persisted in config.yaml.
 type GatewayConfig struct {
-	BaseURL     string `yaml:"base_url,omitempty"`
-	Port        string `yaml:"port,omitempty"`
+	// BindAddr is the TCP address the HTTP listener binds to (e.g. "127.0.0.1:8080").
+	// When empty, the runtime derives it from PublicURL or Port.
+	BindAddr string `yaml:"bind_addr,omitempty"`
+	// PublicURL is the canonical base URL visible to OAuth clients and MCP clients
+	// (e.g. "http://127.0.0.1:8080"). Used for redirect URIs, PRM, and discovery.
+	PublicURL string `yaml:"public_url,omitempty"`
+	// BaseURL is a deprecated alias for PublicURL. Use PublicURL for new deployments.
+	// If set (and PublicURL is absent), BaseURL is copied to PublicURL with a warning.
+	BaseURL string `yaml:"base_url,omitempty"`
+	Port    string `yaml:"port,omitempty"`
+	// OAuthScopes is the GitHub OAuth scope list forwarded to the provider.
 	OAuthScopes string `yaml:"oauth_scopes,omitempty"`
 }
 
