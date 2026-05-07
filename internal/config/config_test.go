@@ -114,7 +114,7 @@ func TestMigrateSecret_NoSecretAnywhere(t *testing.T) {
 	configPath := filepath.Join(dir, "config.yaml")
 
 	km := testKeyMaterial(t)
-	os.Unsetenv("GITHUB_MCP_CLIENT_SECRET")
+	_ = os.Unsetenv("GITHUB_MCP_CLIENT_SECRET")
 
 	cfg := &AppConfig{}
 	_, err := MigrateSecret(configPath, cfg, km)
