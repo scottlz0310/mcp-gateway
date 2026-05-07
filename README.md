@@ -213,7 +213,7 @@ The full reference is in [docs/configuration.md](docs/configuration.md).
 |------|--------|-------------|
 | `/.well-known/oauth-authorization-server` | GET | Authorization server metadata. |
 | `/.well-known/oauth-protected-resource` | GET | Gateway-wide Protected Resource Metadata. |
-| `/.well-known/oauth-protected-resource{prefix}` | GET | Per-route Protected Resource Metadata. |
+| `/.well-known/oauth-protected-resource/<prefix>` | GET | Per-route Protected Resource Metadata, e.g. `/.well-known/oauth-protected-resource/mcp/github`. |
 | `/authorize` | GET | OAuth authorization endpoint. |
 | `/callback` | GET | GitHub OAuth callback. |
 | `/device_authorization` | POST | Device Authorization Grant endpoint. |

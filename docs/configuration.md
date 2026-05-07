@@ -44,7 +44,7 @@ secret, `GITHUB_MCP_CLIENT_SECRET` is ignored except during first-start seeding.
 | `ROUTE_<NAME>` | none | Route definition in `<prefix>|<upstream_url>[|auth=none]` form. At least one route is required unless configured in `config.yaml`. |
 | `MCP_CONFIG_FILE` | `./config.yaml` | Path to persisted YAML configuration. |
 | `MCP_GATEWAY_KEY_PATH` | `./gateway.key` | Path to the age X25519 identity used to encrypt `auth.github_client_secret`. |
-| `MCP_GATEWAY_MASTER_KEY` | none | Optional deterministic key seed. Must be at least 32 bytes. Used only when creating `gateway.key`. |
+| `MCP_GATEWAY_MASTER_KEY` | none | Optional deterministic key seed. Use 32+ random bytes encoded as a string, for example `openssl rand -base64 32`. Used only when creating `gateway.key`. |
 | `MCP_MASTER_KEY` | none | Legacy alias for `MCP_GATEWAY_MASTER_KEY`. |
 | `MCP_GATEWAY_PUBLIC_URL` | `http://127.0.0.1:<port>` | Canonical client-visible URL used for OAuth callbacks, discovery metadata, and Protected Resource Metadata. |
 | `MCP_GATEWAY_BIND_ADDR` | `127.0.0.1:<port>` | TCP listener address. Use `0.0.0.0:<port>` inside Docker when publishing ports. |
@@ -58,6 +58,10 @@ secret, `GITHUB_MCP_CLIENT_SECRET` is ignored except during first-start seeding.
 | `TOKEN_CACHE_TTL_MIN` | `30` | In-memory validation cache TTL in minutes. Used when token persistence is disabled. |
 | `TOKEN_EXPIRES_IN_SEC` | `7776000` | Token lifetime advertised to clients and persistent token entry TTL. Default is 90 days. |
 | `GITHUB_MCP_UPSTREAM_URL` | none | Deprecated single-upstream fallback when no `ROUTE_*` or `routes:` entries exist. |
+
+`MCP_GATEWAY_MASTER_KEY` is checked as the byte length of the supplied string
+after trimming whitespace. A base64 string generated with `openssl rand -base64
+32` is accepted as-is; the gateway does not base64-decode it before validation.
 
 ## `config.yaml`
 
@@ -225,7 +229,7 @@ and proxying run.
 |------|--------|-------------|
 | `/.well-known/oauth-authorization-server` | GET | RFC 8414 authorization server metadata. |
 | `/.well-known/oauth-protected-resource` | GET | Gateway-wide RFC 9728 Protected Resource Metadata. Also covers root-prefix routes. |
-| `/.well-known/oauth-protected-resource{prefix}` | GET | Per-route Protected Resource Metadata for authenticated non-root routes. |
+| `/.well-known/oauth-protected-resource/<prefix>` | GET | Per-route Protected Resource Metadata for authenticated non-root routes, e.g. `/.well-known/oauth-protected-resource/mcp/github`. |
 | `/authorize` | GET | OAuth 2.0 authorization endpoint. |
 | `/callback` | GET | GitHub OAuth callback. |
 | `/device_authorization` | POST | Device Authorization Grant endpoint (RFC 8628). |

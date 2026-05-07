@@ -475,8 +475,8 @@ v0.1.0 で大幅に増えた永続化・暗号化・wizard まわりを実環境
 - [x] 構造化ログ（`log/slog`）の出力フィールドを統一（`method`・`path`・`status`・`latency_ms`・`remote_addr`）
 - [x] HTTP request logger middleware を `internal/middleware/` に追加
 - [x] 認証・proxy・setup 周辺の主要イベントを `slog` に統一
-- [-] request_id / X-Request-ID propagation は #42 の確定スコープ外として未実装（必要化した時点で別 issue）
-- [-] Prometheus エンドポイントは YAGNI 判定で未実装（必要化した時点で別 issue）
+- Deferred: request_id / X-Request-ID propagation は #42 の確定スコープ外として未実装（必要化した時点で別 issue）
+- Deferred: Prometheus エンドポイントは YAGNI 判定で未実装（必要化した時点で別 issue）
 
 ---
 
@@ -519,8 +519,8 @@ v0.1.0 で大幅に増えた永続化・暗号化・wizard まわりを実環境
 
 - [x] **#3** fly.io 調査 — Close (completed)
 - [x] **#4** fly.io OAuth — Close (wontfix)
-- [-] **#5** env var 移行（`OAUTH_*` 系） — v0.4.0 延期
-- [-] **#6** 汎用 OIDC — v0.4.0 延期
+- Deferred: **#5** env var 移行（`OAUTH_*` 系） — v0.4.0 延期
+- Deferred: **#6** 汎用 OIDC — v0.4.0 延期
 
 各 issue について「open 維持 / close」を判断し、close する場合は判断理由をコメントで残した。
 

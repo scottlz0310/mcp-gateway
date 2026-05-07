@@ -9,7 +9,7 @@ VS Code などの MCP クライアントから見た単一の HTTP エントリ�
 > [mcp-docker](https://github.com/scottlz0310/Mcp-Docker) エコシステムの一部です。
 > `mcp-docker` と `copilot-review-mcp` と組み合わせて利用することを想定しています。
 
-## Getting Started
+## はじめに
 
 ### 1. GitHub OAuth App を作成
 
@@ -208,7 +208,7 @@ environment:
 |------|--------|-------------|
 | `/.well-known/oauth-authorization-server` | GET | Authorization server metadata。 |
 | `/.well-known/oauth-protected-resource` | GET | gateway 全体の Protected Resource Metadata。 |
-| `/.well-known/oauth-protected-resource{prefix}` | GET | ルート単位の Protected Resource Metadata。 |
+| `/.well-known/oauth-protected-resource/<prefix>` | GET | ルート単位の Protected Resource Metadata。例: `/.well-known/oauth-protected-resource/mcp/github` |
 | `/authorize` | GET | OAuth authorization endpoint。 |
 | `/callback` | GET | GitHub OAuth callback。 |
 | `/device_authorization` | POST | Device Authorization Grant endpoint。 |
@@ -250,7 +250,7 @@ go build ./cmd/server
 docker build -t mcp-gateway .
 ```
 
-## Docker Image
+## Docker イメージ
 
 ```text
 ghcr.io/scottlz0310/mcp-gateway:latest
@@ -258,6 +258,6 @@ ghcr.io/scottlz0310/mcp-gateway:latest
 
 image は `gcr.io/distroless/static-debian12:nonroot` ベースで、UID 65532 として動作します。
 
-## License
+## ライセンス
 
 [LICENSE](LICENSE) を参照してください。

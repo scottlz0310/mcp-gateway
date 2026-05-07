@@ -82,6 +82,8 @@ Expected response:
 
 If the gateway is in setup mode, `/health` returns `503 setup_required` because
 only `/setup` is available until the required configuration is saved.
+Use `curl -i http://127.0.0.1:8080/health` when checking setup mode; `curl -f`
+exits non-zero for the expected 503 and may hide the response body.
 
 For container health checks, use the same endpoint from the host or from another
 container that can reach the published port:
@@ -359,7 +361,7 @@ Fix:
 
 ## bind_addr vs public_url
 
-mcp-gateway v0.3.0 separates the listen address from the public URL:
+mcp-gateway separates the listen address from the public URL:
 
 | Config | Env var | YAML key | Default | Purpose |
 |--------|---------|----------|---------|---------|
