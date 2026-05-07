@@ -752,12 +752,19 @@ func (h *Handler) resolveRequestedAudience(resources []string) (string, error) {
 // covers MCP clients (e.g. Codex) that acquire a single gateway-wide token and
 // then call multiple authenticated sub-routes; rejecting them on exact match
 // would force re-authentication per route, which clients in the wild do not
-// implement.
+// implement. Recorded audiences are normalized and empty entries skipped so
+// that a stale or malformed cache row cannot bypass strict-mode enforcement
+// (isSubAudience treats an empty `original` as a wildcard, which is correct
+// for the refresh-token grace path but unsafe here).
 func (h *Handler) validateAudience(token string, record TokenRecord, audience string) error {
 	if audience == "" {
 		return nil
 	}
 	for _, recorded := range record.Audiences {
+		recorded = normalizeAudience(recorded)
+		if recorded == "" {
+			continue
+		}
 		if isSubAudience(audience, recorded) {
 			return nil
 		}

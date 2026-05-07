@@ -379,6 +379,14 @@ func TestValidateTokenAudiencePrefixMatching(t *testing.T) {
 			requested: "http://localhost:8080/mcp/github-other",
 			wantErr:   ErrTokenAudienceMismatch,
 		},
+		{
+			// trailing-slash recorded values must be normalized before
+			// isSubAudience comparison, otherwise "http://gw/" + "/" = "http://gw//"
+			// which would never match descendants.
+			name:      "recorded_with_trailing_slash_accepts_descendant",
+			recorded:  "http://localhost:8080/",
+			requested: "http://localhost:8080/mcp/github",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -400,6 +408,28 @@ func TestValidateTokenAudiencePrefixMatching(t *testing.T) {
 				t.Fatalf("got err %v, want %v", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// TestValidateAudienceSkipsEmptyRecorded ensures that a stale or malformed
+// TokenRecord containing empty-string audience entries cannot bypass strict
+// mode. Empty entries are skipped by validateAudience so isSubAudience's
+// wildcard-on-empty semantics (used by the refresh-token grace path) cannot
+// leak into per-request validation.
+func TestValidateAudienceSkipsEmptyRecorded(t *testing.T) {
+	h, err := NewHandler(Config{
+		BaseURL:             "http://localhost:8080",
+		SessionTTL:          10 * time.Minute,
+		CacheTTL:            5 * time.Minute,
+		TokenAudienceStrict: true,
+	}, &provider.Mock{ClientIDValue: "test-client-id"})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	record := TokenRecord{Audiences: []string{""}}
+	got := h.validateAudience("token", record, "http://localhost:8080/mcp/github")
+	if !errors.Is(got, ErrTokenAudienceMismatch) {
+		t.Fatalf("got %v, want ErrTokenAudienceMismatch", got)
 	}
 }
 

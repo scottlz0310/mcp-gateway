@@ -48,7 +48,7 @@ v0.2.0 の実装項目はすべてマージ済み。v0.1.0 E2E ランブック�
 | 3 | **ドキュメント整備**（運用ガイド・README 構造見直し） | docs | [#44](https://github.com/scottlz0310/mcp-gateway/issues/44) | 🗒️ 計画段階 |
 | 4 | **per-route PRM・reverse proxy 対応**（MCP Auth Spec 2025-06-18 準拠） | enhancement | [#49](https://github.com/scottlz0310/mcp-gateway/issues/49) | ✅ PR-A [#58](https://github.com/scottlz0310/mcp-gateway/pull/58) マージ済み / 🚧 PR-B [#56](https://github.com/scottlz0310/mcp-gateway/issues/56) 実装中 / PR-C [#57](https://github.com/scottlz0310/mcp-gateway/issues/57) 起票済み |
 | 5 | **保留 issue 最終判断**（#3/#4/#5/#6） | triage | [#45](https://github.com/scottlz0310/mcp-gateway/issues/45) | ✅ 完了（2026-05-07） |
-| 6 | **audience 検証の祖先一致対応**（Codex 互換性 fix） | bug | [#61](https://github.com/scottlz0310/mcp-gateway/issues/61) | 🚧 PR 作成予定（実環境検証完了） |
+| 6 | **audience 検証の祖先一致対応**（Codex 互換性 fix） | bug | [#61](https://github.com/scottlz0310/mcp-gateway/issues/61) | 🚧 [PR #63](https://github.com/scottlz0310/mcp-gateway/pull/63) レビュー対応中（実環境検証完了） |
 | 7 | **v0.3.0 リリース** | release | — | 上記完了後 |
 
 ### v0.4.0 延期（#45 トリアージ 2026-05-07 確定）
