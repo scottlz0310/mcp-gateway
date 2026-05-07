@@ -5,39 +5,66 @@
 
 ## [Unreleased]
 
-### Documentation
+## [0.3.0] - 2026-05-07
 
-- 運用・設定ドキュメントの再構成（[#44](https://github.com/scottlz0310/mcp-gateway/issues/44)）
-  - root README を Getting Started 優先の構成に整理し、詳細リファレンスを本文から分離
-  - `docs/operations.md` に起動停止、ヘルスチェック、構造化 `slog` フィールド一覧、よくあるトラブルと復旧手順、reverse proxy 移行メモを追加
-  - `docs/configuration.md` を追加し、環境変数、`config.yaml`、route、token persistence、reverse proxy、endpoint の詳細リファレンスを集約
+### 追加
+
+- HTTP request logging middleware と `slog` フィールド標準化（[#42](https://github.com/scottlz0310/mcp-gateway/issues/42), [PR #47](https://github.com/scottlz0310/mcp-gateway/pull/47)）
+  - 各 request で `method`、`path`、`status`、`latency_ms`、`remote_addr` を含む `"http request"` 構造化ログを出力
+  - auth、proxy、setup、startup 周辺の主要イベントを `log/slog` に統一
+- `MCP_GATEWAY_PUBLIC_URL` / `gateway.public_url` と `MCP_GATEWAY_BIND_ADDR` / `gateway.bind_addr`（[#48](https://github.com/scottlz0310/mcp-gateway/issues/48), [PR #51](https://github.com/scottlz0310/mcp-gateway/pull/51)）
+  - OAuth/discovery/PRM 用の公開 URL と HTTP listener address を分離
+- ルート単位の Protected Resource Metadata（MCP Authorization Spec 2025-06-18, RFC 9728 §3.1）（[#49](https://github.com/scottlz0310/mcp-gateway/issues/49), [PR #58](https://github.com/scottlz0310/mcp-gateway/pull/58)）
+  - 認証付き non-root route で `GET /.well-known/oauth-protected-resource/<prefix>` を公開し、route-scoped `resource` を返す
+  - 401 応答の `WWW-Authenticate.resource_metadata` は利用可能な場合 route-scoped PRM を指す
+  - root-prefix route は後方互換のため gateway-wide PRM を継続利用
+- 信頼済み reverse proxy header 対応（[#56](https://github.com/scottlz0310/mcp-gateway/issues/56), [PR #59](https://github.com/scottlz0310/mcp-gateway/pull/59)）
+  - `MCP_GATEWAY_TRUSTED_PROXIES` / `gateway.trusted_proxies` で immediate reverse proxy の CIDR allowlist を指定可能
+  - 信頼済み peer からの `X-Forwarded-Proto`、`X-Forwarded-Host`、`X-Forwarded-For` のみを反映し、未信頼 forwarded headers は削除
+  - 不正な trusted proxy CIDR は起動時エラーとして扱う
+- RFC 8707 `resource` パラメータと token audience tracking（[#57](https://github.com/scottlz0310/mcp-gateway/issues/57), [PR #60](https://github.com/scottlz0310/mcp-gateway/pull/60)）
+  - `/authorize`、`/device_authorization`、`grant_type=refresh_token` で `resource` を受け付ける
+  - discovery metadata に `resource_parameter_supported: true` を追加
+  - `grant_type=refresh_token` は元 audience の維持または sub-path への narrowing を許可し、拡大・別 route への変更は `invalid_target` で拒否
+
+### 変更
+
+- デフォルト bind address を全 interface（`:<port>`）から loopback-only（`127.0.0.1:8080`）へ変更。Docker deployment では `MCP_GATEWAY_BIND_ADDR=0.0.0.0:8080` を設定する。
+- デフォルト public URL を `http://localhost:8080` から `http://127.0.0.1:8080` へ変更。
+- example Compose 設定を `bind_addr` / `public_url` 分離に合わせて更新（[PR #52](https://github.com/scottlz0310/mcp-gateway/pull/52)）。
+- CI pipeline 強化（[#43](https://github.com/scottlz0310/mcp-gateway/issues/43), [PR #62](https://github.com/scottlz0310/mcp-gateway/pull/62)）
+  - `govulncheck` を追加し、Docker build が vulnerability scan に依存するよう変更
+  - 明示的な `.golangci.yml` linter 設定を追加
+  - golangci-lint tooling を pin し、Codecov patch target を 75% に引き上げ
+- Go dependency と GitHub Actions の maintenance 更新（[PR #66](https://github.com/scottlz0310/mcp-gateway/pull/66), [PR #67](https://github.com/scottlz0310/mcp-gateway/pull/67)）。
+
+### 修正
+
+- route-scoped resource に対して ancestor-scoped token を受け入れるよう audience validation を修正（[#61](https://github.com/scottlz0310/mcp-gateway/issues/61), [PR #63](https://github.com/scottlz0310/mcp-gateway/pull/63)）
+  - `public_url` で gateway-wide token を取得した client が複数の authenticated sub-route を初期化する場合の `token audience mismatch` 401 を解消
+  - sibling route、narrower-recorded-vs-broader-requested、同一 prefix 風の別 segment は引き続き拒否
+
+### ドキュメント
+
+- 運用・設定ドキュメントの再構成（[#44](https://github.com/scottlz0310/mcp-gateway/issues/44), [PR #64](https://github.com/scottlz0310/mcp-gateway/pull/64)）
+  - root README を Getting Started 優先の構成に整理
+  - `docs/configuration.md` に環境変数、`config.yaml`、route、token persistence、reverse proxy、endpoint reference を集約
+  - `docs/operations.md` に起動停止、health check、構造化ログフィールド、troubleshooting、migration notes を追加
   - `docs/README.md` を追加し、guide、runbook、example、spike note への入口を整理
 
-### Added
+### 非推奨
 
-- すべてのトークン取得フローで RFC 8707 `resource` パラメータをサポート（[#57](https://github.com/scottlz0310/mcp-gateway/issues/57), #49 PR-C）
-  - `/authorize`、`/device_authorization`、`grant_type=refresh_token` のいずれも、オプションの `resource` パラメータを受け付け、発行トークンの audience を特定の値に結びつける
-  - ディスカバリメタデータに `resource_parameter_supported: true` を追加
-  - `grant_type=refresh_token` での `resource` は、元のリフレッシュトークンに記録された audience と同一かそのサブパスでなければならない。拡大・別ルートへの変更は `invalid_target` で拒否
-  - audience トラッキング以前のレガシートークン（保存 audience が空）はグレースピリオド中は任意の登録済み resource を受け入れる
-  - 検証失敗時は消費済みリフレッシュトークンを復元するため、クライアントは修正後の `resource` で再試行できる
+- `MCP_GATEWAY_BASE_URL` / `gateway.base_url` は `MCP_GATEWAY_PUBLIC_URL` / `gateway.public_url` に置き換え。deprecated setting 検出時は起動時 warning を出力し、将来リリースで削除予定。
 
 ### 移行ガイド
 
-- **`token_audience_strict`**: `MCP_GATEWAY_TOKEN_AUDIENCE_STRICT=true`（または `token_audience_strict: true`）を有効にするには、**以下のすべてが満たされている**必要があります:
-  1. **永続トークンストアが必須** — `MCP_GATEWAY_TOKEN_STORE_PATH` / `token_store_path` を設定してください。インメモリストアではキャッシュ失効時に audience メタデータが消滅し、該当トークンが使用不能になります。インメモリストアで strict モードを有効にすると、起動時に警告ログを出力します。
-  2. **すべての有効トークンが audience メタデータを持つこと** — このリリース以前に発行されたトークンには audience が記録されていません。`resource` パラメータ**なし**で refresh すると、トークンはローテーションされますが audience なし（レガシー）のまま残ります。90 日の TTL ウィンドウは**自動的に十分ではありません** — このリリース以降にすべてのアクティブクライアントが `resource` 付きで refresh するか再認証した場合に限り有効です。
-  3. **推奨手順** — `"token without audience accepted during grace period"` ログエントリを監視してください。最長セッションのクライアントでこのログが消えたら、strict モードを安全に有効化できます。
+- Docker Compose users は container port forwarding 継続のため `MCP_GATEWAY_BIND_ADDR=0.0.0.0:<port>` を追加してください。`MCP_GATEWAY_PUBLIC_URL` は browser / OAuth client から見える URL に維持します。
+- TLS を mcp-gateway の手前で終端する場合は、`MCP_GATEWAY_PUBLIC_URL` / `gateway.public_url` を外部 origin に設定し、immediate proxy peer を `MCP_GATEWAY_TRUSTED_PROXIES` / `gateway.trusted_proxies` に設定してください。
+- `MCP_GATEWAY_TOKEN_AUDIENCE_STRICT=true`（または `token_audience_strict: true`）は、すべての active token が audience metadata を持つようになってから有効化してください。strict mode 前に `"token without audience accepted during grace period"` ログを監視してください。
 
 ### ロードマップ
 
-- マルチ audience トークン（1 つの opaque token に複数の `aud` 値、例：`["https://gw.example/mcp/a", "https://gw.example/mcp/b"]`）は将来の候補として記録しており、現リリースには含まれない。
-
-- 信頼済みリバースプロキシヘッダ対応（[#56](https://github.com/scottlz0310/mcp-gateway/issues/56), #49 PR-B）
-  - `MCP_GATEWAY_TRUSTED_PROXIES` / `gateway.trusted_proxies` による CIDR allowlist を追加
-  - 信頼済み送信元からの `X-Forwarded-Proto` / `X-Forwarded-Host` / `X-Forwarded-For` のみを後段 request に反映
-  - 未信頼送信元からの forwarded headers は削除し、spoofing を防止
-  - 不正な CIDR は起動時エラーとして扱う
+- マルチ audience token（1 つの opaque token に複数の `aud` 値、例: `["https://gw.example/mcp/a", "https://gw.example/mcp/b"]`）は将来候補として記録し、現リリースには含めない。
 
 ## [0.2.0] - 2026-05-05
 
@@ -116,6 +143,7 @@
 - `auth.Handler` から GitHub 固有の HTTP 通信を排除し、`provider.Provider` への委譲に変更。
 - `middleware` のコンテキストキーを `github_login` → `authenticated_user` に rename（内部実装のみ、外部互換維持）。
 
-[Unreleased]: https://github.com/scottlz0310/mcp-gateway/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/scottlz0310/mcp-gateway/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/scottlz0310/mcp-gateway/releases/tag/v0.1.0

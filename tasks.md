@@ -45,11 +45,11 @@ v0.2.0 の実装項目はすべてマージ済み。v0.1.0 E2E ランブック�
 |---|---|---|---|---|
 | 1 | **観測性整備**（構造化ログ統一・基礎メトリクス） | enhancement | [#42](https://github.com/scottlz0310/mcp-gateway/issues/42) | ✅ [PR #47](https://github.com/scottlz0310/mcp-gateway/pull/47) マージ済み（2026-05-06） |
 | 2 | **CI 強化**（govulncheck・golangci-lint 設定・カバレッジ閾値） | infra | [#43](https://github.com/scottlz0310/mcp-gateway/issues/43) | ✅ [PR #62](https://github.com/scottlz0310/mcp-gateway/pull/62) マージ済み（2026-05-07） |
-| 3 | **ドキュメント整備**（運用ガイド・README 構造見直し） | docs | [#44](https://github.com/scottlz0310/mcp-gateway/issues/44) | ✅ 本PRで実装済み（operations/configuration/docs index/README 整理） |
+| 3 | **ドキュメント整備**（運用ガイド・README 構造見直し） | docs | [#44](https://github.com/scottlz0310/mcp-gateway/issues/44) | ✅ [PR #64](https://github.com/scottlz0310/mcp-gateway/pull/64) マージ済み（2026-05-07） |
 | 4 | **per-route PRM・reverse proxy 対応**（MCP Auth Spec 2025-06-18 準拠） | enhancement | [#49](https://github.com/scottlz0310/mcp-gateway/issues/49) | ✅ PR-A [#58](https://github.com/scottlz0310/mcp-gateway/pull/58) / PR-B [#59](https://github.com/scottlz0310/mcp-gateway/pull/59) / PR-C [#60](https://github.com/scottlz0310/mcp-gateway/pull/60) マージ済み（2026-05-06） |
 | 5 | **保留 issue 最終判断**（#3/#4/#5/#6） | triage | [#45](https://github.com/scottlz0310/mcp-gateway/issues/45) | ✅ 完了（2026-05-07） |
 | 6 | **audience 検証の祖先一致対応**（Codex 互換性 fix） | bug | [#61](https://github.com/scottlz0310/mcp-gateway/issues/61) | ✅ [PR #63](https://github.com/scottlz0310/mcp-gateway/pull/63) マージ済み（2026-05-07） |
-| 7 | **v0.3.0 リリース** | release | — | 上記完了後 |
+| 7 | **v0.3.0 リリース** | release | — | 🚧 リリース準備PR作成中（CHANGELOG v0.3.0 化） |
 
 ### v0.4.0 延期（#45 トリアージ 2026-05-07 確定）
 
@@ -496,7 +496,7 @@ v0.1.0 で大幅に増えた永続化・暗号化・wizard まわりを実環境
 
 #### v0.2.0-RM4: ドキュメント整備
 
-**状態**: ✅ 本PRで実装済み（#44）
+**状態**: ✅ 完了（#44 / PR #64 マージ済み）
 **目的**: README が機能追加で肥大化しているため、構造を再設計する。
 
 ##### 想定スコープ
@@ -505,7 +505,7 @@ v0.1.0 で大幅に増えた永続化・暗号化・wizard まわりを実環境
 - [x] 運用・トラブルシュートを `docs/operations.md` に分離
 - [x] 設定リファレンスを `docs/configuration.md` に分離
 - [x] `docs/README.md` を追加
-- [ ] PR マージ後に #44 を close
+- [x] PR マージ後に #44 を close
 - [ ] CHANGELOG.md からリリースノートを `docs/release-notes/` に分離（v0.1.0 から）
 - [x] 個別 issue #44 として起票済み
 
