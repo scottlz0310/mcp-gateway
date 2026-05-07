@@ -208,7 +208,7 @@ func TestStatusWriterHijackSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Hijack failed: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	if sw.statusCode() != http.StatusSwitchingProtocols {
 		t.Errorf("statusCode after Hijack: got %d, want 101", sw.statusCode())

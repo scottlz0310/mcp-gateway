@@ -44,20 +44,20 @@ v0.2.0 の実装項目はすべてマージ済み。v0.1.0 E2E ランブック�
 | 優先 | 項目 | 種別 | Issue | 状態 |
 |---|---|---|---|---|
 | 1 | **観測性整備**（構造化ログ統一・基礎メトリクス） | enhancement | [#42](https://github.com/scottlz0310/mcp-gateway/issues/42) | 🗒️ 計画段階 |
-| 2 | **CI 強化**（govulncheck・golangci-lint 設定・カバレッジ閾値） | infra | [#43](https://github.com/scottlz0310/mcp-gateway/issues/43) | 🗒️ 計画段階 |
+| 2 | **CI 強化**（govulncheck・golangci-lint 設定・カバレッジ閾値） | infra | [#43](https://github.com/scottlz0310/mcp-gateway/issues/43) | 🚧 PR 作成予定 |
 | 3 | **ドキュメント整備**（運用ガイド・README 構造見直し） | docs | [#44](https://github.com/scottlz0310/mcp-gateway/issues/44) | 🗒️ 計画段階 |
 | 4 | **per-route PRM・reverse proxy 対応**（MCP Auth Spec 2025-06-18 準拠） | enhancement | [#49](https://github.com/scottlz0310/mcp-gateway/issues/49) | ✅ PR-A [#58](https://github.com/scottlz0310/mcp-gateway/pull/58) マージ済み / 🚧 PR-B [#56](https://github.com/scottlz0310/mcp-gateway/issues/56) 実装中 / PR-C [#57](https://github.com/scottlz0310/mcp-gateway/issues/57) 起票済み |
-| 5 | **保留 issue 最終判断**（#3/#4/#5/#6） | triage | [#45](https://github.com/scottlz0310/mcp-gateway/issues/45) | 🗒️ 計画段階 |
+| 5 | **保留 issue 最終判断**（#3/#4/#5/#6） | triage | [#45](https://github.com/scottlz0310/mcp-gateway/issues/45) | ✅ 完了（2026-05-07） |
 | 6 | **v0.3.0 リリース** | release | — | 上記完了後 |
 
-### 保留維持
+### v0.4.0 延期（#45 トリアージ 2026-05-07 確定）
 
-| ISSUE | 保留理由 |
-|---|---|
-| **#6** 汎用 OIDC | #18 結果次第で再評価 |
-| **#5** env var 移行 | 追加プロバイダ確定まで YAGNI |
-| **#4** fly.io OAuth | fly.io と直接調整が必要 |
-| **#3** fly.io 調査 | 調査完了済み・GitHub 側は close 候補（v0.3.0 triage で確定） |
+| ISSUE | 判断 | 理由 |
+|---|---|---|
+| **#5** env var 移行（`OAUTH_*` 系） | v0.4.0 延期 | 追加プロバイダ確定まで YAGNI |
+| **#6** 汎用 OIDC | v0.4.0 延期 | 認証基盤安定後に対応 |
+| **#3** fly.io 調査 | Close (completed) | 調査結果は Issue 本文に集約済み |
+| **#4** fly.io OAuth | Close (wontfix) | fly.io Extensions Provider 登録の外部調整コストが高い |
 
 ---
 
@@ -539,9 +539,9 @@ v0.1.0 で大幅に増えた永続化・暗号化・wizard まわりを実環境
 
 ### [#6 feat: 汎用 OIDC（OpenID Connect）プロバイダサポート](https://github.com/scottlz0310/mcp-gateway/issues/6)
 
-**状態**: 保留（2026-04-27）
+**状態**: v0.4.0 延期（#45 トリアージ 2026-05-07）
 **依存**: #2
-**保留理由**: Entra ID は DCR 未サポートで MCP OAuth 2.1 仕様と不適合。対象 MCP サーバーが具体的に決まるまで見送り（YAGNI）。**#18 の結果次第で再評価**。
+**保留理由**: Entra ID は DCR 未サポートで MCP OAuth 2.1 仕様と不適合。認証基盤が安定してから対応。milestone v0.4.0 設定済み。
 
 #### サブタスク
 
@@ -555,9 +555,9 @@ v0.1.0 で大幅に増えた永続化・暗号化・wizard まわりを実環境
 
 ### [#5 refactor: 環境変数を OAUTH_* 系に移行・GITHUB_MCP_* を deprecate](https://github.com/scottlz0310/mcp-gateway/issues/5)
 
-**状態**: 保留（2026-04-27）
+**状態**: v0.4.0 延期（#45 トリアージ 2026-05-07）
 **依存**: #2
-**保留理由**: 追加プロバイダがすべて保留・クローズとなったため優先度低下。プロバイダ追加が確定した時点で再開。
+**保留理由**: 追加プロバイダ（fly.io / OIDC）確定まで YAGNI。milestone v0.4.0 設定済み。
 
 #### サブタスク
 
@@ -570,9 +570,9 @@ v0.1.0 で大幅に増えた永続化・暗号化・wizard まわりを実環境
 
 ### [#4 feat: fly.io OAuth プロバイダ実装](https://github.com/scottlz0310/mcp-gateway/issues/4)
 
-**状態**: 保留（2026-04-27）
+**状態**: ❌ Close (wontfix)（#45 トリアージ 2026-05-07）
 **依存**: #2, #3
-**保留理由**: fly.io OAuth（Sign in with Fly）は Extensions Provider 専用であり、開発用 client_id/client_secret の self-service 登録手段がない。fly.io と直接調整が必要なため、プロダクト品質が整うまで後回し。代替 OAuth プロバイダの検討を優先する。
+**クローズ理由**: fly.io Extensions Provider 登録に fly.io との直接調整（client_id/secret 発行・redirect_uri 事前登録）が必要であり外部依存コストが高い。self-service 登録が可能になった時点で別 issue で再評価。
 
 #### サブタスク
 
@@ -585,7 +585,7 @@ v0.1.0 で大幅に増えた永続化・暗号化・wizard まわりを実環境
 
 ### [#3 spike: fly.io 認証方式の調査（OAuth Provider vs Macaroon Tokens）](https://github.com/scottlz0310/mcp-gateway/issues/3)
 
-**状態**: 調査完了（2026-04-27）
+**状態**: ❌ Close (completed)（#45 トリアージ 2026-05-07）
 **依存**: なし
 
 **結論**: Sign in with Fly（OAuth 2.0）を Issue #4 で採用。Macaroon は Provider IF 不適合のため対象外。Provider IF（#2 で確定）に変更不要。詳細は Issue #3 本文参照。

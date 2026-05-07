@@ -4,7 +4,7 @@ coverage:
       default:
         # cmd/ entrypoints are not unit-testable; the threshold reflects
         # intentionally-untested OS-specific branches (e.g. Windows rename fallback).
-        target: 70%
+        target: 75%
         threshold: 5%
     project:
       default:
