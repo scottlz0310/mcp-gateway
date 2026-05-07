@@ -7,97 +7,66 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Documentation
-
-- Documentation restructuring for operations and configuration ([#44](https://github.com/scottlz0310/mcp-gateway/issues/44))
-  - Reworked the root README around a front-loaded Getting Started flow and moved detailed reference material out of the main page.
-  - Expanded `docs/operations.md` with start/stop procedures, health checks, structured `slog` field reference, common troubleshooting, and reverse-proxy migration notes.
-  - Added `docs/configuration.md` as the detailed environment variable, `config.yaml`, route, token persistence, reverse proxy, and endpoint reference.
-  - Added `docs/README.md` as an index for guides, runbooks, examples, and spike notes.
-
-### Fixed
-
-- Audience validation accepts ancestor-scoped tokens for route-scoped resources ([#61](https://github.com/scottlz0310/mcp-gateway/issues/61))
-  - `validateAudience` now accepts a request when any recorded token audience equals or is a strict ancestor (sub-path) of the requested route audience, reusing the existing `isSubAudience` semantics.
-  - Resolves `token audience mismatch` 401 errors for MCP clients (e.g. Codex) that acquire a single gateway-wide token at `public_url` and then initialize multiple authenticated sub-routes (`/mcp/github`, `/mcp/copilot-review`, …). Without this fix, every sub-route required a separate token acquisition flow, which clients in the wild do not implement.
-  - Sibling routes, narrower-recorded-vs-broader-requested, and same-prefix-different-segment cases continue to be rejected. Legacy (no-audience) token grace-period behavior is unchanged.
-  - Verified end-to-end with Codex against a Compose stack (`mcp-gateway` + `github-mcp` + `copilot-review-mcp`).
-
-### CI / Infrastructure
-
-- CI pipeline hardening ([#43](https://github.com/scottlz0310/mcp-gateway/issues/43))
-  - Added `govulncheck` job that scans dependencies for known Go vulnerabilities. The job fails when vulnerabilities are detected, and the `build` job lists `govulncheck` in its `needs:` so Docker image build/publish is blocked when the scan fails. `govulncheck` itself is pinned to `v1.1.4` for reproducibility.
-  - Added `.golangci.yml` with explicit linter set: `errcheck`, `govet`, `staticcheck`, `unused`, `revive` (instead of relying on `golangci-lint` defaults)
-  - Pinned `golangci-lint` to `v2.12.2` and `golangci/golangci-lint-action` to `v9` (was `version: latest`) for CI reproducibility
-  - Raised codecov patch coverage target from 70% to 75%
-  - revive ruleset disables `package-comments`, `exported`, and `unused-parameter` to align with the project comment policy (comments only when the *why* is non-obvious)
+## [0.3.0] - 2026-05-07
 
 ### Added
 
-- RFC 8707 `resource` parameter support across all token acquisition flows ([#57](https://github.com/scottlz0310/mcp-gateway/issues/57), #49 PR-C)
-  - `/authorize`, `/device_authorization`, and `grant_type=refresh_token` all accept an optional `resource` parameter to bind the issued token to a specific audience
-  - Discovery metadata now advertises `resource_parameter_supported: true`
-  - The requested `resource` on `grant_type=refresh_token` must equal or be a sub-path of the audience originally recorded on the refresh token; broadening or cross-route changes are rejected with `invalid_target`
-  - Legacy refresh tokens issued before audience tracking (empty stored audience) accept any registered resource during the grace period
-  - The consumed refresh token is restored on validation failure so clients can retry with a corrected `resource` value
-
-### Migration
-
-- **`token_audience_strict`**: Enabling `MCP_GATEWAY_TOKEN_AUDIENCE_STRICT=true` (or `token_audience_strict: true`) is only safe when **all** of the following conditions are met:
-  1. **Persistent token store required** — Set `MCP_GATEWAY_TOKEN_STORE_PATH` / `token_store_path`. With an in-memory store, audience metadata is lost on cache eviction, making those tokens unusable. The gateway now logs a startup warning if strict mode is combined with an in-memory store.
-  2. **All active tokens carry audience metadata** — Tokens issued before this release have no audience recorded. A refresh *without* a `resource` parameter rotates the token but keeps it as a legacy (no-audience) token indefinitely. The 90-day TTL window is **not** automatically sufficient — it only holds if all active clients have refreshed with `resource` or re-authenticated at least once since this release.
-  3. **Recommended approach** — Monitor the `"token without audience accepted during grace period"` log entries. Once they disappear across your longest-lived sessions, it is safe to enable strict mode.
-
-### Roadmap
-
-- Multi-audience tokens (a single opaque token carrying multiple `aud` values, e.g., `["https://gw.example/mcp/a", "https://gw.example/mcp/b"]`) are recorded as a future candidate and are not part of the current release.
-
-## [0.3.0] - 2026-05-20
-
-- `MCP_GATEWAY_PUBLIC_URL` / `gateway.public_url` — canonical URL used for OAuth callbacks, discovery metadata, and PRM ([#48](https://github.com/scottlz0310/mcp-gateway/issues/48))
-- `MCP_GATEWAY_BIND_ADDR` / `gateway.bind_addr` — HTTP listener bind address, separate from the public URL ([#48](https://github.com/scottlz0310/mcp-gateway/issues/48))
-- `docs/operations.md` — migration guide: `bind_addr` vs `public_url`, GitHub OAuth App callback URL update, Docker and bare-binary deployment notes
-- Per-route Protected Resource Metadata documents (MCP Authorization Spec 2025-06-18, RFC 9728 §3.1) — partial delivery of [#49](https://github.com/scottlz0310/mcp-gateway/issues/49) (PR-A of 3)
-  - Each authenticated route with a non-root prefix now exposes `GET /.well-known/oauth-protected-resource{prefix}` whose `resource` field is the route's canonical absolute URL (e.g. `<public_url>/mcp/copilot-review`)
-  - `WWW-Authenticate.resource_metadata` on 401 responses points clients at the route-scoped PRM URL instead of the gateway-wide one
-  - Root-prefix routes (`/`) intentionally skip per-route PRM registration and continue to use the gateway-wide `/.well-known/oauth-protected-resource`, since `resource == public_url` is identical and a per-route trailing-slash pattern would shadow other PRM URLs in `http.ServeMux`
-  - The gateway-wide `GET /.well-known/oauth-protected-resource` is preserved for backward compatibility
-  - `auth.Handler.RouteProtectedResourceMetadata(resource string) http.HandlerFunc` and `middleware.WithResourceMetadataURL(url string)` added
-- Trusted reverse proxy header support — partial delivery of [#49](https://github.com/scottlz0310/mcp-gateway/issues/49) (PR-B of 3, [#56](https://github.com/scottlz0310/mcp-gateway/issues/56))
-  - `MCP_GATEWAY_TRUSTED_PROXIES` / `gateway.trusted_proxies` accepts a CIDR allowlist for immediate reverse proxy peers
-  - `internal/middleware.ProxyHeaders` applies `X-Forwarded-Proto`, `X-Forwarded-Host`, and `X-Forwarded-For` only for trusted peers, and strips forwarded headers from untrusted requests
-  - Access logs and setup-mode HTTPS checks now see the trusted forwarded client IP / scheme when the middleware is enabled
-  - Invalid trusted proxy CIDRs fail startup instead of being ignored
-  - **Note**: #49 spans three PRs and is intentionally not closed by PR-A or PR-B alone. PR-C ([#57](https://github.com/scottlz0310/mcp-gateway/issues/57), token `aud` claim and grace period) follows in a subsequent release. #49 will be closed once all three PRs are merged.
+- HTTP request logging middleware and `slog` field normalization ([#42](https://github.com/scottlz0310/mcp-gateway/issues/42), [PR #47](https://github.com/scottlz0310/mcp-gateway/pull/47))
+  - Emits one structured `"http request"` log per request with `method`, `path`, `status`, `latency_ms`, and `remote_addr`.
+  - Keeps auth, proxy, setup, and startup events on structured `log/slog` output.
+- `MCP_GATEWAY_PUBLIC_URL` / `gateway.public_url` and `MCP_GATEWAY_BIND_ADDR` / `gateway.bind_addr` ([#48](https://github.com/scottlz0310/mcp-gateway/issues/48), [PR #51](https://github.com/scottlz0310/mcp-gateway/pull/51))
+  - Separates the canonical OAuth/discovery/PRM URL from the HTTP listener address.
+- Per-route Protected Resource Metadata documents (MCP Authorization Spec 2025-06-18, RFC 9728 §3.1) ([#49](https://github.com/scottlz0310/mcp-gateway/issues/49), [PR #58](https://github.com/scottlz0310/mcp-gateway/pull/58))
+  - Authenticated non-root routes expose `GET /.well-known/oauth-protected-resource/<prefix>` with a route-scoped `resource`.
+  - `WWW-Authenticate.resource_metadata` on 401 responses points clients at route-scoped PRM when available.
+  - Root-prefix routes continue to use gateway-wide PRM for backward compatibility.
+- Trusted reverse proxy header support ([#56](https://github.com/scottlz0310/mcp-gateway/issues/56), [PR #59](https://github.com/scottlz0310/mcp-gateway/pull/59))
+  - `MCP_GATEWAY_TRUSTED_PROXIES` / `gateway.trusted_proxies` accepts a CIDR allowlist for immediate reverse proxy peers.
+  - Trusted peers may supply `X-Forwarded-Proto`, `X-Forwarded-Host`, and `X-Forwarded-For`; untrusted forwarded headers are stripped.
+  - Invalid trusted proxy CIDRs fail startup instead of being ignored.
+- RFC 8707 `resource` parameter support and token audience tracking across token acquisition flows ([#57](https://github.com/scottlz0310/mcp-gateway/issues/57), [PR #60](https://github.com/scottlz0310/mcp-gateway/pull/60))
+  - `/authorize`, `/device_authorization`, and `grant_type=refresh_token` accept `resource`.
+  - Discovery metadata advertises `resource_parameter_supported: true`.
+  - `grant_type=refresh_token` may keep the original audience or narrow it to a sub-path; broadening and cross-route changes are rejected with `invalid_target`.
 
 ### Changed
 
-- Default bind address changed from all interfaces (`:<port>`) to loopback-only (`127.0.0.1:8080`); Docker users must set `MCP_GATEWAY_BIND_ADDR=0.0.0.0:8080`
-- Default public URL changed from `http://localhost:8080` to `http://127.0.0.1:8080`
+- Default bind address changed from all interfaces (`:<port>`) to loopback-only (`127.0.0.1:8080`); Docker deployments should set `MCP_GATEWAY_BIND_ADDR=0.0.0.0:8080`.
+- Default public URL changed from `http://localhost:8080` to `http://127.0.0.1:8080`.
+- Example Compose configuration was updated for the `bind_addr` / `public_url` split ([PR #52](https://github.com/scottlz0310/mcp-gateway/pull/52)).
+- CI pipeline hardening ([#43](https://github.com/scottlz0310/mcp-gateway/issues/43), [PR #62](https://github.com/scottlz0310/mcp-gateway/pull/62))
+  - Added `govulncheck` and made the Docker build depend on it.
+  - Added explicit `.golangci.yml` linter configuration.
+  - Pinned golangci-lint tooling and raised the Codecov patch target to 75%.
+- Dependency and GitHub Actions maintenance ([PR #66](https://github.com/scottlz0310/mcp-gateway/pull/66), [PR #67](https://github.com/scottlz0310/mcp-gateway/pull/67)).
+
+### Fixed
+
+- Audience validation accepts ancestor-scoped tokens for route-scoped resources ([#61](https://github.com/scottlz0310/mcp-gateway/issues/61), [PR #63](https://github.com/scottlz0310/mcp-gateway/pull/63))
+  - Fixes `token audience mismatch` 401 errors for clients that acquire a gateway-wide token at `public_url` and then initialize multiple authenticated sub-routes.
+  - Sibling routes, narrower-recorded-vs-broader-requested, and same-prefix-different-segment cases continue to be rejected.
+
+### Documentation
+
+- Documentation restructuring for operations and configuration ([#44](https://github.com/scottlz0310/mcp-gateway/issues/44), [PR #64](https://github.com/scottlz0310/mcp-gateway/pull/64))
+  - Reworked the root README around a front-loaded Getting Started flow.
+  - Added `docs/configuration.md` as the environment variable, `config.yaml`, route, token persistence, reverse proxy, and endpoint reference.
+  - Expanded `docs/operations.md` with start/stop procedures, health checks, structured log field reference, troubleshooting, and migration notes.
+  - Added `docs/README.md` as an index for guides, runbooks, examples, and spike notes.
 
 ### Deprecated
 
 - `MCP_GATEWAY_BASE_URL` / `gateway.base_url` — replaced by `MCP_GATEWAY_PUBLIC_URL` / `gateway.public_url`. A startup warning is emitted when the deprecated setting is detected. The alias will be removed in a future release.
 
-### Migration notes
+### Migration Notes
 
-Docker Compose users **must** add `MCP_GATEWAY_BIND_ADDR: 0.0.0.0:<port>` (replacing
-`<port>` with the port your gateway uses, typically `8080`) so the container
-binds on all interfaces and Docker port-forwarding continues to work. See
-[`docs/operations.md`](docs/operations.md) for the full cutover procedure.
+- Docker Compose users should add `MCP_GATEWAY_BIND_ADDR=0.0.0.0:<port>` so container port forwarding continues to work. Keep `MCP_GATEWAY_PUBLIC_URL` set to the URL visible to the browser and OAuth clients.
+- If TLS terminates before mcp-gateway, keep `MCP_GATEWAY_PUBLIC_URL` / `gateway.public_url` set to the external origin and configure `MCP_GATEWAY_TRUSTED_PROXIES` / `gateway.trusted_proxies` for the immediate proxy peers.
+- Enabling `MCP_GATEWAY_TOKEN_AUDIENCE_STRICT=true` (or `token_audience_strict: true`) is safe only after all active tokens carry audience metadata. Monitor `"token without audience accepted during grace period"` logs before enabling strict mode.
 
-**Per-route PRM (#49 PR-A) — upgrade hints for MCP clients**
+### Roadmap
 
-- MCP clients that already cache `/.well-known/oauth-protected-resource` continue to work unchanged: the gateway-wide PRM is preserved and its `resource` field is unchanged (= `public_url`).
-- Strict spec-2025-06-18 clients that fetch per-route PRM (`/.well-known/oauth-protected-resource{prefix}`) now receive a route-scoped `resource` value (`<public_url>{prefix}`) and should re-acquire tokens scoped to that resource if they previously cached gateway-wide tokens.
-- 401 responses on authenticated, non-root routes now advertise the route-scoped PRM in `WWW-Authenticate.resource_metadata`. Clients that follow this header to discover the AS endpoint will end up with route-scoped tokens automatically; no client-side configuration change is required.
-- No token invalidation is performed by this release. Audience checking will land in PR-C ([#57](https://github.com/scottlz0310/mcp-gateway/issues/57)) with a grace period for previously-issued tokens; review that PR's release notes when it ships.
-
-**Reverse proxy deployments (#49 PR-B)**
-
-- If TLS terminates before mcp-gateway, keep `MCP_GATEWAY_PUBLIC_URL` / `gateway.public_url` set to the external origin clients use.
-- Add `MCP_GATEWAY_TRUSTED_PROXIES` or `gateway.trusted_proxies` with valid CIDR values for the immediate proxy peers (for example `127.0.0.1/32,10.0.0.0/8`).
-- Direct client-supplied `X-Forwarded-*` headers are ignored unless the immediate peer is trusted.
+- Multi-audience tokens (a single opaque token carrying multiple `aud` values, e.g. `["https://gw.example/mcp/a", "https://gw.example/mcp/b"]`) are recorded as a future candidate and are not part of this release.
 
 ## [0.2.0] - 2026-05-05
 
