@@ -10,7 +10,7 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 ### CI / Infrastructure
 
 - CI pipeline hardening ([#43](https://github.com/scottlz0310/mcp-gateway/issues/43))
-  - Added `govulncheck` job that scans dependencies for known Go vulnerabilities (required check; build fails on detected vulnerabilities)
+  - Added `govulncheck` job that scans dependencies for known Go vulnerabilities. The job fails when vulnerabilities are detected, and the `build` job lists `govulncheck` in its `needs:` so Docker image build/publish is blocked when the scan fails. `govulncheck` itself is pinned to `v1.1.4` for reproducibility.
   - Added `.golangci.yml` with explicit linter set: `errcheck`, `govet`, `staticcheck`, `unused`, `revive` (instead of relying on `golangci-lint` defaults)
   - Pinned `golangci-lint` to `v2.12.2` and `golangci/golangci-lint-action` to `v9` (was `version: latest`) for CI reproducibility
   - Raised codecov patch coverage target from 70% to 75%
