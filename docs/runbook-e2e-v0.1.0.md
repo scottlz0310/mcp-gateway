@@ -778,7 +778,8 @@ docker compose up -d mcp-gateway
 
 ## 8. 参考
 
-- [README.md](../README.md) — 通常運用ドキュメント
+- [README.md](../README.md) — クイックスタートと概要
+- [docs/operations.md](operations.md) — 通常運用ドキュメント
 - [CHANGELOG.md](../CHANGELOG.md) — v0.1.0 変更点
 - [docs/spike-18-copilot-api-auth.md](spike-18-copilot-api-auth.md) — Copilot API 認証調査
 - [tasks.md](../tasks.md) — タスク全体管理（v0.2.0 ロードマップ含む）

@@ -5,6 +5,14 @@
 
 ## [Unreleased]
 
+### Documentation
+
+- 運用・設定ドキュメントの再構成（[#44](https://github.com/scottlz0310/mcp-gateway/issues/44)）
+  - root README を Getting Started 優先の構成に整理し、詳細リファレンスを本文から分離
+  - `docs/operations.md` に起動停止、ヘルスチェック、構造化 `slog` フィールド一覧、よくあるトラブルと復旧手順、reverse proxy 移行メモを追加
+  - `docs/configuration.md` を追加し、環境変数、`config.yaml`、route、token persistence、reverse proxy、endpoint の詳細リファレンスを集約
+  - `docs/README.md` を追加し、guide、runbook、example、spike note への入口を整理
+
 ### Added
 
 - すべてのトークン取得フローで RFC 8707 `resource` パラメータをサポート（[#57](https://github.com/scottlz0310/mcp-gateway/issues/57), #49 PR-C）

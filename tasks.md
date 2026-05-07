@@ -11,7 +11,7 @@
 
 ---
 
-## 推奨消化順（2026-05-05 更新）
+## 推奨消化順（2026-05-07 更新）
 
 ### v0.1.0 リリース済み（2026-04-30）
 
@@ -43,12 +43,12 @@ v0.2.0 の実装項目はすべてマージ済み。v0.1.0 E2E ランブック�
 
 | 優先 | 項目 | 種別 | Issue | 状態 |
 |---|---|---|---|---|
-| 1 | **観測性整備**（構造化ログ統一・基礎メトリクス） | enhancement | [#42](https://github.com/scottlz0310/mcp-gateway/issues/42) | 🗒️ 計画段階 |
+| 1 | **観測性整備**（構造化ログ統一・基礎メトリクス） | enhancement | [#42](https://github.com/scottlz0310/mcp-gateway/issues/42) | ✅ [PR #47](https://github.com/scottlz0310/mcp-gateway/pull/47) マージ済み（2026-05-06） |
 | 2 | **CI 強化**（govulncheck・golangci-lint 設定・カバレッジ閾値） | infra | [#43](https://github.com/scottlz0310/mcp-gateway/issues/43) | ✅ [PR #62](https://github.com/scottlz0310/mcp-gateway/pull/62) マージ済み（2026-05-07） |
-| 3 | **ドキュメント整備**（運用ガイド・README 構造見直し） | docs | [#44](https://github.com/scottlz0310/mcp-gateway/issues/44) | 🗒️ 計画段階 |
-| 4 | **per-route PRM・reverse proxy 対応**（MCP Auth Spec 2025-06-18 準拠） | enhancement | [#49](https://github.com/scottlz0310/mcp-gateway/issues/49) | ✅ PR-A [#58](https://github.com/scottlz0310/mcp-gateway/pull/58) マージ済み / 🚧 PR-B [#56](https://github.com/scottlz0310/mcp-gateway/issues/56) 実装中 / PR-C [#57](https://github.com/scottlz0310/mcp-gateway/issues/57) 起票済み |
+| 3 | **ドキュメント整備**（運用ガイド・README 構造見直し） | docs | [#44](https://github.com/scottlz0310/mcp-gateway/issues/44) | ✅ 本PRで実装済み（operations/configuration/docs index/README 整理） |
+| 4 | **per-route PRM・reverse proxy 対応**（MCP Auth Spec 2025-06-18 準拠） | enhancement | [#49](https://github.com/scottlz0310/mcp-gateway/issues/49) | ✅ PR-A [#58](https://github.com/scottlz0310/mcp-gateway/pull/58) / PR-B [#59](https://github.com/scottlz0310/mcp-gateway/pull/59) / PR-C [#60](https://github.com/scottlz0310/mcp-gateway/pull/60) マージ済み（2026-05-06） |
 | 5 | **保留 issue 最終判断**（#3/#4/#5/#6） | triage | [#45](https://github.com/scottlz0310/mcp-gateway/issues/45) | ✅ 完了（2026-05-07） |
-| 6 | **audience 検証の祖先一致対応**（Codex 互換性 fix） | bug | [#61](https://github.com/scottlz0310/mcp-gateway/issues/61) | 🚧 [PR #63](https://github.com/scottlz0310/mcp-gateway/pull/63) レビュー対応中（実環境検証完了） |
+| 6 | **audience 検証の祖先一致対応**（Codex 互換性 fix） | bug | [#61](https://github.com/scottlz0310/mcp-gateway/issues/61) | ✅ [PR #63](https://github.com/scottlz0310/mcp-gateway/pull/63) マージ済み（2026-05-07） |
 | 7 | **v0.3.0 リリース** | release | — | 上記完了後 |
 
 ### v0.4.0 延期（#45 トリアージ 2026-05-07 確定）
@@ -451,86 +451,89 @@ v0.1.0 リリース後の次フェーズ。**コードベースの大規模追�
 
 #### v0.2.0-RM1: v0.1.0 E2E 動作検証（リリースゲート）
 
-**状態**: 🎯 次着手
-**成果物**: [`docs/runbook-e2e-v0.1.0.md`](docs/runbook-e2e-v0.1.0.md)（作成済み・実行待ち）
+**状態**: ✅ 完了（v0.2.0 リリースゲート通過）
+**成果物**: [`docs/runbook-e2e-v0.1.0.md`](docs/runbook-e2e-v0.1.0.md)
 
 v0.1.0 で大幅に増えた永続化・暗号化・wizard まわりを実環境（Docker Compose）で踏破する。
 すべて green になったら v0.2.0 リリース判断材料の最大ピースが揃う。
 
 ##### サブタスク
 
-- [ ] ランブックに従い E2E 動作検証を実施
-- [ ] 失敗・回帰があれば fix PR を切り、ランブックに「観測された挙動」セクションを追記
-- [ ] CHANGELOG.md に「v0.1.0 E2E 検証完了」セクションを追加
+- [x] ランブックに従い E2E 動作検証を実施
+- [x] 失敗・回帰があれば fix PR を切り、ランブックに「観測された挙動」セクションを追記
+- [x] CHANGELOG.md に「v0.1.0 E2E 検証完了」セクションを追加
 
 ---
 
 #### v0.2.0-RM2: 観測性整備
 
-**状態**: 🗒️ 計画段階
+**状態**: ✅ 完了（#42 / PR #47 マージ済み）
 **目的**: 障害時に「何が起きたか」を log だけで追えるようにする。メトリクスは最小限。
 
 ##### 想定スコープ
 
-- [ ] 構造化ログ（`log/slog`）の出力フィールドを統一（request_id・route・upstream・latency_ms・status）
-- [ ] `internal/middleware/` への request_id 注入と propagation（X-Request-ID ヘッダ）
-- [ ] エラー分類タグ（`err_kind=upstream_timeout|token_expired|...`）の最小限の整備
-- [ ] 必要性が確認できた場合のみ Prometheus エンドポイント追加（YAGNI 判定優先）
-- [ ] 個別 issue 化は着手直前に判断
+- [x] 構造化ログ（`log/slog`）の出力フィールドを統一（`method`・`path`・`status`・`latency_ms`・`remote_addr`）
+- [x] HTTP request logger middleware を `internal/middleware/` に追加
+- [x] 認証・proxy・setup 周辺の主要イベントを `slog` に統一
+- Deferred: request_id / X-Request-ID propagation は #42 の確定スコープ外として未実装（必要化した時点で別 issue）
+- Deferred: Prometheus エンドポイントは YAGNI 判定で未実装（必要化した時点で別 issue）
 
 ---
 
 #### v0.2.0-RM3: CI 強化
 
-**状態**: 🗒️ 計画段階
+**状態**: ✅ 完了（#43 / PR #62 マージ済み）
 **目的**: 変更時の安全性をプラットフォーム任せにし、レビュー負荷を下げる。
 
 ##### 想定スコープ
 
-- [ ] `go test -coverprofile` をワークフローに組み込み・閾値（暫定 60%）を設定
-- [ ] `golangci-lint` の有効ルール拡張（gosec・errcheck・govet 強化）
-- [ ] govulncheck をワークフローに追加
-- [ ] 個別 issue 化は着手直前に判断
+- [x] `go test -coverprofile` をワークフローに組み込み・Codecov patch target 75% を設定
+- [x] `golangci-lint` 設定を追加（`errcheck`・`govet`・`staticcheck`・`unused`・`revive`）
+- [x] `govulncheck` をワークフローに追加
+- [x] 個別 issue #43 と PR #62 で完了
 
 ---
 
 #### v0.2.0-RM4: ドキュメント整備
 
-**状態**: 🗒️ 計画段階
+**状態**: ✅ 本PRで実装済み（#44）
 **目的**: README が機能追加で肥大化しているため、構造を再設計する。
 
 ##### 想定スコープ
 
-- [ ] README.md の章立て見直し（クイックスタート・運用・トラブルシュートを分離）
-- [ ] Setup wizard / config 暗号化 / token 永続化のクックブックを `docs/` に分離
+- [x] README.md / README.ja.md の章立て見直し（Getting Started を冒頭へ移動）
+- [x] 運用・トラブルシュートを `docs/operations.md` に分離
+- [x] 設定リファレンスを `docs/configuration.md` に分離
+- [x] `docs/README.md` を追加
+- [ ] PR マージ後に #44 を close
 - [ ] CHANGELOG.md からリリースノートを `docs/release-notes/` に分離（v0.1.0 から）
-- [ ] 個別 issue 化は着手直前に判断
+- [x] 個別 issue #44 として起票済み
 
 ---
 
 #### v0.2.0-RM5: 保留 issue 最終判断（triage）
 
-**状態**: 🗒️ 計画段階
+**状態**: ✅ 完了（#45 トリアージ 2026-05-07）
 
 ##### 検討対象
 
-- [ ] **#3** fly.io 調査 — 結論 Issue 本文に記載済み・open のままで実害は無いが、close するか判断
-- [ ] **#4** fly.io OAuth — fly.io との直接調整見込みが立たない場合は close
-- [ ] **#5** env var 移行（`OAUTH_*` 系） — 追加プロバイダ未定のため close 候補
-- [ ] **#6** 汎用 OIDC — Entra ID 不適合・対象 MCP 未定のため close 候補
+- [x] **#3** fly.io 調査 — Close (completed)
+- [x] **#4** fly.io OAuth — Close (wontfix)
+- Deferred: **#5** env var 移行（`OAUTH_*` 系） — v0.4.0 延期
+- Deferred: **#6** 汎用 OIDC — v0.4.0 延期
 
-各 issue について「open 維持 / close」を判断し、close する場合は判断理由をコメントで残す。
+各 issue について「open 維持 / close」を判断し、close する場合は判断理由をコメントで残した。
 
 ---
 
 #### v0.2.0-RM6: v0.2.0 リリース
 
-**状態**: 🗒️ RM1〜RM5 完了後
+**状態**: ✅ 完了（2026-05-05）
 
-- [ ] CHANGELOG.md に v0.2.0 セクションを記載
-- [ ] tag `v0.2.0` を作成・push
-- [ ] GitHub Release 公開
-- [ ] tasks.md に v0.3.0 の枠（あれば）を追加
+- [x] CHANGELOG.md に v0.2.0 セクションを記載
+- [x] tag `v0.2.0` を作成・push
+- [x] GitHub Release 公開
+- [x] tasks.md に v0.3.0 の枠を追加
 
 ---
 

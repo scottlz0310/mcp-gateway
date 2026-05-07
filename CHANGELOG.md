@@ -7,6 +7,14 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Documentation
+
+- Documentation restructuring for operations and configuration ([#44](https://github.com/scottlz0310/mcp-gateway/issues/44))
+  - Reworked the root README around a front-loaded Getting Started flow and moved detailed reference material out of the main page.
+  - Expanded `docs/operations.md` with start/stop procedures, health checks, structured `slog` field reference, common troubleshooting, and reverse-proxy migration notes.
+  - Added `docs/configuration.md` as the detailed environment variable, `config.yaml`, route, token persistence, reverse proxy, and endpoint reference.
+  - Added `docs/README.md` as an index for guides, runbooks, examples, and spike notes.
+
 ### Fixed
 
 - Audience validation accepts ancestor-scoped tokens for route-scoped resources ([#61](https://github.com/scottlz0310/mcp-gateway/issues/61))
