@@ -44,7 +44,7 @@
   - `public_url` で gateway-wide token を取得した client が複数の authenticated sub-route を初期化する場合の `token audience mismatch` 401 を解消
   - sibling route、narrower-recorded-vs-broader-requested、同一 prefix 風の別 segment は引き続き拒否
 
-### Documentation
+### ドキュメント
 
 - 運用・設定ドキュメントの再構成（[#44](https://github.com/scottlz0310/mcp-gateway/issues/44), [PR #64](https://github.com/scottlz0310/mcp-gateway/pull/64)）
   - root README を Getting Started 優先の構成に整理
@@ -52,7 +52,7 @@
   - `docs/operations.md` に起動停止、health check、構造化ログフィールド、troubleshooting、migration notes を追加
   - `docs/README.md` を追加し、guide、runbook、example、spike note への入口を整理
 
-### Deprecated
+### 非推奨
 
 - `MCP_GATEWAY_BASE_URL` / `gateway.base_url` は `MCP_GATEWAY_PUBLIC_URL` / `gateway.public_url` に置き換え。deprecated setting 検出時は起動時 warning を出力し、将来リリースで削除予定。
 
