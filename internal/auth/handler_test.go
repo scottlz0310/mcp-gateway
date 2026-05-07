@@ -341,6 +341,68 @@ func TestValidateTokenAudienceMismatch(t *testing.T) {
 	}
 }
 
+// TestValidateTokenAudiencePrefixMatching covers the gateway-wide → route-scoped
+// acceptance path required by MCP clients (e.g. Codex) that acquire a single
+// token at the public URL and then call multiple authenticated sub-routes.
+func TestValidateTokenAudiencePrefixMatching(t *testing.T) {
+	cases := []struct {
+		name      string
+		recorded  string
+		requested string
+		wantErr   error
+	}{
+		{
+			name:      "broader_recorded_accepts_narrower_route",
+			recorded:  "http://localhost:8080",
+			requested: "http://localhost:8080/mcp/github",
+		},
+		{
+			name:      "exact_match",
+			recorded:  "http://localhost:8080/mcp/github",
+			requested: "http://localhost:8080/mcp/github",
+		},
+		{
+			name:      "sibling_route_rejected",
+			recorded:  "http://localhost:8080/mcp/github",
+			requested: "http://localhost:8080/mcp/copilot-review",
+			wantErr:   ErrTokenAudienceMismatch,
+		},
+		{
+			name:      "narrower_recorded_rejects_broader_request",
+			recorded:  "http://localhost:8080/mcp/github",
+			requested: "http://localhost:8080",
+			wantErr:   ErrTokenAudienceMismatch,
+		},
+		{
+			name:      "same_prefix_different_path_rejected",
+			recorded:  "http://localhost:8080/mcp/github",
+			requested: "http://localhost:8080/mcp/github-other",
+			wantErr:   ErrTokenAudienceMismatch,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHandler(t)
+			h.store.RegisterTokenAudience("token", tc.recorded)
+			h.store.CacheToken("token", "alice", "")
+
+			subject, err := h.ValidateToken(context.Background(), "token", tc.requested)
+			if tc.wantErr == nil {
+				if err != nil {
+					t.Fatalf("got err %v, want nil", err)
+				}
+				if subject != "alice" {
+					t.Errorf("subject: got %q, want alice", subject)
+				}
+				return
+			}
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("got err %v, want %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestValidateTokenLegacyGraceAndStrictModes(t *testing.T) {
 	const audience = "http://localhost:8080/mcp/foo"
 	var calls int

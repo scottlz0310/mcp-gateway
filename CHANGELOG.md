@@ -7,6 +7,14 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Audience validation accepts ancestor-scoped tokens for route-scoped resources ([#61](https://github.com/scottlz0310/mcp-gateway/issues/61))
+  - `validateAudience` now accepts a request when any recorded token audience equals or is a strict ancestor (sub-path) of the requested route audience, reusing the existing `isSubAudience` semantics.
+  - Resolves `token audience mismatch` 401 errors for MCP clients (e.g. Codex) that acquire a single gateway-wide token at `public_url` and then initialize multiple authenticated sub-routes (`/mcp/github`, `/mcp/copilot-review`, …). Without this fix, every sub-route required a separate token acquisition flow, which clients in the wild do not implement.
+  - Sibling routes, narrower-recorded-vs-broader-requested, and same-prefix-different-segment cases continue to be rejected. Legacy (no-audience) token grace-period behavior is unchanged.
+  - Verified end-to-end with Codex against a Compose stack (`mcp-gateway` + `github-mcp` + `copilot-review-mcp`).
+
 ### CI / Infrastructure
 
 - CI pipeline hardening ([#43](https://github.com/scottlz0310/mcp-gateway/issues/43))

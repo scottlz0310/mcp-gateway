@@ -747,12 +747,20 @@ func (h *Handler) resolveRequestedAudience(resources []string) (string, error) {
 	return resource, nil
 }
 
+// validateAudience accepts the requested audience when any recorded audience
+// equals it or is a strict ancestor (gateway-wide → route-scoped). The latter
+// covers MCP clients (e.g. Codex) that acquire a single gateway-wide token and
+// then call multiple authenticated sub-routes; rejecting them on exact match
+// would force re-authentication per route, which clients in the wild do not
+// implement.
 func (h *Handler) validateAudience(token string, record TokenRecord, audience string) error {
 	if audience == "" {
 		return nil
 	}
-	if record.HasAudience(audience) {
-		return nil
+	for _, recorded := range record.Audiences {
+		if isSubAudience(audience, recorded) {
+			return nil
+		}
 	}
 	if len(record.Audiences) == 0 {
 		if h.cfg.TokenAudienceStrict {
