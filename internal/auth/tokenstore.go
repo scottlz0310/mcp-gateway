@@ -15,9 +15,16 @@ import (
 
 // TokenRecord is the cached metadata for an access token. Audiences is empty
 // for legacy entries written before per-route audience metadata existed.
+//
+// ProviderRefreshToken and ProviderAccessExpiry are populated when the upstream
+// OAuth provider issues short-lived (expiring) tokens. ProviderAccessExpiry is
+// zero when the provider did not advertise an expiry hint; in that case the
+// gateway does not attempt rotation for this token.
 type TokenRecord struct {
-	Subject   string
-	Audiences []string
+	Subject              string
+	Audiences            []string
+	ProviderRefreshToken string
+	ProviderAccessExpiry time.Time
 }
 
 // HasAudience reports whether the token record is scoped to audience.
@@ -38,6 +45,11 @@ type TokenStore interface {
 	// Re-saving an existing non-expired token merges audiences and preserves a
 	// previously cached subject when subject is empty.
 	Save(token, subject string, audiences []string, expiresAt time.Time) error
+	// SaveProviderRefresh attaches GitHub-style provider refresh metadata to an
+	// existing entry without disturbing subject/audiences/expiresAt. The entry
+	// must already exist (created by Save); otherwise the call is a no-op.
+	// Passing an empty providerRefreshToken clears the metadata.
+	SaveProviderRefresh(token, providerRefreshToken string, providerAccessExpiry time.Time) error
 	// Lookup returns metadata for a non-expired token, or (zero, false).
 	Lookup(token string) (TokenRecord, bool)
 	// Delete removes a single token entry immediately.
@@ -56,9 +68,11 @@ func tokenKey(token string) string {
 // ── in-memory implementation ────────────────────────────────────────────────
 
 type memEntry struct {
-	subject   string
-	audiences []string
-	expiresAt time.Time
+	subject              string
+	audiences            []string
+	expiresAt            time.Time
+	providerRefreshToken string
+	providerAccessExpiry time.Time
 }
 
 type memTokenStore struct {
@@ -89,6 +103,23 @@ func (m *memTokenStore) Save(token, subject string, audiences []string, expiresA
 	return nil
 }
 
+// SaveProviderRefresh attaches provider refresh metadata to an existing entry.
+// If no entry exists (or it has expired), the call is a no-op so we never
+// resurrect a swept token by side effect.
+func (m *memTokenStore) SaveProviderRefresh(token, providerRefreshToken string, providerAccessExpiry time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := tokenKey(token)
+	entry, ok := m.entries[key]
+	if !ok || time.Now().After(entry.expiresAt) {
+		return nil
+	}
+	entry.providerRefreshToken = providerRefreshToken
+	entry.providerAccessExpiry = providerAccessExpiry
+	m.entries[key] = entry
+	return nil
+}
+
 func (m *memTokenStore) Lookup(token string) (TokenRecord, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -96,7 +127,12 @@ func (m *memTokenStore) Lookup(token string) (TokenRecord, bool) {
 	if !ok || time.Now().After(e.expiresAt) {
 		return TokenRecord{}, false
 	}
-	return TokenRecord{Subject: e.subject, Audiences: cloneStrings(e.audiences)}, true
+	return TokenRecord{
+		Subject:              e.subject,
+		Audiences:            cloneStrings(e.audiences),
+		ProviderRefreshToken: e.providerRefreshToken,
+		ProviderAccessExpiry: e.providerAccessExpiry,
+	}, true
 }
 
 func (m *memTokenStore) Delete(token string) error {
@@ -122,10 +158,16 @@ func (m *memTokenStore) Sweep() error {
 
 // fileEntry is the on-disk representation of a single token record.
 // The map key is tokenKey(rawToken), so raw tokens never appear in the file.
+//
+// ProviderRefreshToken is stored in plaintext because the gateway must replay
+// it to the upstream OAuth provider on rotation; the file is written with
+// mode 0600 so the same protections that apply to access tokens apply here.
 type fileEntry struct {
-	Subject   string    `json:"s"`
-	Audiences []string  `json:"aud,omitempty"`
-	ExpiresAt time.Time `json:"e"`
+	Subject              string    `json:"s"`
+	Audiences            []string  `json:"aud,omitempty"`
+	ExpiresAt            time.Time `json:"e"`
+	ProviderRefreshToken string    `json:"prt,omitempty"`
+	ProviderAccessExpiry time.Time `json:"pae,omitempty"`
 }
 
 type fileTokenStore struct {
@@ -214,6 +256,29 @@ func (f *fileTokenStore) Save(token, subject string, audiences []string, expires
 	return f.flush()
 }
 
+// SaveProviderRefresh updates the provider refresh metadata on an existing
+// entry. If the entry is missing or expired the call is a no-op and the file
+// is NOT rewritten. Failure to flush rolls back the in-memory mutation so
+// disk and memory remain consistent.
+func (f *fileTokenStore) SaveProviderRefresh(token, providerRefreshToken string, providerAccessExpiry time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := tokenKey(token)
+	entry, ok := f.entries[key]
+	if !ok || time.Now().After(entry.ExpiresAt) {
+		return nil
+	}
+	previous := entry
+	entry.ProviderRefreshToken = providerRefreshToken
+	entry.ProviderAccessExpiry = providerAccessExpiry
+	f.entries[key] = entry
+	if err := f.flush(); err != nil {
+		f.entries[key] = previous
+		return err
+	}
+	return nil
+}
+
 func (f *fileTokenStore) Lookup(token string) (TokenRecord, bool) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
@@ -221,7 +286,12 @@ func (f *fileTokenStore) Lookup(token string) (TokenRecord, bool) {
 	if !ok || time.Now().After(e.ExpiresAt) {
 		return TokenRecord{}, false
 	}
-	return TokenRecord{Subject: e.Subject, Audiences: cloneStrings(e.Audiences)}, true
+	return TokenRecord{
+		Subject:              e.Subject,
+		Audiences:            cloneStrings(e.Audiences),
+		ProviderRefreshToken: e.ProviderRefreshToken,
+		ProviderAccessExpiry: e.ProviderAccessExpiry,
+	}, true
 }
 
 func (f *fileTokenStore) Delete(token string) error {

@@ -12,16 +12,17 @@ import (
 
 // mockValidator implements TokenValidator for testing.
 type mockValidator struct {
-	login       string
-	err         error
-	gotToken    string
-	gotAudience string
+	login        string
+	rotatedToken string
+	err          error
+	gotToken     string
+	gotAudience  string
 }
 
-func (m *mockValidator) ValidateToken(_ context.Context, token, audience string) (string, error) {
+func (m *mockValidator) ValidateToken(_ context.Context, token, audience string) (string, string, error) {
 	m.gotToken = token
 	m.gotAudience = audience
-	return m.login, m.err
+	return m.login, m.rotatedToken, m.err
 }
 
 // upstreamError satisfies the upstreamErrorer interface.
@@ -99,6 +100,43 @@ func TestAuthValidToken(t *testing.T) {
 	}
 	if gotToken != "my-token" {
 		t.Errorf("token in context: got %q, want %q", gotToken, "my-token")
+	}
+}
+
+// TestAuthRotatedTokenReplacesContextToken verifies that when the validator
+// reports a rotated access token, the Auth middleware substitutes it for the
+// original bearer credential in the request context so that the reverse
+// proxy forwards the fresh value to the upstream MCP server.
+func TestAuthRotatedTokenReplacesContextToken(t *testing.T) {
+	cases := []struct {
+		name         string
+		rotatedToken string
+		wantToken    string
+	}{
+		{name: "no rotation: original token preserved", rotatedToken: "", wantToken: "my-token"},
+		{name: "rotation: rotated token wins", rotatedToken: "new-token", wantToken: "new-token"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotToken string
+			next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotToken = TokenFromContext(r.Context())
+				w.WriteHeader(http.StatusOK)
+			})
+			h := Auth(&mockValidator{login: "alice", rotatedToken: tc.rotatedToken})(next)
+			r := httptest.NewRequest(http.MethodGet, "/mcp", nil)
+			r.Header.Set("Authorization", "Bearer my-token")
+			w := httptest.NewRecorder()
+
+			h.ServeHTTP(w, r)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("status: got %d, want 200", w.Code)
+			}
+			if gotToken != tc.wantToken {
+				t.Errorf("token in context: got %q, want %q", gotToken, tc.wantToken)
+			}
+		})
 	}
 }
 

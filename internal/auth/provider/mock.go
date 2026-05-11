@@ -14,7 +14,8 @@ type Mock struct {
 	ClientIDValue    string
 	ScopesValue      string
 	AuthorizeURLFunc func(state, codeChallenge string) string
-	ExchangeCodeFunc func(ctx context.Context, code string) (string, []string, error)
+	ExchangeCodeFunc func(ctx context.Context, code string) (TokenResponse, error)
+	RefreshTokenFunc func(ctx context.Context, refreshToken string) (TokenResponse, error)
 	ValidateFunc     func(ctx context.Context, token string) (Identity, error)
 }
 
@@ -37,11 +38,21 @@ func (m *Mock) AuthorizeURL(state, codeChallenge string) string {
 	return "https://mock.example.com/authorize?" + q.Encode()
 }
 
-func (m *Mock) ExchangeCode(ctx context.Context, code string) (string, []string, error) {
+func (m *Mock) ExchangeCode(ctx context.Context, code string) (TokenResponse, error) {
 	if m.ExchangeCodeFunc != nil {
 		return m.ExchangeCodeFunc(ctx, code)
 	}
-	return "mock-token-for-" + code, []string{"mock"}, nil
+	return TokenResponse{
+		AccessToken: "mock-token-for-" + code,
+		Scopes:      []string{"mock"},
+	}, nil
+}
+
+func (m *Mock) RefreshToken(ctx context.Context, refreshToken string) (TokenResponse, error) {
+	if m.RefreshTokenFunc != nil {
+		return m.RefreshTokenFunc(ctx, refreshToken)
+	}
+	return TokenResponse{}, ErrRefreshNotSupported
 }
 
 func (m *Mock) ValidateToken(ctx context.Context, token string) (Identity, error) {

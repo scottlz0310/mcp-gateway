@@ -62,7 +62,22 @@ type Config struct {
 	// TokenAudienceStrict rejects tokens without audience metadata. The default
 	// false value is a grace mode for tokens issued before this metadata existed.
 	TokenAudienceStrict bool
+	// GitHubRefreshEnabled turns on transparent rotation of GitHub-issued access
+	// tokens when the upstream provider advertises a refresh token and an
+	// expires_in hint (OAuth Apps with "Expire user authorization tokens"
+	// enabled). When the upstream is configured for non-expiring tokens this
+	// flag has no effect; it is safe to leave on.
+	GitHubRefreshEnabled bool
+	// GitHubRefreshLeeway is the lead time before access-token expiry at which
+	// rotation is attempted on the next ValidateToken call. Defaults to 5 min.
+	GitHubRefreshLeeway time.Duration
 }
+
+// defaultGitHubRefreshLeeway is the head-start used when GitHubRefreshLeeway
+// is unset. Five minutes covers typical clock skew plus the longest realistic
+// request batch served by an upstream MCP route while keeping the rotation
+// window narrow enough to amortize against the GitHub token endpoint.
+const defaultGitHubRefreshLeeway = 5 * time.Minute
 
 // Handler implements the OAuth façade endpoints, delegating provider-specific
 // operations to a provider.Provider.
@@ -131,6 +146,25 @@ func NewHandler(cfg Config, p provider.Provider) (*Handler, error) {
 // refreshTokenTTL returns the lifetime for gateway-issued refresh tokens.
 func (h *Handler) refreshTokenTTL() time.Duration {
 	return h.cfg.ExpiresIn + refreshTokenGracePeriod
+}
+
+// providerAccessExpiry converts a provider-advertised expires_in duration into
+// an absolute time. A zero or negative input means "no expiry hint" and is
+// surfaced as a zero time.Time so downstream rotation logic can short-circuit.
+func providerAccessExpiry(expiresIn time.Duration) time.Time {
+	if expiresIn <= 0 {
+		return time.Time{}
+	}
+	return time.Now().Add(expiresIn)
+}
+
+// githubRefreshLeeway returns the configured leeway, falling back to the
+// default when unset.
+func (h *Handler) githubRefreshLeeway() time.Duration {
+	if h.cfg.GitHubRefreshLeeway > 0 {
+		return h.cfg.GitHubRefreshLeeway
+	}
+	return defaultGitHubRefreshLeeway
 }
 
 // ProtectedResourceMetadata implements RFC 9728 OAuth 2.0 Protected Resource
@@ -288,14 +322,14 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	accessToken, scopes, err := h.provider.ExchangeCode(r.Context(), code)
+	tokens, err := h.provider.ExchangeCode(r.Context(), code)
 	if err != nil {
 		slog.Error("OAuth token exchange failed", "provider", h.provider.Name(), "err", err)
 		http.Error(w, "token exchange failed", http.StatusBadGateway)
 		return
 	}
 
-	internalCode, err := h.store.CompleteCallback(state, accessToken, joinScopes(scopes))
+	internalCode, err := h.store.CompleteCallback(state, tokens.AccessToken, joinScopes(tokens.Scopes), tokens.RefreshToken, providerAccessExpiry(tokens.AccessTokenExpiresIn))
 	if err != nil {
 		slog.Error("session completion failed", "err", err)
 		http.Error(w, "invalid state", http.StatusBadRequest)
@@ -337,7 +371,7 @@ func (h *Handler) Token(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) tokenAuthCode(w http.ResponseWriter, r *http.Request) {
-	token, grantedScope, audience, err := h.store.ExchangeCode(
+	result, err := h.store.ExchangeCode(
 		r.FormValue("code"),
 		r.FormValue("redirect_uri"),
 		r.FormValue("code_verifier"),
@@ -347,12 +381,13 @@ func (h *Handler) tokenAuthCode(w http.ResponseWriter, r *http.Request) {
 		oauthError(w, "invalid_grant", err.Error(), http.StatusBadRequest)
 		return
 	}
-	h.store.RegisterTokenAudience(token, audience)
-	refreshToken, rtErr := h.store.CreateRefreshToken(token, audience, h.refreshTokenTTL())
+	h.store.RegisterTokenAudience(result.AccessToken, result.Audience)
+	h.store.RecordProviderRefresh(result.AccessToken, result.ProviderRefreshToken, result.ProviderAccessExpiry)
+	refreshToken, rtErr := h.store.CreateRefreshToken(result.AccessToken, result.Audience, h.refreshTokenTTL())
 	if rtErr != nil {
 		slog.Warn("failed to create refresh token", "err", rtErr)
 	}
-	h.writeTokenResponse(w, token, grantedScope, refreshToken)
+	h.writeTokenResponse(w, result.AccessToken, result.Scope, refreshToken)
 }
 
 func (h *Handler) tokenDeviceGrant(w http.ResponseWriter, r *http.Request) {
@@ -419,6 +454,7 @@ func (h *Handler) tokenDeviceGrant(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.store.RegisterTokenAudience(result.AccessToken, completed.Audience)
+		h.store.RecordProviderRefresh(result.AccessToken, result.RefreshToken, providerAccessExpiry(result.AccessExpiresIn))
 		refreshToken, rtErr := h.store.CreateRefreshToken(result.AccessToken, completed.Audience, h.refreshTokenTTL())
 		if rtErr != nil {
 			slog.Warn("failed to create refresh token", "err", rtErr)
@@ -603,9 +639,11 @@ type githubDeviceCodeResp struct {
 }
 
 type githubDevicePollResult struct {
-	AccessToken string
-	Scope       string
-	Error       string // GitHub error code; empty on success
+	AccessToken     string
+	Scope           string
+	RefreshToken    string
+	AccessExpiresIn time.Duration
+	Error           string // GitHub error code; empty on success
 }
 
 func (h *Handler) startGitHubDeviceFlow(ctx context.Context, scope string) (*githubDeviceCodeResp, error) {
@@ -673,10 +711,12 @@ func (h *Handler) pollGitHubDeviceToken(ctx context.Context, githubDevCode strin
 	}
 
 	var raw struct {
-		AccessToken string `json:"access_token"`
-		Scope       string `json:"scope"`
-		TokenType   string `json:"token_type"`
-		Error       string `json:"error"`
+		AccessToken  string `json:"access_token"`
+		Scope        string `json:"scope"`
+		TokenType    string `json:"token_type"`
+		RefreshToken string `json:"refresh_token"`
+		ExpiresIn    int64  `json:"expires_in"`
+		Error        string `json:"error"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 		return nil, fmt.Errorf("decoding GitHub device token response: %w", err)
@@ -685,38 +725,116 @@ func (h *Handler) pollGitHubDeviceToken(ctx context.Context, githubDevCode strin
 		return nil, fmt.Errorf("GitHub device token response: no access_token and no error field")
 	}
 	return &githubDevicePollResult{
-		AccessToken: raw.AccessToken,
-		Scope:       raw.Scope,
-		Error:       raw.Error,
+		AccessToken:     raw.AccessToken,
+		Scope:           raw.Scope,
+		RefreshToken:    raw.RefreshToken,
+		AccessExpiresIn: time.Duration(raw.ExpiresIn) * time.Second,
+		Error:           raw.Error,
 	}, nil
 }
 
 // ValidateToken checks the bearer token via the provider (with cache) and
 // validates that its stored audience matches the protected resource.
 // The returned subject is the Identity.Subject from the provider.
-func (h *Handler) ValidateToken(ctx context.Context, token, audience string) (string, error) {
+//
+// rotatedToken is non-empty when GitHub-issued rotation succeeded on this call.
+// Callers (the auth middleware) MUST substitute the original token with the
+// rotated value in any subsequent context propagation (proxy forwarding,
+// upstream request) so that the upstream sees the fresh access token.
+//
+//nolint:nonamedreturns // named returns document the rotation contract.
+func (h *Handler) ValidateToken(ctx context.Context, token, audience string) (subject, rotatedToken string, err error) {
 	audience = normalizeAudience(audience)
 	record, cached := h.store.LookupToken(token)
 	if cached {
 		if err := h.validateAudience(token, record, audience); err != nil {
-			return "", err
+			return "", "", err
+		}
+		if rotated, newSubject, ok := h.tryGitHubRotation(ctx, token, record, audience); ok {
+			return newSubject, rotated, nil
 		}
 		if record.Subject != "" {
-			return record.Subject, nil
+			return record.Subject, "", nil
 		}
 	} else if err := h.validateAudience(token, TokenRecord{}, audience); err != nil {
-		return "", err
+		return "", "", err
 	}
-	id, err := h.provider.ValidateToken(ctx, token)
-	if err != nil {
-		return "", err
+	id, valErr := h.provider.ValidateToken(ctx, token)
+	if valErr != nil {
+		return "", "", valErr
 	}
 	cacheAudience := ""
 	if cached && record.HasAudience(audience) {
 		cacheAudience = audience
 	}
 	h.store.CacheToken(token, id.Subject, cacheAudience)
-	return id.Subject, nil
+	return id.Subject, "", nil
+}
+
+// tryGitHubRotation attempts to rotate a GitHub-issued access token when its
+// provider expiry is within the configured leeway window.  It returns the new
+// token and (best-effort) subject on success; on any failure or when rotation
+// is not applicable, the second return is false and the caller continues with
+// the original token.
+//
+// Failures are intentionally non-fatal: rotation is a best-effort optimization,
+// and a stale token will surface as an upstream 401 which the existing cache
+// invalidation path already handles. Logging "rotation_failed" lets operators
+// detect chronic misconfiguration (e.g. revoked refresh token).
+func (h *Handler) tryGitHubRotation(ctx context.Context, token string, record TokenRecord, audience string) (newToken, subject string, ok bool) {
+	if !h.cfg.GitHubRefreshEnabled {
+		return "", "", false
+	}
+	if record.ProviderRefreshToken == "" || record.ProviderAccessExpiry.IsZero() {
+		return "", "", false
+	}
+	if time.Until(record.ProviderAccessExpiry) > h.githubRefreshLeeway() {
+		return "", "", false
+	}
+	tokens, err := h.provider.RefreshToken(ctx, record.ProviderRefreshToken)
+	if err != nil {
+		if errors.Is(err, provider.ErrRefreshNotSupported) {
+			return "", "", false
+		}
+		slog.Warn("rotation_failed",
+			"token_hash", tokenFingerprint(token),
+			"err", err,
+		)
+		return "", "", false
+	}
+	if tokens.AccessToken == "" {
+		slog.Warn("rotation_failed",
+			"token_hash", tokenFingerprint(token),
+			"err", "empty access_token from provider",
+		)
+		return "", "", false
+	}
+	// Cache the new access token under its own key with the same subject /
+	// audience information so that subsequent requests using the rotated value
+	// short-circuit on cache hit.  We retain the previous subject — provider
+	// identity does not change on refresh.
+	cacheAudience := ""
+	if record.HasAudience(audience) {
+		cacheAudience = audience
+	}
+	h.store.CacheToken(tokens.AccessToken, record.Subject, cacheAudience)
+	newRefresh := tokens.RefreshToken
+	if newRefresh == "" {
+		// Per RFC 6749 §6 a provider MAY omit a new refresh_token, in which case
+		// the previous one remains valid.
+		newRefresh = record.ProviderRefreshToken
+	}
+	h.store.RecordProviderRefresh(tokens.AccessToken, newRefresh, providerAccessExpiry(tokens.AccessTokenExpiresIn))
+	// Drop the old token from the cache so that a stale ValidateToken call
+	// targeting it falls through to the provider rather than reading expired
+	// metadata.  We do this last to keep the window where neither token is
+	// cached as small as possible.
+	h.store.InvalidateCachedToken(token)
+	slog.Info("github access token rotated",
+		"old_token_hash", tokenFingerprint(token),
+		"new_token_hash", tokenFingerprint(tokens.AccessToken),
+	)
+	return tokens.AccessToken, record.Subject, true
 }
 
 // InvalidateCachedToken delegates cache invalidation to the underlying store.

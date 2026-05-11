@@ -12,10 +12,13 @@ import (
 )
 
 // testValidator is a stub TokenValidator for integration-level tests.
-type testValidator struct{ login string }
+type testValidator struct {
+	login        string
+	rotatedToken string
+}
 
-func (v *testValidator) ValidateToken(_ context.Context, _, _ string) (string, error) {
-	return v.login, nil
+func (v *testValidator) ValidateToken(_ context.Context, _, _ string) (string, string, error) {
+	return v.login, v.rotatedToken, nil
 }
 
 type mockInvalidator struct {

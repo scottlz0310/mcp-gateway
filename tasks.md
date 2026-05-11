@@ -45,20 +45,21 @@
 
 ### サブタスク
 
-- [ ] `internal/auth/provider/github.go` に refresh token rotation API（`POST https://github.com/login/oauth/access_token` `grant_type=refresh_token`）を追加
-- [ ] `internal/auth/tokenstore.go` の `TokenRecord` に GitHub 側 refresh token と GitHub access token の有効期限を保存できるよう拡張（既存の gateway-issued refresh token とは別フィールド）
-- [ ] `internal/auth/handler.go:ValidateToken` で「キャッシュ hit だが GitHub access token の有効期限が近い」場合に rotation を試みるパスを追加
-- [ ] rotation 失敗時の挙動を `invalid_token` で統一しつつ、ログに `rotation_failed` を残す
-- [ ] `cfg.GitHubRefreshEnabled`（仮）で機能 gate（OAuth App が non-expiring 構成の場合は no-op）
-- [ ] 既存 `Handler` テストへ rotation 成功 / 失敗 / 期限ギリギリ の 3 ケースを追加
-- [ ] `docs/configuration.md` に rotation 設定とトラブルシュートを追記
+- [x] `internal/auth/provider/github.go` に refresh token rotation API（`POST https://github.com/login/oauth/access_token` `grant_type=refresh_token`）を追加
+- [x] `internal/auth/tokenstore.go` の `TokenRecord` に GitHub 側 refresh token と GitHub access token の有効期限を保存できるよう拡張（既存の gateway-issued refresh token とは別フィールド）
+- [x] `internal/auth/handler.go:ValidateToken` で「キャッシュ hit だが GitHub access token の有効期限が近い」場合に rotation を試みるパスを追加
+- [x] rotation 失敗時の挙動: cache を維持し、ログに `rotation_failed` を残して既存の 401 経路に委譲（後段で upstream が 401 を返した場合に `invalid_token` で再認証を促す）
+- [x] `cfg.GitHubRefreshEnabled` で機能 gate（OAuth App が non-expiring 構成の場合は no-op）
+- [x] 既存 `Handler` テストへ rotation 成功 / 失敗 / 期限ギリギリ / gate off / metadata 欠落 / 空 access_token / ErrRefreshNotSupported の 7 ケースをテーブル駆動で追加
+- [x] `docs/configuration.md` に rotation 設定とトラブルシュートを追記
+- [x] `CHANGELOG.md` / `CHANGELOG.ja.md` の Unreleased セクションに Phase A の追加・変更を記載
 
 ### 受け入れ基準
 
-- expiring tokens 有効な OAuth App 構成下で、access token が期限切れ直前のリクエストを送ったときにキャッシュが silently rotate される
-- rotation 後の新 access token が `proxy.NewHandler` 経由で upstream に届く
-- rotation 失敗時にクライアントは `invalid_token` を受け取り、`WWW-Authenticate` から再認証フローに進める
-- 既存テストの後方互換 (non-expiring 構成) が崩れない
+- [x] expiring tokens 有効な OAuth App 構成下で、access token が期限切れ直前のリクエストを送ったときにキャッシュが silently rotate される
+- [x] rotation 後の新 access token が `proxy.NewHandler` 経由で upstream に届く（`middleware.Auth` が context の bearer を差し替える）
+- [x] rotation 失敗時にクライアントは `invalid_token` を受け取り、`WWW-Authenticate` から再認証フローに進める（upstream 401 経由）
+- [x] 既存テストの後方互換 (non-expiring 構成) が崩れない
 
 ### 既知の限界
 

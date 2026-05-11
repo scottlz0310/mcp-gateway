@@ -23,7 +23,7 @@ func TestStoreCompleteCallback(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	s.SaveSession("state2", "http://localhost/cb", "", "https://gw.example/mcp")
 
-	code, err := s.CompleteCallback("state2", "token123", "repo,user")
+	code, err := s.CompleteCallback("state2", "token123", "repo,user", "", time.Time{})
 	if err != nil {
 		t.Fatalf("CompleteCallback: %v", err)
 	}
@@ -49,7 +49,7 @@ func TestStoreCompleteCallback(t *testing.T) {
 
 func TestStoreCompleteCallbackUnknownState(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
-	_, err := s.CompleteCallback("nosuchstate", "tok", "")
+	_, err := s.CompleteCallback("nosuchstate", "tok", "", "", time.Time{})
 	if err == nil {
 		t.Fatal("expected error for unknown state")
 	}
@@ -59,20 +59,19 @@ func TestStoreExchangeCodeOneTimeUse(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	s.SaveSession("state3", "http://localhost/cb", "", "https://gw.example/mcp")
 
-	code, _ := s.CompleteCallback("state3", "tok", "")
-	token, _, audience, err := s.ExchangeCode(code, "http://localhost/cb", "")
+	code, _ := s.CompleteCallback("state3", "tok", "", "", time.Time{})
+	result, err := s.ExchangeCode(code, "http://localhost/cb", "")
 	if err != nil {
 		t.Fatalf("ExchangeCode: %v", err)
 	}
-	if token != "tok" {
-		t.Errorf("token: got %q, want %q", token, "tok")
+	if result.AccessToken != "tok" {
+		t.Errorf("token: got %q, want %q", result.AccessToken, "tok")
 	}
-	if audience != "https://gw.example/mcp" {
-		t.Errorf("audience: got %q", audience)
+	if result.Audience != "https://gw.example/mcp" {
+		t.Errorf("audience: got %q", result.Audience)
 	}
 
-	_, _, _, err = s.ExchangeCode(code, "http://localhost/cb", "")
-	if err == nil {
+	if _, err := s.ExchangeCode(code, "http://localhost/cb", ""); err == nil {
 		t.Fatal("expected error on second exchange (one-time use)")
 	}
 }
@@ -81,9 +80,8 @@ func TestStoreExchangeCodeRedirectURIMismatch(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	s.SaveSession("state4", "http://localhost/cb", "", "https://gw.example/mcp")
 
-	code, _ := s.CompleteCallback("state4", "tok", "")
-	_, _, _, err := s.ExchangeCode(code, "http://localhost/other", "")
-	if err == nil {
+	code, _ := s.CompleteCallback("state4", "tok", "", "", time.Time{})
+	if _, err := s.ExchangeCode(code, "http://localhost/other", ""); err == nil {
 		t.Fatal("expected error for redirect_uri mismatch")
 	}
 }
@@ -95,18 +93,16 @@ func TestStorePKCE(t *testing.T) {
 
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	s.SaveSession("state5", "http://localhost/cb", challenge, "https://gw.example/mcp")
-	code, _ := s.CompleteCallback("state5", "tok", "")
+	code, _ := s.CompleteCallback("state5", "tok", "", "", time.Time{})
 
 	// Wrong verifier: code is NOT consumed on PKCE failure so we can retry.
 	wrongVerifier := "wrongverifier_wrongverifier_wrongverifier_wrong"
-	_, _, _, err := s.ExchangeCode(code, "http://localhost/cb", wrongVerifier)
-	if err == nil {
+	if _, err := s.ExchangeCode(code, "http://localhost/cb", wrongVerifier); err == nil {
 		t.Fatal("expected PKCE failure with wrong verifier")
 	}
 
 	// Correct verifier should succeed.
-	_, _, _, err = s.ExchangeCode(code, "http://localhost/cb", verifier)
-	if err != nil {
+	if _, err := s.ExchangeCode(code, "http://localhost/cb", verifier); err != nil {
 		t.Fatalf("PKCE exchange with correct verifier: %v", err)
 	}
 }
@@ -116,10 +112,9 @@ func TestStorePKCEInvalidVerifierLength(t *testing.T) {
 
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	s.SaveSession("state6", "http://localhost/cb", challenge, "https://gw.example/mcp")
-	code, _ := s.CompleteCallback("state6", "tok", "")
+	code, _ := s.CompleteCallback("state6", "tok", "", "", time.Time{})
 
-	_, _, _, err := s.ExchangeCode(code, "http://localhost/cb", "tooshort")
-	if err == nil {
+	if _, err := s.ExchangeCode(code, "http://localhost/cb", "tooshort"); err == nil {
 		t.Fatal("expected error for verifier that is too short")
 	}
 }
@@ -218,6 +213,9 @@ type errTokenStore struct{ mem *memTokenStore }
 
 func (e *errTokenStore) Save(_, _ string, _ []string, _ time.Time) error {
 	return fmt.Errorf("injected save error")
+}
+func (e *errTokenStore) SaveProviderRefresh(token, providerRefreshToken string, providerAccessExpiry time.Time) error {
+	return e.mem.SaveProviderRefresh(token, providerRefreshToken, providerAccessExpiry)
 }
 func (e *errTokenStore) Lookup(token string) (TokenRecord, bool) { return e.mem.Lookup(token) }
 func (e *errTokenStore) Delete(_ string) error                   { return fmt.Errorf("injected delete error") }

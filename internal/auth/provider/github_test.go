@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newGitHubFromServer(t *testing.T, srv *httptest.Server) Provider {
@@ -79,20 +80,33 @@ func TestGitHubAuthorizeURL(t *testing.T) {
 
 func TestGitHubExchangeCode(t *testing.T) {
 	cases := []struct {
-		name        string
-		status      int
-		body        string
-		wantToken   string
-		wantScopes  []string
-		wantErr     bool
-		wantUpstrm  bool
+		name             string
+		status           int
+		body             string
+		wantToken        string
+		wantScopes       []string
+		wantRefresh      string
+		wantAccessExpiry time.Duration
+		wantRefreshExpiry time.Duration
+		wantErr          bool
+		wantUpstrm       bool
 	}{
 		{
-			name:       "success",
+			name:       "success non-expiring",
 			status:     http.StatusOK,
 			body:       `{"access_token":"tok","scope":"repo,user"}`,
 			wantToken:  "tok",
 			wantScopes: []string{"repo", "user"},
+		},
+		{
+			name:              "success with refresh token",
+			status:            http.StatusOK,
+			body:              `{"access_token":"tok","scope":"repo","refresh_token":"rt","expires_in":28800,"refresh_token_expires_in":15897600}`,
+			wantToken:         "tok",
+			wantScopes:        []string{"repo"},
+			wantRefresh:       "rt",
+			wantAccessExpiry:  28800 * time.Second,
+			wantRefreshExpiry: 15897600 * time.Second,
 		},
 		{
 			name:    "oauth error",
@@ -132,7 +146,7 @@ func TestGitHubExchangeCode(t *testing.T) {
 			defer srv.Close()
 
 			p := newGitHubFromServer(t, srv)
-			tok, scopes, err := p.ExchangeCode(context.Background(), "code")
+			resp, err := p.ExchangeCode(context.Background(), "code")
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("expected error")
@@ -149,11 +163,119 @@ func TestGitHubExchangeCode(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if tok != tc.wantToken {
-				t.Errorf("token: got %q, want %q", tok, tc.wantToken)
+			if resp.AccessToken != tc.wantToken {
+				t.Errorf("access_token: got %q, want %q", resp.AccessToken, tc.wantToken)
 			}
-			if strings.Join(scopes, ",") != strings.Join(tc.wantScopes, ",") {
-				t.Errorf("scopes: got %v, want %v", scopes, tc.wantScopes)
+			if strings.Join(resp.Scopes, ",") != strings.Join(tc.wantScopes, ",") {
+				t.Errorf("scopes: got %v, want %v", resp.Scopes, tc.wantScopes)
+			}
+			if resp.RefreshToken != tc.wantRefresh {
+				t.Errorf("refresh_token: got %q, want %q", resp.RefreshToken, tc.wantRefresh)
+			}
+			if resp.AccessTokenExpiresIn != tc.wantAccessExpiry {
+				t.Errorf("access expiry: got %v, want %v", resp.AccessTokenExpiresIn, tc.wantAccessExpiry)
+			}
+			if resp.RefreshTokenExpiresIn != tc.wantRefreshExpiry {
+				t.Errorf("refresh expiry: got %v, want %v", resp.RefreshTokenExpiresIn, tc.wantRefreshExpiry)
+			}
+		})
+	}
+}
+
+// TestGitHubRefreshToken exercises the rotation path against a fake GitHub
+// token endpoint.
+func TestGitHubRefreshToken(t *testing.T) {
+	cases := []struct {
+		name              string
+		refreshTokenInput string
+		status            int
+		body              string
+		wantToken         string
+		wantRefresh       string
+		wantAccessExpiry  time.Duration
+		wantErr           bool
+		wantUpstrm        bool
+	}{
+		{
+			name:              "success rotates tokens",
+			refreshTokenInput: "rt-old",
+			status:            http.StatusOK,
+			body:              `{"access_token":"new","refresh_token":"rt-new","scope":"repo","expires_in":28800,"refresh_token_expires_in":15897600}`,
+			wantToken:         "new",
+			wantRefresh:       "rt-new",
+			wantAccessExpiry:  28800 * time.Second,
+		},
+		{
+			name:              "bad refresh token rejected",
+			refreshTokenInput: "rt-bad",
+			status:            http.StatusOK,
+			body:              `{"error":"bad_refresh_token"}`,
+			wantErr:           true,
+		},
+		{
+			name:              "upstream 503 is transient",
+			refreshTokenInput: "rt-x",
+			status:            http.StatusServiceUnavailable,
+			body:              "down",
+			wantErr:           true,
+			wantUpstrm:        true,
+		},
+		{
+			name:              "empty input rejected without HTTP call",
+			refreshTokenInput: "",
+			status:            http.StatusOK,
+			body:              `{"access_token":"unused"}`,
+			wantErr:           true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var observed url.Values
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/login/oauth/access_token" {
+					t.Errorf("unexpected path: %s", r.URL.Path)
+				}
+				if err := r.ParseForm(); err != nil {
+					t.Errorf("parse form: %v", err)
+				}
+				observed = r.Form
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+
+			p := newGitHubFromServer(t, srv)
+			resp, err := p.RefreshToken(context.Background(), tc.refreshTokenInput)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error")
+				}
+				var ue *UpstreamError
+				if tc.wantUpstrm && !errors.As(err, &ue) {
+					t.Errorf("expected UpstreamError, got %T: %v", err, err)
+				}
+				if !tc.wantUpstrm && errors.As(err, &ue) {
+					t.Errorf("did not expect UpstreamError, got %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got := observed.Get("grant_type"); got != "refresh_token" {
+				t.Errorf("grant_type form: got %q", got)
+			}
+			if got := observed.Get("refresh_token"); got != tc.refreshTokenInput {
+				t.Errorf("refresh_token form: got %q, want %q", got, tc.refreshTokenInput)
+			}
+			if resp.AccessToken != tc.wantToken {
+				t.Errorf("access_token: got %q, want %q", resp.AccessToken, tc.wantToken)
+			}
+			if resp.RefreshToken != tc.wantRefresh {
+				t.Errorf("refresh_token: got %q, want %q", resp.RefreshToken, tc.wantRefresh)
+			}
+			if resp.AccessTokenExpiresIn != tc.wantAccessExpiry {
+				t.Errorf("access expiry: got %v, want %v", resp.AccessTokenExpiresIn, tc.wantAccessExpiry)
 			}
 		})
 	}

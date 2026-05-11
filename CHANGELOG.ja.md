@@ -5,6 +5,18 @@
 
 ## [Unreleased]
 
+### 追加
+
+- 期限付き GitHub OAuth user access token の透過的ローテーション（[#70](https://github.com/scottlz0310/mcp-gateway/issues/70), Phase A）
+  - `MCP_GATEWAY_GITHUB_REFRESH_ENABLED` / `gateway.github_refresh_enabled` フラグで rotation を有効化（デフォルト `false`）
+  - upstream provider が `refresh_token` と `expires_in` を返す場合、access token 期限の約 5 分前に refresh token を用いて自動ローテーションし、新 token を upstream MCP server に透過的に転送する
+  - rotation は best-effort: provider 失敗時は `rotation_failed` をログ出力し、既存の 401 → 再認証フローへフォールバック
+  - Provider インターフェース（`internal/auth/provider`）に正規化された `TokenResponse` と `RefreshToken` メソッドを追加
+
+### 変更
+
+- `auth.Handler.ValidateToken` がローテーション後の access token を subject と同時に返すよう拡張し、middleware が request context のトークンを差し替えられるようにした。内部 API のみで公開 surface には影響なし。
+
 ## [0.3.0] - 2026-05-07
 
 ### 追加

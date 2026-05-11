@@ -84,51 +84,87 @@ func (p *githubProvider) AuthorizeURL(state, codeChallenge string) string {
 	return u.String()
 }
 
-func (p *githubProvider) ExchangeCode(ctx context.Context, code string) (string, []string, error) {
+func (p *githubProvider) ExchangeCode(ctx context.Context, code string) (TokenResponse, error) {
 	form := url.Values{
 		"client_id":     {p.cfg.ClientID},
 		"client_secret": {p.cfg.ClientSecret},
 		"code":          {code},
 		"redirect_uri":  {p.cfg.RedirectURI},
 	}
+	return p.postToken(ctx, form, "exchange")
+}
 
+// RefreshToken rotates a GitHub OAuth refresh token (RFC 6749 §6).  Only
+// works when the OAuth App is configured with expiring user access tokens;
+// otherwise GitHub returns an OAuth error which is surfaced verbatim.
+func (p *githubProvider) RefreshToken(ctx context.Context, refreshToken string) (TokenResponse, error) {
+	if strings.TrimSpace(refreshToken) == "" {
+		return TokenResponse{}, fmt.Errorf("RefreshToken: refresh token must not be empty")
+	}
+	form := url.Values{
+		"client_id":     {p.cfg.ClientID},
+		"client_secret": {p.cfg.ClientSecret},
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refreshToken},
+	}
+	return p.postToken(ctx, form, "refresh")
+}
+
+// postToken issues a request to GitHub's token endpoint and decodes the
+// normalized OAuth response shared by exchange and refresh flows.
+func (p *githubProvider) postToken(ctx context.Context, form url.Values, op string) (TokenResponse, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		p.cfg.TokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
-		return "", nil, &UpstreamError{Err: fmt.Errorf("building GitHub token request: %w", err)}
+		return TokenResponse{}, &UpstreamError{Err: fmt.Errorf("building GitHub token %s request: %w", op, err)}
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	resp, err := p.client.Do(req)
 	if err != nil {
-		return "", nil, &UpstreamError{Err: fmt.Errorf("GitHub token endpoint unreachable: %w", err)}
+		return TokenResponse{}, &UpstreamError{Err: fmt.Errorf("GitHub token endpoint unreachable: %w", err)}
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
 		if resp.StatusCode >= 500 {
-			return "", nil, &UpstreamError{Err: fmt.Errorf("GitHub OAuth returned %d: %s", resp.StatusCode, strings.TrimSpace(string(snippet)))}
+			return TokenResponse{}, &UpstreamError{Err: fmt.Errorf("GitHub OAuth %s returned %d: %s", op, resp.StatusCode, strings.TrimSpace(string(snippet)))}
 		}
-		return "", nil, fmt.Errorf("GitHub OAuth returned %d: %s", resp.StatusCode, strings.TrimSpace(string(snippet)))
+		return TokenResponse{}, fmt.Errorf("GitHub OAuth %s returned %d: %s", op, resp.StatusCode, strings.TrimSpace(string(snippet)))
 	}
 
 	var result struct {
-		AccessToken string `json:"access_token"`
-		Scope       string `json:"scope"`
-		Error       string `json:"error"`
+		AccessToken           string `json:"access_token"`
+		Scope                 string `json:"scope"`
+		RefreshToken          string `json:"refresh_token"`
+		ExpiresIn             int64  `json:"expires_in"`
+		RefreshTokenExpiresIn int64  `json:"refresh_token_expires_in"`
+		Error                 string `json:"error"`
+		ErrorDescription      string `json:"error_description"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", nil, fmt.Errorf("decoding GitHub OAuth response: %w", err)
+		return TokenResponse{}, fmt.Errorf("decoding GitHub OAuth %s response: %w", op, err)
 	}
 	if result.Error != "" {
-		return "", nil, fmt.Errorf("GitHub OAuth error: %s", result.Error)
+		// GitHub returns 200 OK with a JSON `error` field for normal OAuth
+		// failure modes (bad_verification_code, bad_refresh_token, ...).
+		if op == "refresh" && result.Error == "bad_refresh_token" {
+			return TokenResponse{}, fmt.Errorf("GitHub OAuth refresh error: %s", result.Error)
+		}
+		return TokenResponse{}, fmt.Errorf("GitHub OAuth %s error: %s", op, result.Error)
 	}
 	if result.AccessToken == "" {
-		return "", nil, fmt.Errorf("empty access_token from GitHub")
+		return TokenResponse{}, fmt.Errorf("empty access_token from GitHub on %s", op)
 	}
-	return result.AccessToken, splitScopes(result.Scope), nil
+	return TokenResponse{
+		AccessToken:           result.AccessToken,
+		Scopes:                splitScopes(result.Scope),
+		RefreshToken:          result.RefreshToken,
+		AccessTokenExpiresIn:  time.Duration(result.ExpiresIn) * time.Second,
+		RefreshTokenExpiresIn: time.Duration(result.RefreshTokenExpiresIn) * time.Second,
+	}, nil
 }
 
 func (p *githubProvider) ValidateToken(ctx context.Context, token string) (Identity, error) {

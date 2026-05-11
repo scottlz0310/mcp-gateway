@@ -57,6 +57,11 @@ type GatewayConfig struct {
 	// TokenAudienceStrict rejects tokens that lack per-route audience metadata.
 	// Leave false during the migration grace period for tokens issued before #57.
 	TokenAudienceStrict bool `yaml:"token_audience_strict,omitempty"`
+	// GitHubRefreshEnabled turns on transparent rotation of expiring GitHub
+	// OAuth user access tokens (Phase A of issue #70). Safe to leave on when
+	// the OAuth App is configured for non-expiring tokens — the rotation path
+	// is dormant unless the upstream advertises refresh_token + expires_in.
+	GitHubRefreshEnabled bool `yaml:"github_refresh_enabled,omitempty"`
 }
 
 // LoadConfig reads AppConfig from path.

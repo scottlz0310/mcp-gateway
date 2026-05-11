@@ -124,6 +124,9 @@ func main() {
 	if strings.TrimSpace(os.Getenv("MCP_GATEWAY_TOKEN_AUDIENCE_STRICT")) == "" {
 		cfg.tokenAudienceStrict = appCfg.Gateway.TokenAudienceStrict
 	}
+	if _, set := os.LookupEnv("MCP_GATEWAY_GITHUB_REFRESH_ENABLED"); !set {
+		cfg.githubRefreshEnabled = appCfg.Gateway.GitHubRefreshEnabled
+	}
 	trustedProxies, err := middleware.ParseTrustedProxyCIDRs(cfg.trustedProxyCIDRs)
 	if err != nil {
 		slog.Error("invalid trusted proxy configuration", "err", err)
@@ -188,13 +191,14 @@ func main() {
 	}
 
 	oauthHandler, err := auth.NewHandler(auth.Config{
-		BaseURL:             cfg.publicURL,
-		SessionTTL:          time.Duration(cfg.sessionTTLMin) * time.Minute,
-		CacheTTL:            time.Duration(cfg.tokenCacheTTLMin) * time.Minute,
-		ExpiresIn:           time.Duration(cfg.tokenExpiresInSec) * time.Second,
-		TokenStorePath:      cfg.tokenStorePath,
-		AllowedAudiences:    routeAudiences(strings.TrimRight(cfg.publicURL, "/"), routes),
-		TokenAudienceStrict: cfg.tokenAudienceStrict,
+		BaseURL:              cfg.publicURL,
+		SessionTTL:           time.Duration(cfg.sessionTTLMin) * time.Minute,
+		CacheTTL:             time.Duration(cfg.tokenCacheTTLMin) * time.Minute,
+		ExpiresIn:            time.Duration(cfg.tokenExpiresInSec) * time.Second,
+		TokenStorePath:       cfg.tokenStorePath,
+		AllowedAudiences:     routeAudiences(strings.TrimRight(cfg.publicURL, "/"), routes),
+		TokenAudienceStrict:  cfg.tokenAudienceStrict,
+		GitHubRefreshEnabled: cfg.githubRefreshEnabled,
 	}, prov)
 	if err != nil {
 		slog.Error("auth handler init failed", "err", err)
@@ -272,6 +276,7 @@ func main() {
 		"routes", len(routes),
 		"trusted_proxies", len(trustedProxies),
 		"token_audience_strict", cfg.tokenAudienceStrict,
+		"github_refresh_enabled", cfg.githubRefreshEnabled,
 	)
 
 	server := &http.Server{
@@ -349,10 +354,11 @@ type config struct {
 	sessionTTLMin       int
 	tokenCacheTTLMin    int
 	tokenExpiresInSec   int
-	tokenAudienceStrict bool
-	tokenStorePath      string
-	keyPath             string
-	configPath          string
+	tokenAudienceStrict  bool
+	githubRefreshEnabled bool
+	tokenStorePath       string
+	keyPath              string
+	configPath           string
 }
 
 func loadConfig() config {
@@ -378,10 +384,11 @@ func loadConfig() config {
 		sessionTTLMin:       getEnvInt("SESSION_TTL_MIN", 10),
 		tokenCacheTTLMin:    getEnvInt("TOKEN_CACHE_TTL_MIN", 30),
 		tokenExpiresInSec:   getEnvInt("TOKEN_EXPIRES_IN_SEC", 7776000), // 90 days
-		tokenAudienceStrict: getEnvBool("MCP_GATEWAY_TOKEN_AUDIENCE_STRICT", false),
-		tokenStorePath:      lookupEnv("MCP_GATEWAY_TOKEN_STORE_PATH", "/data/tokens.json"),
-		keyPath:             getEnv("MCP_GATEWAY_KEY_PATH", "./gateway.key"),
-		configPath:          getEnv("MCP_CONFIG_FILE", "./config.yaml"),
+		tokenAudienceStrict:  getEnvBool("MCP_GATEWAY_TOKEN_AUDIENCE_STRICT", false),
+		githubRefreshEnabled: getEnvBool("MCP_GATEWAY_GITHUB_REFRESH_ENABLED", false),
+		tokenStorePath:       lookupEnv("MCP_GATEWAY_TOKEN_STORE_PATH", "/data/tokens.json"),
+		keyPath:              getEnv("MCP_GATEWAY_KEY_PATH", "./gateway.key"),
+		configPath:           getEnv("MCP_CONFIG_FILE", "./config.yaml"),
 	}
 }
 
