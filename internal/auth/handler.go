@@ -773,16 +773,31 @@ func (h *Handler) ValidateToken(ctx context.Context, token, audience string) (su
 
 // tryGitHubRotation attempts to rotate a GitHub-issued access token when its
 // provider expiry is within the configured leeway window.  It returns the new
-// token and (best-effort) subject on success; on any failure or when rotation
-// is not applicable, the second return is false and the caller continues with
-// the original token.
+// token and subject on success; on any failure or when rotation is not
+// applicable, the second return is false and the caller continues with the
+// original token.
 //
 // Failures are intentionally non-fatal: rotation is a best-effort optimization,
 // and a stale token will surface as an upstream 401 which the existing cache
 // invalidation path already handles. Logging "rotation_failed" lets operators
 // detect chronic misconfiguration (e.g. revoked refresh token).
+//
+// The original token's cache entry is **kept** (not invalidated): MCP clients
+// continue presenting the original bearer token, and dropping its metadata
+// would force them through the provider on the next request — and possibly
+// hit 401 once GitHub expires the original. Instead we update the original
+// entry's provider refresh metadata to the freshly issued refresh token / new
+// expiry so a subsequent in-window request triggers another rotation cleanly.
+// The rotated token is cached under its own key so this turn's proxy
+// forwarding (and any client that does adopt the rotated value) hits cache.
 func (h *Handler) tryGitHubRotation(ctx context.Context, token string, record TokenRecord, audience string) (newToken, subject string, ok bool) {
 	if !h.cfg.GitHubRefreshEnabled {
+		return "", "", false
+	}
+	if record.Subject == "" {
+		// Without a known subject we would propagate an empty identity into the
+		// proxy headers, which downstream services treat as anonymous. Wait
+		// until the provider has been queried once and Subject is populated.
 		return "", "", false
 	}
 	if record.ProviderRefreshToken == "" || record.ProviderAccessExpiry.IsZero() {
@@ -809,27 +824,27 @@ func (h *Handler) tryGitHubRotation(ctx context.Context, token string, record To
 		)
 		return "", "", false
 	}
-	// Cache the new access token under its own key with the same subject /
-	// audience information so that subsequent requests using the rotated value
-	// short-circuit on cache hit.  We retain the previous subject — provider
-	// identity does not change on refresh.
 	cacheAudience := ""
 	if record.HasAudience(audience) {
 		cacheAudience = audience
 	}
-	h.store.CacheToken(tokens.AccessToken, record.Subject, cacheAudience)
 	newRefresh := tokens.RefreshToken
 	if newRefresh == "" {
-		// Per RFC 6749 §6 a provider MAY omit a new refresh_token, in which case
-		// the previous one remains valid.
+		// Per RFC 6749 §6 a provider MAY omit a new refresh_token, in which
+		// case the previous one remains valid.
 		newRefresh = record.ProviderRefreshToken
 	}
-	h.store.RecordProviderRefresh(tokens.AccessToken, newRefresh, providerAccessExpiry(tokens.AccessTokenExpiresIn))
-	// Drop the old token from the cache so that a stale ValidateToken call
-	// targeting it falls through to the provider rather than reading expired
-	// metadata.  We do this last to keep the window where neither token is
-	// cached as small as possible.
-	h.store.InvalidateCachedToken(token)
+	newAccessExpiry := providerAccessExpiry(tokens.AccessTokenExpiresIn)
+	// Cache the new access token under its own key so that requests adopting
+	// the rotated bearer short-circuit on cache hit. We retain the previous
+	// subject — provider identity does not change on refresh.
+	h.store.CacheToken(tokens.AccessToken, record.Subject, cacheAudience)
+	h.store.RecordProviderRefresh(tokens.AccessToken, newRefresh, newAccessExpiry)
+	// Update the original entry's provider refresh metadata so the next
+	// rotation cycle still works if the client keeps presenting the old
+	// bearer (which is the common case — MCP clients do not learn of the
+	// rotated value through this flow).
+	h.store.RecordProviderRefresh(token, newRefresh, newAccessExpiry)
 	slog.Info("github access token rotated",
 		"old_token_hash", tokenFingerprint(token),
 		"new_token_hash", tokenFingerprint(tokens.AccessToken),

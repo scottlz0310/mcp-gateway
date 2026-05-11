@@ -19,7 +19,7 @@
 
 [Issue #70](https://github.com/scottlz0310/mcp-gateway/issues/70) の spike 調査により、`mcp-gateway` ↔ `copilot-review-mcp` 間で次の構造が確認された:
 
-- ゲートウェイは Bearer トークン（`gho_*`）を upstream にパススルーするだけで、proxying 経路でのトークン refresh は未実装（`internal/proxy/handler.go` の `Rewrite` callback、`internal/auth/handler.go` の `Handler.ValidateToken`）
+- 当初: ゲートウェイは Bearer トークン（`gho_*`）を upstream にパススルーするだけで、proxying 経路でのトークン refresh は未実装だった（`internal/proxy/handler.go` の `Rewrite` callback、`internal/auth/handler.go` の `Handler.ValidateToken`）。**Phase A (本ブランチ) で `Handler.ValidateToken` 側に rotation 統合が完了している（gate: `gateway.github_refresh_enabled`）。**
 - `copilot-review-mcp` 側は watch 開始時の token を `oauth2.StaticTokenSource` でスナップショットし、最大 2 時間のバックグラウンドポーリングを行う（refresh 不可）
 - 短命トークン（GitHub App installation token 等、有効期限 ≦ 2 時間）を扱う構成では watch 途中で確実に失効する
 - 現行設計でも `FailureReasonAuthExpired` により AI エージェントへの構造化通知は機能しているため、緊急の暫定対処は不要
@@ -122,7 +122,7 @@
 
 ## 実装着手順（推奨）
 
-1. Phase A の専用 issue を切る → 本ブランチでドラフト PR を維持しつつ、レート制限回復後に Phase A の実装コミットを追加
+1. **Phase A**: 本 PR (#71) で実装＋docs＋テストまで揃ったので、レビュー反映完了後に main へマージ
 2. Phase A マージ後、Phase B の spike issue を切り、設計ドキュメントを先に書く
 3. Phase B の PoC で trust boundary が固まったら Phase C のエラー契約 docs を仕上げる
 

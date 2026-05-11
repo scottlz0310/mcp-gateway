@@ -1560,11 +1560,135 @@ func TestValidateTokenGitHubRotation(t *testing.T) {
 				if rec.Subject != tc.wantSubject {
 					t.Errorf("new cache subject: got %q, want %q", rec.Subject, tc.wantSubject)
 				}
-				if _, stillCached := h.store.LookupToken("old-access"); stillCached {
-					t.Error("old access token must be invalidated after rotation")
+				// Old entry must remain cached: clients keep presenting it and
+				// dropping it would force a provider round-trip — possibly a
+				// 401 once GitHub expires the original.
+				oldRec, oldCached := h.store.LookupToken("old-access")
+				if !oldCached {
+					t.Fatal("old access token must remain cached after rotation so the client can keep using it")
+				}
+				if oldRec.ProviderRefreshToken == "" {
+					t.Error("old entry must carry refreshed provider metadata for the next rotation cycle")
 				}
 			}
 		})
+	}
+}
+
+// TestValidateTokenGitHubRotationSkipsWhenSubjectUnknown verifies that
+// rotation is skipped when the cached entry has not yet been validated
+// against the provider (Subject is empty), so downstream services never see
+// an anonymous identity header injected from a half-populated cache row.
+func TestValidateTokenGitHubRotationSkipsWhenSubjectUnknown(t *testing.T) {
+	const audience = "http://localhost:8080/mcp"
+	var refreshCalls int
+	var validateCalls int
+	p := &provider.Mock{
+		ClientIDValue: "test-client-id",
+		ValidateFunc: func(_ context.Context, _ string) (provider.Identity, error) {
+			validateCalls++
+			return provider.Identity{Provider: "mock", Subject: "alice"}, nil
+		},
+		RefreshTokenFunc: func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			refreshCalls++
+			return provider.TokenResponse{
+				AccessToken:          "new-access",
+				RefreshToken:         "rt-new",
+				AccessTokenExpiresIn: 30 * time.Second,
+			}, nil
+		},
+	}
+	h, err := NewHandler(Config{
+		BaseURL:              "http://localhost:8080",
+		SessionTTL:           10 * time.Minute,
+		CacheTTL:             5 * time.Minute,
+		ExpiresIn:            90 * 24 * time.Hour,
+		AllowedAudiences:     []string{audience},
+		GitHubRefreshEnabled: true,
+	}, p)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	// Register the audience (mimicking tokenAuthCode) but skip CacheToken so
+	// Subject stays empty. Then attach in-leeway provider metadata.
+	h.store.RegisterTokenAudience("token-no-subject", audience)
+	h.store.RecordProviderRefresh("token-no-subject", "rt-old", time.Now().Add(30*time.Second))
+
+	subject, rotated, err := h.ValidateToken(context.Background(), "token-no-subject", audience)
+	if err != nil {
+		t.Fatalf("ValidateToken: %v", err)
+	}
+	if rotated != "" {
+		t.Errorf("rotation must be skipped when subject is unknown, got rotated=%q", rotated)
+	}
+	if refreshCalls != 0 {
+		t.Errorf("provider.RefreshToken must not be called when subject is unknown, got %d calls", refreshCalls)
+	}
+	if subject != "alice" {
+		t.Errorf("subject after provider validation: got %q, want alice", subject)
+	}
+	if validateCalls != 1 {
+		t.Errorf("provider.ValidateToken should be called once to populate subject, got %d", validateCalls)
+	}
+}
+
+// TestValidateTokenGitHubRotationKeepsOriginalEntryRotating verifies that
+// after a successful rotation, presenting the original token again triggers
+// another rotation (using the rotated refresh token) — i.e. the original
+// entry's metadata was refreshed, not cleared.
+func TestValidateTokenGitHubRotationKeepsOriginalEntryRotating(t *testing.T) {
+	const audience = "http://localhost:8080/mcp"
+	var observed []string
+	p := &provider.Mock{
+		ClientIDValue: "test-client-id",
+		ValidateFunc: func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Provider: "mock", Subject: "alice"}, nil
+		},
+		RefreshTokenFunc: func(_ context.Context, rt string) (provider.TokenResponse, error) {
+			observed = append(observed, rt)
+			return provider.TokenResponse{
+				AccessToken:          fmt.Sprintf("new-access-%d", len(observed)),
+				RefreshToken:         fmt.Sprintf("rt-new-%d", len(observed)),
+				AccessTokenExpiresIn: 30 * time.Second,
+			}, nil
+		},
+	}
+	h, err := NewHandler(Config{
+		BaseURL:              "http://localhost:8080",
+		SessionTTL:           10 * time.Minute,
+		CacheTTL:             5 * time.Minute,
+		ExpiresIn:            90 * 24 * time.Hour,
+		AllowedAudiences:     []string{audience},
+		GitHubRefreshEnabled: true,
+	}, p)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	h.store.CacheToken("original", "alice", audience)
+	h.store.RecordProviderRefresh("original", "rt-0", time.Now().Add(30*time.Second))
+
+	// First request: rotation fires, original cache stays with refreshed metadata.
+	_, rotated1, err := h.ValidateToken(context.Background(), "original", audience)
+	if err != nil {
+		t.Fatalf("first ValidateToken: %v", err)
+	}
+	if rotated1 != "new-access-1" {
+		t.Fatalf("first rotation: got %q", rotated1)
+	}
+	// Second request from a client that still presents the original token:
+	// rotation should fire again using the rotated refresh token.
+	_, rotated2, err := h.ValidateToken(context.Background(), "original", audience)
+	if err != nil {
+		t.Fatalf("second ValidateToken: %v", err)
+	}
+	if rotated2 != "new-access-2" {
+		t.Fatalf("second rotation off original token: got %q", rotated2)
+	}
+	if len(observed) != 2 {
+		t.Fatalf("refresh call count: got %d, want 2", len(observed))
+	}
+	if observed[0] != "rt-0" || observed[1] != "rt-new-1" {
+		t.Errorf("provider received refresh tokens %v; expected [rt-0 rt-new-1]", observed)
 	}
 }
 

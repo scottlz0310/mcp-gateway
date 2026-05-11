@@ -159,9 +159,13 @@ func (m *memTokenStore) Sweep() error {
 // fileEntry is the on-disk representation of a single token record.
 // The map key is tokenKey(rawToken), so raw tokens never appear in the file.
 //
-// ProviderRefreshToken is stored in plaintext because the gateway must replay
-// it to the upstream OAuth provider on rotation; the file is written with
-// mode 0600 so the same protections that apply to access tokens apply here.
+// ProviderRefreshToken is stored as plaintext because the gateway must replay
+// it to the upstream OAuth provider on rotation. The file is written with
+// mode 0600, but operators should treat tokens.json as a long-lived
+// credential surface: any reader can hijack a logged-in user's GitHub session
+// until the refresh token is revoked (typically the OAuth App rotation
+// window — months). Snapshot, backup, and access-control implications are
+// covered in docs/configuration.md under "Token Persistence".
 type fileEntry struct {
 	Subject              string    `json:"s"`
 	Audiences            []string  `json:"aud,omitempty"`

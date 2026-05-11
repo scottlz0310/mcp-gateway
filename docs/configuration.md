@@ -205,6 +205,25 @@ When token persistence is enabled, refresh tokens are stored in
 access token value in plaintext because the gateway must re-present the access
 token to GitHub during refresh. Treat it as sensitive data.
 
+When `MCP_GATEWAY_GITHUB_REFRESH_ENABLED=true` (or `gateway.github_refresh_enabled: true`),
+the gateway also stores the GitHub OAuth **refresh token** in `tokens.json`
+(the primary store, not the `.refresh` sibling) so rotation continues to work
+across restarts. The refresh token is written as plaintext because the
+gateway must replay it to GitHub's `/login/oauth/access_token` endpoint.
+
+Operational implications of refresh-token persistence:
+
+- A reader of `tokens.json` can hijack the logged-in user's GitHub session for
+  the lifetime of the refresh token. With GitHub's expiring-user-token
+  configuration this is typically **six months** unless the user revokes the
+  authorization or the OAuth App is reconfigured.
+- Backups of `tokens.json` carry the same risk. Encrypt backup volumes at
+  rest, or exclude `tokens.json` and `tokens.json.refresh` from broad backup
+  scopes.
+- Container images and snapshots should not bake either file in.
+- If you do not need rotation across restarts, leave `github_refresh_enabled`
+  off; the refresh token is then never written to disk.
+
 ## Reverse Proxy Headers
 
 When TLS terminates before mcp-gateway:
