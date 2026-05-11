@@ -19,7 +19,7 @@
 
 [Issue #70](https://github.com/scottlz0310/mcp-gateway/issues/70) の spike 調査により、`mcp-gateway` ↔ `copilot-review-mcp` 間で次の構造が確認された:
 
-- ゲートウェイは Bearer トークン（`gho_*`）を upstream にパススルーするだけで、proxying 経路でのトークン refresh は未実装 (`internal/proxy/handler.go:40-41`, `internal/auth/handler.go:697-720`)
+- ゲートウェイは Bearer トークン（`gho_*`）を upstream にパススルーするだけで、proxying 経路でのトークン refresh は未実装（`internal/proxy/handler.go` の `Rewrite` callback、`internal/auth/handler.go` の `Handler.ValidateToken`）
 - `copilot-review-mcp` 側は watch 開始時の token を `oauth2.StaticTokenSource` でスナップショットし、最大 2 時間のバックグラウンドポーリングを行う（refresh 不可）
 - 短命トークン（GitHub App installation token 等、有効期限 ≦ 2 時間）を扱う構成では watch 途中で確実に失効する
 - 現行設計でも `FailureReasonAuthExpired` により AI エージェントへの構造化通知は機能しているため、緊急の暫定対処は不要

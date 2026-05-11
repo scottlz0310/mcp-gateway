@@ -1,4 +1,4 @@
-﻿# Tasks
+# Tasks
 
 `mcp-gateway` の継続的なタスク管理ファイル。各 issue の状態とサブタスク、依存関係を記録する。
 
