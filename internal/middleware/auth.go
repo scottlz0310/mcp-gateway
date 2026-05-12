@@ -21,12 +21,12 @@ const ContextKeyToken contextKey = "auth_token"
 
 // TokenValidator is implemented by auth.Handler.
 //
-// The third return value is a rotated access token: non-empty when the
-// underlying provider transparently rotated the upstream access token during
-// validation (e.g. GitHub OAuth Apps with expiring tokens). When non-empty,
-// Auth middleware substitutes it for the original bearer token in the
-// request context so that the reverse proxy forwards the fresh token to the
-// upstream MCP server.
+// The second return value (rotatedToken) is non-empty when the underlying
+// provider transparently rotated the upstream access token during validation
+// (e.g. GitHub OAuth Apps with expiring tokens). When non-empty, Auth
+// middleware substitutes it for the original bearer token in the request
+// context so that the reverse proxy forwards the fresh token to the upstream
+// MCP server.
 type TokenValidator interface {
 	ValidateToken(ctx context.Context, token, audience string) (subject, rotatedToken string, err error)
 }

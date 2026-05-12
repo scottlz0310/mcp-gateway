@@ -14,6 +14,8 @@ import (
 
 	"log/slog"
 
+	"golang.org/x/sync/singleflight"
+
 	"github.com/scottlz0310/mcp-gateway/internal/auth/provider"
 )
 
@@ -86,6 +88,12 @@ type Handler struct {
 	provider         provider.Provider
 	store            *Store
 	allowedAudiences map[string]struct{}
+	// rotationGroup serializes concurrent GitHub refresh-token rotations
+	// targeting the same access token. Without this, a burst of requests
+	// arriving inside the leeway window would race to call the provider's
+	// refresh endpoint, wasting upstream quota and risking bad_refresh_token
+	// from GitHub's sequential rotation contract.
+	rotationGroup singleflight.Group
 }
 
 // NewHandler creates a new OAuth Handler with the given configuration and provider.
@@ -382,12 +390,24 @@ func (h *Handler) tokenAuthCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.store.RegisterTokenAudience(result.AccessToken, result.Audience)
-	h.store.RecordProviderRefresh(result.AccessToken, result.ProviderRefreshToken, result.ProviderAccessExpiry)
+	h.persistProviderRefresh(result.AccessToken, result.ProviderRefreshToken, result.ProviderAccessExpiry)
 	refreshToken, rtErr := h.store.CreateRefreshToken(result.AccessToken, result.Audience, h.refreshTokenTTL())
 	if rtErr != nil {
 		slog.Warn("failed to create refresh token", "err", rtErr)
 	}
 	h.writeTokenResponse(w, result.AccessToken, result.Scope, refreshToken)
+}
+
+// persistProviderRefresh writes upstream provider refresh metadata to the
+// token store only when rotation is enabled. The flag is the load-bearing
+// switch documented in configuration.md: with it off, the refresh token must
+// not be written to disk so the gateway's at-rest credential surface stays
+// minimal.
+func (h *Handler) persistProviderRefresh(accessToken, refreshToken string, accessExpiry time.Time) {
+	if !h.cfg.GitHubRefreshEnabled {
+		return
+	}
+	h.store.RecordProviderRefresh(accessToken, refreshToken, accessExpiry)
 }
 
 func (h *Handler) tokenDeviceGrant(w http.ResponseWriter, r *http.Request) {
@@ -454,7 +474,7 @@ func (h *Handler) tokenDeviceGrant(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.store.RegisterTokenAudience(result.AccessToken, completed.Audience)
-		h.store.RecordProviderRefresh(result.AccessToken, result.RefreshToken, providerAccessExpiry(result.AccessExpiresIn))
+		h.persistProviderRefresh(result.AccessToken, result.RefreshToken, providerAccessExpiry(result.AccessExpiresIn))
 		refreshToken, rtErr := h.store.CreateRefreshToken(result.AccessToken, completed.Audience, h.refreshTokenTTL())
 		if rtErr != nil {
 			slog.Warn("failed to create refresh token", "err", rtErr)
@@ -771,10 +791,18 @@ func (h *Handler) ValidateToken(ctx context.Context, token, audience string) (su
 	return id.Subject, "", nil
 }
 
+// rotationResult is the value type stored in the singleflight group so that
+// concurrent callers of tryGitHubRotation can share a single rotation outcome.
+type rotationResult struct {
+	newToken string
+	subject  string
+	ok       bool
+}
+
 // tryGitHubRotation attempts to rotate a GitHub-issued access token when its
 // provider expiry is within the configured leeway window.  It returns the new
 // token and subject on success; on any failure or when rotation is not
-// applicable, the second return is false and the caller continues with the
+// applicable, the third return is false and the caller continues with the
 // original token.
 //
 // Failures are intentionally non-fatal: rotation is a best-effort optimization,
@@ -790,6 +818,12 @@ func (h *Handler) ValidateToken(ctx context.Context, token, audience string) (su
 // expiry so a subsequent in-window request triggers another rotation cleanly.
 // The rotated token is cached under its own key so this turn's proxy
 // forwarding (and any client that does adopt the rotated value) hits cache.
+//
+// Concurrent rotation calls for the same access token are collapsed via a
+// singleflight group keyed by the token fingerprint. The leader executes the
+// provider call; followers receive the leader's result without issuing a
+// second refresh request (GitHub treats sequential rotations of the same
+// refresh token as a security violation and returns bad_refresh_token).
 func (h *Handler) tryGitHubRotation(ctx context.Context, token string, record TokenRecord, audience string) (newToken, subject string, ok bool) {
 	if !h.cfg.GitHubRefreshEnabled {
 		return "", "", false
@@ -806,23 +840,51 @@ func (h *Handler) tryGitHubRotation(ctx context.Context, token string, record To
 	if time.Until(record.ProviderAccessExpiry) > h.githubRefreshLeeway() {
 		return "", "", false
 	}
+
+	v, _, _ := h.rotationGroup.Do(tokenFingerprint(token), func() (any, error) {
+		return h.runGitHubRotation(ctx, token, audience), nil
+	})
+	// Forget the key so future rotations (after another leeway window passes)
+	// are not blocked by a stale completed entry.
+	h.rotationGroup.Forget(tokenFingerprint(token))
+	res, _ := v.(rotationResult)
+	return res.newToken, res.subject, res.ok
+}
+
+// runGitHubRotation performs a single rotation attempt under the singleflight
+// leader. The caller must guarantee that the gate is on, Subject is known,
+// and the cached expiry is within the leeway window.
+func (h *Handler) runGitHubRotation(ctx context.Context, token, audience string) rotationResult {
+	// Re-read the cache entry: a previous leader on this same key may have
+	// just completed a rotation, in which case the expiry is now outside the
+	// leeway window and there is nothing more to do.
+	record, cached := h.store.LookupToken(token)
+	if !cached {
+		return rotationResult{}
+	}
+	if record.ProviderRefreshToken == "" || record.ProviderAccessExpiry.IsZero() {
+		return rotationResult{}
+	}
+	if time.Until(record.ProviderAccessExpiry) > h.githubRefreshLeeway() {
+		return rotationResult{}
+	}
 	tokens, err := h.provider.RefreshToken(ctx, record.ProviderRefreshToken)
 	if err != nil {
 		if errors.Is(err, provider.ErrRefreshNotSupported) {
-			return "", "", false
+			return rotationResult{}
 		}
 		slog.Warn("rotation_failed",
 			"token_hash", tokenFingerprint(token),
 			"err", err,
 		)
-		return "", "", false
+		return rotationResult{}
 	}
 	if tokens.AccessToken == "" {
 		slog.Warn("rotation_failed",
 			"token_hash", tokenFingerprint(token),
 			"err", "empty access_token from provider",
 		)
-		return "", "", false
+		return rotationResult{}
 	}
 	cacheAudience := ""
 	if record.HasAudience(audience) {
@@ -839,17 +901,21 @@ func (h *Handler) tryGitHubRotation(ctx context.Context, token string, record To
 	// the rotated bearer short-circuit on cache hit. We retain the previous
 	// subject — provider identity does not change on refresh.
 	h.store.CacheToken(tokens.AccessToken, record.Subject, cacheAudience)
-	h.store.RecordProviderRefresh(tokens.AccessToken, newRefresh, newAccessExpiry)
+	h.persistProviderRefresh(tokens.AccessToken, newRefresh, newAccessExpiry)
 	// Update the original entry's provider refresh metadata so the next
 	// rotation cycle still works if the client keeps presenting the old
 	// bearer (which is the common case — MCP clients do not learn of the
 	// rotated value through this flow).
-	h.store.RecordProviderRefresh(token, newRefresh, newAccessExpiry)
+	h.persistProviderRefresh(token, newRefresh, newAccessExpiry)
 	slog.Info("github access token rotated",
 		"old_token_hash", tokenFingerprint(token),
 		"new_token_hash", tokenFingerprint(tokens.AccessToken),
 	)
-	return tokens.AccessToken, record.Subject, true
+	return rotationResult{
+		newToken: tokens.AccessToken,
+		subject:  record.Subject,
+		ok:       true,
+	}
 }
 
 // InvalidateCachedToken delegates cache invalidation to the underlying store.

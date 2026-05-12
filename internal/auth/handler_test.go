@@ -1385,8 +1385,10 @@ func TestTokenRefreshResourceMultipleRaw(t *testing.T) {
 // TestValidateTokenGitHubRotation exercises Phase A rotation: when the cached
 // provider access expiry is within the configured leeway window, ValidateToken
 // must call Provider.RefreshToken, cache the new access token under its own
-// key, invalidate the old key, and surface the rotated token to callers via
-// the second return value.  Parameterised on rotation outcome.
+// key, keep the original entry cached (with refreshed provider metadata so a
+// subsequent in-window request from the same client triggers rotation again),
+// and surface the rotated token to callers via the second return value.
+// Parameterised on rotation outcome.
 func TestValidateTokenGitHubRotation(t *testing.T) {
 	const audience = "http://localhost:8080/mcp"
 	cases := []struct {
@@ -1572,6 +1574,130 @@ func TestValidateTokenGitHubRotation(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestPersistProviderRefreshGate verifies that GitHub refresh-token metadata
+// is written to the token store only when GitHubRefreshEnabled is true.  When
+// the gate is off, neither tokenAuthCode nor tokenDeviceGrant must leak the
+// refresh_token onto disk; this is the security guarantee documented in
+// configuration.md.
+func TestPersistProviderRefreshGate(t *testing.T) {
+	cases := []struct {
+		name        string
+		gateEnabled bool
+		wantStored  bool
+	}{
+		{name: "flag on persists provider refresh metadata", gateEnabled: true, wantStored: true},
+		{name: "flag off skips persistence entirely", gateEnabled: false, wantStored: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &provider.Mock{ClientIDValue: "test-client-id"}
+			h, err := NewHandler(Config{
+				BaseURL:              "http://localhost:8080",
+				SessionTTL:           10 * time.Minute,
+				CacheTTL:             5 * time.Minute,
+				ExpiresIn:            90 * 24 * time.Hour,
+				GitHubRefreshEnabled: tc.gateEnabled,
+			}, p)
+			if err != nil {
+				t.Fatalf("NewHandler: %v", err)
+			}
+			h.store.RegisterTokenAudience("gha_token", "http://localhost:8080")
+			h.persistProviderRefresh("gha_token", "ghrt-secret", time.Now().Add(time.Hour))
+
+			rec, ok := h.store.LookupToken("gha_token")
+			if !ok {
+				t.Fatal("token entry should exist after RegisterTokenAudience")
+			}
+			if tc.wantStored && rec.ProviderRefreshToken != "ghrt-secret" {
+				t.Errorf("provider refresh token: got %q, want %q", rec.ProviderRefreshToken, "ghrt-secret")
+			}
+			if !tc.wantStored && rec.ProviderRefreshToken != "" {
+				t.Errorf("provider refresh token must not be stored when gate is off, got %q", rec.ProviderRefreshToken)
+			}
+		})
+	}
+}
+
+// TestValidateTokenGitHubRotationSingleflight verifies that concurrent
+// ValidateToken calls for the same bearer token collapse into a single
+// provider.RefreshToken invocation, with all callers receiving the same
+// rotated access token.  Without singleflight, a burst of in-window requests
+// would race to refresh and GitHub would reject the second call as
+// bad_refresh_token.
+func TestValidateTokenGitHubRotationSingleflight(t *testing.T) {
+	const audience = "http://localhost:8080/mcp"
+	const concurrency = 8
+
+	var (
+		refreshCalls int32
+		releaseCh    = make(chan struct{})
+	)
+	p := &provider.Mock{
+		ClientIDValue: "test-client-id",
+		ValidateFunc: func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Provider: "mock", Subject: "alice"}, nil
+		},
+		RefreshTokenFunc: func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			atomic.AddInt32(&refreshCalls, 1)
+			// Hold the leader inside the provider call so that followers
+			// definitely arrive while the singleflight key is still in flight.
+			<-releaseCh
+			return provider.TokenResponse{
+				AccessToken:          "rotated-once",
+				RefreshToken:         "rt-new",
+				AccessTokenExpiresIn: 28800 * time.Second,
+			}, nil
+		},
+	}
+	h, err := NewHandler(Config{
+		BaseURL:              "http://localhost:8080",
+		SessionTTL:           10 * time.Minute,
+		CacheTTL:             5 * time.Minute,
+		ExpiresIn:            90 * 24 * time.Hour,
+		AllowedAudiences:     []string{audience},
+		GitHubRefreshEnabled: true,
+	}, p)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	h.store.CacheToken("burst-token", "alice", audience)
+	h.store.RecordProviderRefresh("burst-token", "rt-0", time.Now().Add(30*time.Second))
+
+	results := make([]string, concurrency)
+	errs := make([]error, concurrency)
+	var wg sync.WaitGroup
+	for i := range results {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			_, rotated, err := h.ValidateToken(context.Background(), "burst-token", audience)
+			results[idx] = rotated
+			errs[idx] = err
+		}(i)
+	}
+	// Give the goroutines time to all converge on singleflight.Do before the
+	// leader's provider call returns. A short sleep is acceptable here because
+	// the singleflight membership is purely a sync barrier and the leader is
+	// blocked on releaseCh anyway.
+	time.Sleep(50 * time.Millisecond)
+	close(releaseCh)
+	wg.Wait()
+
+	if got := atomic.LoadInt32(&refreshCalls); got != 1 {
+		t.Errorf("provider.RefreshToken must be called exactly once under singleflight, got %d", got)
+	}
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("goroutine %d ValidateToken err: %v", i, err)
+		}
+	}
+	for i, rotated := range results {
+		if rotated != "rotated-once" {
+			t.Errorf("goroutine %d rotated token: got %q, want %q", i, rotated, "rotated-once")
+		}
 	}
 }
 

@@ -10,5 +10,6 @@ require (
 
 require (
 	filippo.io/hpke v0.4.0 // indirect
+	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.43.0 // indirect
 )

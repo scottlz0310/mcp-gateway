@@ -298,10 +298,12 @@ metadata for the bearer token:
    skipped and the cached subject is returned as usual.
 2. If the access expiry is within the leeway window, the gateway calls the
    GitHub token endpoint with `grant_type=refresh_token`.
-3. On success, the new access token is cached under its own key, the previous
-   key is invalidated, and the rotated token is forwarded to the upstream MCP
-   server via the request context. The new refresh token (if returned)
-   replaces the old one for the next rotation.
+3. On success, the new access token is cached under its own key and the
+   rotated token is forwarded to the upstream MCP server via the request
+   context. The original token's cache entry is **kept** (MCP clients
+   continue presenting the original bearer), and its provider refresh
+   metadata is updated to the freshly issued refresh token / expiry so the
+   next in-window request from the same client triggers another rotation.
 4. On any provider failure the gateway logs `rotation_failed`, leaves the
    cache as-is, and continues with the original token. If the upstream
    subsequently returns 401, the existing cache-invalidation path handles
