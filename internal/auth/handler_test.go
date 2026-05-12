@@ -244,8 +244,11 @@ func TestAuthorizeResourceAudienceStoredOnToken(t *testing.T) {
 	p := &provider.Mock{
 		ClientIDValue: "test-client-id",
 		ScopesValue:   "repo,user",
-		ExchangeCodeFunc: func(_ context.Context, _ string) (string, []string, error) {
-			return "opaque-route-token", []string{"repo", "user"}, nil
+		ExchangeCodeFunc: func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{
+				AccessToken: "opaque-route-token",
+				Scopes:      []string{"repo", "user"},
+			}, nil
 		},
 		ValidateFunc: func(_ context.Context, _ string) (provider.Identity, error) {
 			return provider.Identity{Provider: "mock", Subject: "alice"}, nil
@@ -301,12 +304,15 @@ func TestAuthorizeResourceAudienceStoredOnToken(t *testing.T) {
 	if !rec.HasAudience(routeAudience) {
 		t.Fatalf("token audiences: got %#v, want %q", rec.Audiences, routeAudience)
 	}
-	subject, err := h.ValidateToken(context.Background(), "opaque-route-token", routeAudience)
+	subject, rotated, err := h.ValidateToken(context.Background(), "opaque-route-token", routeAudience)
 	if err != nil {
 		t.Fatalf("ValidateToken: %v", err)
 	}
 	if subject != "alice" {
 		t.Errorf("subject: got %q, want alice", subject)
+	}
+	if rotated != "" {
+		t.Errorf("rotated token: got %q, want empty", rotated)
 	}
 }
 
@@ -335,7 +341,7 @@ func TestValidateTokenAudienceMismatch(t *testing.T) {
 	h.store.RegisterTokenAudience("route-token", "http://localhost:8080/mcp/a")
 	h.store.CacheToken("route-token", "alice", "")
 
-	_, err := h.ValidateToken(context.Background(), "route-token", "http://localhost:8080/mcp/b")
+	_, _, err := h.ValidateToken(context.Background(), "route-token", "http://localhost:8080/mcp/b")
 	if !errors.Is(err, ErrTokenAudienceMismatch) {
 		t.Fatalf("ValidateToken err: got %v, want ErrTokenAudienceMismatch", err)
 	}
@@ -394,7 +400,7 @@ func TestValidateTokenAudiencePrefixMatching(t *testing.T) {
 			h.store.RegisterTokenAudience("token", tc.recorded)
 			h.store.CacheToken("token", "alice", "")
 
-			subject, err := h.ValidateToken(context.Background(), "token", tc.requested)
+			subject, _, err := h.ValidateToken(context.Background(), "token", tc.requested)
 			if tc.wantErr == nil {
 				if err != nil {
 					t.Fatalf("got err %v, want nil", err)
@@ -452,7 +458,7 @@ func TestValidateTokenLegacyGraceAndStrictModes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewHandler grace: %v", err)
 	}
-	subject, err := grace.ValidateToken(context.Background(), "legacy-token", audience)
+	subject, _, err := grace.ValidateToken(context.Background(), "legacy-token", audience)
 	if err != nil {
 		t.Fatalf("grace ValidateToken: %v", err)
 	}
@@ -477,7 +483,7 @@ func TestValidateTokenLegacyGraceAndStrictModes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewHandler strict: %v", err)
 	}
-	_, err = strict.ValidateToken(context.Background(), "legacy-token", audience)
+	_, _, err = strict.ValidateToken(context.Background(), "legacy-token", audience)
 	if !errors.Is(err, ErrTokenAudienceMissing) {
 		t.Fatalf("strict ValidateToken err: got %v, want ErrTokenAudienceMissing", err)
 	}
@@ -1373,5 +1379,603 @@ func TestTokenRefreshResourceMultipleRaw(t *testing.T) {
 	_ = json.NewDecoder(w.Body).Decode(&resp)
 	if resp["error"] != "invalid_target" {
 		t.Errorf("error: got %v, want invalid_target", resp["error"])
+	}
+}
+
+// TestValidateTokenGitHubRotation exercises Phase A rotation: when the cached
+// provider access expiry is within the configured leeway window, ValidateToken
+// must call Provider.RefreshToken, cache the new access token under its own
+// key, keep the original entry cached (with refreshed provider metadata so a
+// subsequent in-window request from the same client triggers rotation again),
+// and surface the rotated token to callers via the second return value.
+// Parameterised on rotation outcome.
+func TestValidateTokenGitHubRotation(t *testing.T) {
+	const audience = "http://localhost:8080/mcp"
+	cases := []struct {
+		name             string
+		gateEnabled      bool
+		providerExpiryIn time.Duration // relative to now; zero means "no expiry hint"
+		providerRefresh  string        // empty means no metadata cached
+		refreshFunc      func(ctx context.Context, rt string) (provider.TokenResponse, error)
+		wantRotated      string
+		wantSubject      string
+		wantRefreshCalls int
+	}{
+		{
+			name:             "happy path within leeway window",
+			gateEnabled:      true,
+			providerExpiryIn: 30 * time.Second,
+			providerRefresh:  "rt-old",
+			refreshFunc: func(_ context.Context, rt string) (provider.TokenResponse, error) {
+				if rt != "rt-old" {
+					return provider.TokenResponse{}, fmt.Errorf("unexpected refresh token %q", rt)
+				}
+				return provider.TokenResponse{
+					AccessToken:          "new-access",
+					RefreshToken:         "rt-new",
+					AccessTokenExpiresIn: 28800 * time.Second,
+				}, nil
+			},
+			wantRotated:      "new-access",
+			wantSubject:      "alice",
+			wantRefreshCalls: 1,
+		},
+		{
+			name:             "just inside the leeway boundary",
+			gateEnabled:      true,
+			providerExpiryIn: defaultGitHubRefreshLeeway - 1*time.Second,
+			providerRefresh:  "rt-old",
+			refreshFunc: func(_ context.Context, _ string) (provider.TokenResponse, error) {
+				return provider.TokenResponse{
+					AccessToken:          "edge-new",
+					AccessTokenExpiresIn: 28800 * time.Second,
+				}, nil
+			},
+			wantRotated:      "edge-new",
+			wantSubject:      "alice",
+			wantRefreshCalls: 1,
+		},
+		{
+			name:             "outside leeway: rotation skipped",
+			gateEnabled:      true,
+			providerExpiryIn: 1 * time.Hour,
+			providerRefresh:  "rt-old",
+			refreshFunc: func(_ context.Context, _ string) (provider.TokenResponse, error) {
+				return provider.TokenResponse{}, fmt.Errorf("refresh must not be called when expiry is outside leeway")
+			},
+			wantRotated:      "",
+			wantSubject:      "alice",
+			wantRefreshCalls: 0,
+		},
+		{
+			name:             "provider refresh failure falls back to cached subject",
+			gateEnabled:      true,
+			providerExpiryIn: 30 * time.Second,
+			providerRefresh:  "rt-bad",
+			refreshFunc: func(_ context.Context, _ string) (provider.TokenResponse, error) {
+				return provider.TokenResponse{}, fmt.Errorf("bad_refresh_token")
+			},
+			wantRotated:      "",
+			wantSubject:      "alice",
+			wantRefreshCalls: 1,
+		},
+		{
+			name:             "gate disabled: rotation skipped even when ripe",
+			gateEnabled:      false,
+			providerExpiryIn: 30 * time.Second,
+			providerRefresh:  "rt-old",
+			refreshFunc: func(_ context.Context, _ string) (provider.TokenResponse, error) {
+				return provider.TokenResponse{}, fmt.Errorf("refresh must not be called when gate is disabled")
+			},
+			wantRotated:      "",
+			wantSubject:      "alice",
+			wantRefreshCalls: 0,
+		},
+		{
+			name:             "no provider metadata cached: rotation skipped",
+			gateEnabled:      true,
+			providerExpiryIn: 30 * time.Second,
+			providerRefresh:  "",
+			refreshFunc: func(_ context.Context, _ string) (provider.TokenResponse, error) {
+				return provider.TokenResponse{}, fmt.Errorf("refresh must not be called without cached refresh token")
+			},
+			wantRotated:      "",
+			wantSubject:      "alice",
+			wantRefreshCalls: 0,
+		},
+		{
+			name:             "provider returns empty access token: rotation aborted",
+			gateEnabled:      true,
+			providerExpiryIn: 30 * time.Second,
+			providerRefresh:  "rt-empty",
+			refreshFunc: func(_ context.Context, _ string) (provider.TokenResponse, error) {
+				return provider.TokenResponse{AccessToken: ""}, nil
+			},
+			wantRotated:      "",
+			wantSubject:      "alice",
+			wantRefreshCalls: 1,
+		},
+		{
+			name:             "provider returns ErrRefreshNotSupported: treated as inert",
+			gateEnabled:      true,
+			providerExpiryIn: 30 * time.Second,
+			providerRefresh:  "rt-old",
+			refreshFunc: func(_ context.Context, _ string) (provider.TokenResponse, error) {
+				return provider.TokenResponse{}, provider.ErrRefreshNotSupported
+			},
+			wantRotated:      "",
+			wantSubject:      "alice",
+			wantRefreshCalls: 1,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var refreshCalls int
+			p := &provider.Mock{
+				ClientIDValue: "test-client-id",
+				ValidateFunc: func(_ context.Context, _ string) (provider.Identity, error) {
+					return provider.Identity{Provider: "mock", Subject: "alice"}, nil
+				},
+				RefreshTokenFunc: func(ctx context.Context, rt string) (provider.TokenResponse, error) {
+					refreshCalls++
+					return tc.refreshFunc(ctx, rt)
+				},
+			}
+			h, err := NewHandler(Config{
+				BaseURL:              "http://localhost:8080",
+				SessionTTL:           10 * time.Minute,
+				CacheTTL:             5 * time.Minute,
+				ExpiresIn:            90 * 24 * time.Hour,
+				AllowedAudiences:     []string{audience},
+				GitHubRefreshEnabled: tc.gateEnabled,
+			}, p)
+			if err != nil {
+				t.Fatalf("NewHandler: %v", err)
+			}
+			h.store.CacheToken("old-access", "alice", audience)
+			if tc.providerRefresh != "" {
+				var expiry time.Time
+				if tc.providerExpiryIn > 0 {
+					expiry = time.Now().Add(tc.providerExpiryIn)
+				}
+				h.store.RecordProviderRefresh("old-access", tc.providerRefresh, expiry)
+			}
+
+			subject, rotated, err := h.ValidateToken(context.Background(), "old-access", audience)
+			if err != nil {
+				t.Fatalf("ValidateToken: %v", err)
+			}
+			if subject != tc.wantSubject {
+				t.Errorf("subject: got %q, want %q", subject, tc.wantSubject)
+			}
+			if rotated != tc.wantRotated {
+				t.Errorf("rotated: got %q, want %q", rotated, tc.wantRotated)
+			}
+			if refreshCalls != tc.wantRefreshCalls {
+				t.Errorf("refresh calls: got %d, want %d", refreshCalls, tc.wantRefreshCalls)
+			}
+			if tc.wantRotated != "" {
+				rec, ok := h.store.LookupToken(tc.wantRotated)
+				if !ok {
+					t.Fatal("expected new access token to be cached after rotation")
+				}
+				if rec.Subject != tc.wantSubject {
+					t.Errorf("new cache subject: got %q, want %q", rec.Subject, tc.wantSubject)
+				}
+				// Old entry must remain cached: clients keep presenting it and
+				// dropping it would force a provider round-trip — possibly a
+				// 401 once GitHub expires the original.
+				oldRec, oldCached := h.store.LookupToken("old-access")
+				if !oldCached {
+					t.Fatal("old access token must remain cached after rotation so the client can keep using it")
+				}
+				if oldRec.ProviderRefreshToken == "" {
+					t.Error("old entry must carry refreshed provider metadata for the next rotation cycle")
+				}
+			}
+		})
+	}
+}
+
+// TestPersistProviderRefreshGate verifies that GitHub refresh-token metadata
+// is written to the token store only when GitHubRefreshEnabled is true.  When
+// the gate is off, neither tokenAuthCode nor tokenDeviceGrant must leak the
+// refresh_token onto disk; this is the security guarantee documented in
+// configuration.md.
+func TestPersistProviderRefreshGate(t *testing.T) {
+	cases := []struct {
+		name        string
+		gateEnabled bool
+		wantStored  bool
+	}{
+		{name: "flag on persists provider refresh metadata", gateEnabled: true, wantStored: true},
+		{name: "flag off skips persistence entirely", gateEnabled: false, wantStored: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &provider.Mock{ClientIDValue: "test-client-id"}
+			h, err := NewHandler(Config{
+				BaseURL:              "http://localhost:8080",
+				SessionTTL:           10 * time.Minute,
+				CacheTTL:             5 * time.Minute,
+				ExpiresIn:            90 * 24 * time.Hour,
+				GitHubRefreshEnabled: tc.gateEnabled,
+			}, p)
+			if err != nil {
+				t.Fatalf("NewHandler: %v", err)
+			}
+			h.store.RegisterTokenAudience("gha_token", "http://localhost:8080")
+			h.persistProviderRefresh("gha_token", "ghrt-secret", time.Now().Add(time.Hour))
+
+			rec, ok := h.store.LookupToken("gha_token")
+			if !ok {
+				t.Fatal("token entry should exist after RegisterTokenAudience")
+			}
+			if tc.wantStored && rec.ProviderRefreshToken != "ghrt-secret" {
+				t.Errorf("provider refresh token: got %q, want %q", rec.ProviderRefreshToken, "ghrt-secret")
+			}
+			if !tc.wantStored && rec.ProviderRefreshToken != "" {
+				t.Errorf("provider refresh token must not be stored when gate is off, got %q", rec.ProviderRefreshToken)
+			}
+		})
+	}
+}
+
+// TestValidateTokenGitHubRotationSingleflight verifies that concurrent
+// ValidateToken calls for the same bearer token collapse into a single
+// provider.RefreshToken invocation, with all callers receiving the same
+// rotated access token.  Without singleflight, a burst of in-window requests
+// would race to refresh and GitHub would reject the second call as
+// bad_refresh_token.
+func TestValidateTokenGitHubRotationSingleflight(t *testing.T) {
+	const audience = "http://localhost:8080/mcp"
+	const concurrency = 8
+
+	var (
+		refreshCalls int32
+		releaseCh    = make(chan struct{})
+	)
+	p := &provider.Mock{
+		ClientIDValue: "test-client-id",
+		ValidateFunc: func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Provider: "mock", Subject: "alice"}, nil
+		},
+		RefreshTokenFunc: func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			atomic.AddInt32(&refreshCalls, 1)
+			// Hold the leader inside the provider call so that followers
+			// definitely arrive while the singleflight key is still in flight.
+			<-releaseCh
+			return provider.TokenResponse{
+				AccessToken:          "rotated-once",
+				RefreshToken:         "rt-new",
+				AccessTokenExpiresIn: 28800 * time.Second,
+			}, nil
+		},
+	}
+	h, err := NewHandler(Config{
+		BaseURL:              "http://localhost:8080",
+		SessionTTL:           10 * time.Minute,
+		CacheTTL:             5 * time.Minute,
+		ExpiresIn:            90 * 24 * time.Hour,
+		AllowedAudiences:     []string{audience},
+		GitHubRefreshEnabled: true,
+	}, p)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	h.store.CacheToken("burst-token", "alice", audience)
+	h.store.RecordProviderRefresh("burst-token", "rt-0", time.Now().Add(30*time.Second))
+
+	results := make([]string, concurrency)
+	errs := make([]error, concurrency)
+	var wg sync.WaitGroup
+	for i := range results {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			_, rotated, err := h.ValidateToken(context.Background(), "burst-token", audience)
+			results[idx] = rotated
+			errs[idx] = err
+		}(i)
+	}
+	// Give the goroutines time to all converge on singleflight.Do before the
+	// leader's provider call returns. A short sleep is acceptable here because
+	// the singleflight membership is purely a sync barrier and the leader is
+	// blocked on releaseCh anyway.
+	time.Sleep(50 * time.Millisecond)
+	close(releaseCh)
+	wg.Wait()
+
+	if got := atomic.LoadInt32(&refreshCalls); got != 1 {
+		t.Errorf("provider.RefreshToken must be called exactly once under singleflight, got %d", got)
+	}
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("goroutine %d ValidateToken err: %v", i, err)
+		}
+	}
+	for i, rotated := range results {
+		if rotated != "rotated-once" {
+			t.Errorf("goroutine %d rotated token: got %q, want %q", i, rotated, "rotated-once")
+		}
+	}
+}
+
+// TestValidateTokenGitHubRotationFailureClearsMetadata verifies that a
+// permanent provider failure (e.g. bad_refresh_token) clears the cached
+// provider refresh metadata so subsequent ValidateToken calls do not keep
+// hammering the provider with the same poisoned refresh token. Transient
+// (UpstreamError) failures must NOT clear metadata so they can be retried
+// once the provider recovers.
+func TestValidateTokenGitHubRotationFailureClearsMetadata(t *testing.T) {
+	const audience = "http://localhost:8080/mcp"
+	cases := []struct {
+		name              string
+		refreshFunc       func(ctx context.Context, rt string) (provider.TokenResponse, error)
+		wantMetadataKept  bool // true means metadata must remain intact for next retry
+	}{
+		{
+			name: "bad_refresh_token (permanent) clears metadata",
+			refreshFunc: func(_ context.Context, _ string) (provider.TokenResponse, error) {
+				return provider.TokenResponse{}, fmt.Errorf("bad_refresh_token")
+			},
+			wantMetadataKept: false,
+		},
+		{
+			name: "ErrRefreshNotSupported clears metadata",
+			refreshFunc: func(_ context.Context, _ string) (provider.TokenResponse, error) {
+				return provider.TokenResponse{}, provider.ErrRefreshNotSupported
+			},
+			wantMetadataKept: false,
+		},
+		{
+			name: "empty access_token clears metadata",
+			refreshFunc: func(_ context.Context, _ string) (provider.TokenResponse, error) {
+				return provider.TokenResponse{AccessToken: ""}, nil
+			},
+			wantMetadataKept: false,
+		},
+		{
+			name: "transient UpstreamError keeps metadata for retry",
+			refreshFunc: func(_ context.Context, _ string) (provider.TokenResponse, error) {
+				return provider.TokenResponse{}, &provider.UpstreamError{Err: fmt.Errorf("network down")}
+			},
+			wantMetadataKept: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &provider.Mock{
+				ClientIDValue: "test-client-id",
+				ValidateFunc: func(_ context.Context, _ string) (provider.Identity, error) {
+					return provider.Identity{Provider: "mock", Subject: "alice"}, nil
+				},
+				RefreshTokenFunc: tc.refreshFunc,
+			}
+			h, err := NewHandler(Config{
+				BaseURL:              "http://localhost:8080",
+				SessionTTL:           10 * time.Minute,
+				CacheTTL:             5 * time.Minute,
+				ExpiresIn:            90 * 24 * time.Hour,
+				AllowedAudiences:     []string{audience},
+				GitHubRefreshEnabled: true,
+			}, p)
+			if err != nil {
+				t.Fatalf("NewHandler: %v", err)
+			}
+			h.store.CacheToken("at", "alice", audience)
+			h.store.RecordProviderRefresh("at", "rt-original", time.Now().Add(30*time.Second))
+
+			_, rotated, err := h.ValidateToken(context.Background(), "at", audience)
+			if err != nil {
+				t.Fatalf("ValidateToken: %v", err)
+			}
+			if rotated != "" {
+				t.Errorf("rotated must be empty on failure, got %q", rotated)
+			}
+			rec, ok := h.store.LookupToken("at")
+			if !ok {
+				t.Fatal("token entry must still exist after rotation failure")
+			}
+			if tc.wantMetadataKept {
+				if rec.ProviderRefreshToken != "rt-original" {
+					t.Errorf("transient failure must keep refresh metadata, got %q", rec.ProviderRefreshToken)
+				}
+			} else {
+				if rec.ProviderRefreshToken != "" {
+					t.Errorf("permanent failure must clear refresh metadata, got %q", rec.ProviderRefreshToken)
+				}
+				if !rec.ProviderAccessExpiry.IsZero() {
+					t.Errorf("permanent failure must clear access expiry, got %v", rec.ProviderAccessExpiry)
+				}
+			}
+		})
+	}
+}
+
+// TestValidateTokenGitHubRotationSkipsWhenSubjectUnknown verifies that
+// rotation is skipped when the cached entry has not yet been validated
+// against the provider (Subject is empty), so downstream services never see
+// an anonymous identity header injected from a half-populated cache row.
+func TestValidateTokenGitHubRotationSkipsWhenSubjectUnknown(t *testing.T) {
+	const audience = "http://localhost:8080/mcp"
+	var refreshCalls int
+	var validateCalls int
+	p := &provider.Mock{
+		ClientIDValue: "test-client-id",
+		ValidateFunc: func(_ context.Context, _ string) (provider.Identity, error) {
+			validateCalls++
+			return provider.Identity{Provider: "mock", Subject: "alice"}, nil
+		},
+		RefreshTokenFunc: func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			refreshCalls++
+			return provider.TokenResponse{
+				AccessToken:          "new-access",
+				RefreshToken:         "rt-new",
+				AccessTokenExpiresIn: 30 * time.Second,
+			}, nil
+		},
+	}
+	h, err := NewHandler(Config{
+		BaseURL:              "http://localhost:8080",
+		SessionTTL:           10 * time.Minute,
+		CacheTTL:             5 * time.Minute,
+		ExpiresIn:            90 * 24 * time.Hour,
+		AllowedAudiences:     []string{audience},
+		GitHubRefreshEnabled: true,
+	}, p)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	// Register the audience (mimicking tokenAuthCode) but skip CacheToken so
+	// Subject stays empty. Then attach in-leeway provider metadata.
+	h.store.RegisterTokenAudience("token-no-subject", audience)
+	h.store.RecordProviderRefresh("token-no-subject", "rt-old", time.Now().Add(30*time.Second))
+
+	subject, rotated, err := h.ValidateToken(context.Background(), "token-no-subject", audience)
+	if err != nil {
+		t.Fatalf("ValidateToken: %v", err)
+	}
+	if rotated != "" {
+		t.Errorf("rotation must be skipped when subject is unknown, got rotated=%q", rotated)
+	}
+	if refreshCalls != 0 {
+		t.Errorf("provider.RefreshToken must not be called when subject is unknown, got %d calls", refreshCalls)
+	}
+	if subject != "alice" {
+		t.Errorf("subject after provider validation: got %q, want alice", subject)
+	}
+	if validateCalls != 1 {
+		t.Errorf("provider.ValidateToken should be called once to populate subject, got %d", validateCalls)
+	}
+}
+
+// TestValidateTokenGitHubRotationKeepsOriginalEntryRotating verifies that
+// after a successful rotation, presenting the original token again triggers
+// another rotation (using the rotated refresh token) — i.e. the original
+// entry's metadata was refreshed, not cleared.
+func TestValidateTokenGitHubRotationKeepsOriginalEntryRotating(t *testing.T) {
+	const audience = "http://localhost:8080/mcp"
+	var observed []string
+	p := &provider.Mock{
+		ClientIDValue: "test-client-id",
+		ValidateFunc: func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Provider: "mock", Subject: "alice"}, nil
+		},
+		RefreshTokenFunc: func(_ context.Context, rt string) (provider.TokenResponse, error) {
+			observed = append(observed, rt)
+			return provider.TokenResponse{
+				AccessToken:          fmt.Sprintf("new-access-%d", len(observed)),
+				RefreshToken:         fmt.Sprintf("rt-new-%d", len(observed)),
+				AccessTokenExpiresIn: 30 * time.Second,
+			}, nil
+		},
+	}
+	h, err := NewHandler(Config{
+		BaseURL:              "http://localhost:8080",
+		SessionTTL:           10 * time.Minute,
+		CacheTTL:             5 * time.Minute,
+		ExpiresIn:            90 * 24 * time.Hour,
+		AllowedAudiences:     []string{audience},
+		GitHubRefreshEnabled: true,
+	}, p)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	h.store.CacheToken("original", "alice", audience)
+	h.store.RecordProviderRefresh("original", "rt-0", time.Now().Add(30*time.Second))
+
+	// First request: rotation fires, original cache stays with refreshed metadata.
+	_, rotated1, err := h.ValidateToken(context.Background(), "original", audience)
+	if err != nil {
+		t.Fatalf("first ValidateToken: %v", err)
+	}
+	if rotated1 != "new-access-1" {
+		t.Fatalf("first rotation: got %q", rotated1)
+	}
+	// Second request from a client that still presents the original token:
+	// rotation should fire again using the rotated refresh token.
+	_, rotated2, err := h.ValidateToken(context.Background(), "original", audience)
+	if err != nil {
+		t.Fatalf("second ValidateToken: %v", err)
+	}
+	if rotated2 != "new-access-2" {
+		t.Fatalf("second rotation off original token: got %q", rotated2)
+	}
+	if len(observed) != 2 {
+		t.Fatalf("refresh call count: got %d, want 2", len(observed))
+	}
+	if observed[0] != "rt-0" || observed[1] != "rt-new-1" {
+		t.Errorf("provider received refresh tokens %v; expected [rt-0 rt-new-1]", observed)
+	}
+}
+
+// TestValidateTokenGitHubRotationCarriesRefreshToken verifies that a
+// successful rotation carries the new refresh token forward, so the next
+// rotation uses the rotated value rather than re-using the original.
+func TestValidateTokenGitHubRotationCarriesRefreshToken(t *testing.T) {
+	const audience = "http://localhost:8080/mcp"
+	var observedRefreshTokens []string
+	p := &provider.Mock{
+		ClientIDValue: "test-client-id",
+		ValidateFunc: func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Provider: "mock", Subject: "alice"}, nil
+		},
+		RefreshTokenFunc: func(_ context.Context, rt string) (provider.TokenResponse, error) {
+			observedRefreshTokens = append(observedRefreshTokens, rt)
+			return provider.TokenResponse{
+				AccessToken:          fmt.Sprintf("at-%d", len(observedRefreshTokens)),
+				RefreshToken:         fmt.Sprintf("rt-%d", len(observedRefreshTokens)),
+				AccessTokenExpiresIn: 30 * time.Second,
+			}, nil
+		},
+	}
+	h, err := NewHandler(Config{
+		BaseURL:              "http://localhost:8080",
+		SessionTTL:           10 * time.Minute,
+		CacheTTL:             5 * time.Minute,
+		ExpiresIn:            90 * 24 * time.Hour,
+		AllowedAudiences:     []string{audience},
+		GitHubRefreshEnabled: true,
+	}, p)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	h.store.CacheToken("at-0", "alice", audience)
+	h.store.RecordProviderRefresh("at-0", "rt-0", time.Now().Add(30*time.Second))
+
+	_, rotated, err := h.ValidateToken(context.Background(), "at-0", audience)
+	if err != nil {
+		t.Fatalf("first ValidateToken: %v", err)
+	}
+	if rotated != "at-1" {
+		t.Fatalf("first rotation: rotated token = %q, want at-1", rotated)
+	}
+	_, rotated2, err := h.ValidateToken(context.Background(), rotated, audience)
+	if err != nil {
+		t.Fatalf("second ValidateToken: %v", err)
+	}
+	if rotated2 != "at-2" {
+		t.Fatalf("second rotation: rotated token = %q, want at-2", rotated2)
+	}
+	if len(observedRefreshTokens) != 2 {
+		t.Fatalf("provider call count: got %d, want 2", len(observedRefreshTokens))
+	}
+	if observedRefreshTokens[0] != "rt-0" || observedRefreshTokens[1] != "rt-1" {
+		t.Errorf("provider received refresh tokens %v; expected [rt-0 rt-1]", observedRefreshTokens)
+	}
+}
+
+// TestTokenStoreSaveProviderRefreshNoEntry verifies that SaveProviderRefresh
+// on an unknown token is a silent no-op rather than resurrecting an entry.
+// This is the contract relied on by Store.RecordProviderRefresh to keep
+// the cache from drifting after Sweep removes an expired token.
+func TestTokenStoreSaveProviderRefreshNoEntry(t *testing.T) {
+	store := NewMemTokenStore()
+	if err := store.SaveProviderRefresh("unknown", "rt", time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("SaveProviderRefresh: %v", err)
+	}
+	if _, ok := store.Lookup("unknown"); ok {
+		t.Fatal("SaveProviderRefresh must not create a new entry for unknown token")
 	}
 }

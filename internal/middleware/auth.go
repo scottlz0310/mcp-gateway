@@ -20,8 +20,15 @@ const ContextKeyIdentity contextKey = "authenticated_user"
 const ContextKeyToken contextKey = "auth_token"
 
 // TokenValidator is implemented by auth.Handler.
+//
+// The second return value (rotatedToken) is non-empty when the underlying
+// provider transparently rotated the upstream access token during validation
+// (e.g. GitHub OAuth Apps with expiring tokens). When non-empty, Auth
+// middleware substitutes it for the original bearer token in the request
+// context so that the reverse proxy forwards the fresh token to the upstream
+// MCP server.
 type TokenValidator interface {
-	ValidateToken(ctx context.Context, token, audience string) (string, error)
+	ValidateToken(ctx context.Context, token, audience string) (subject, rotatedToken string, err error)
 }
 
 type upstreamErrorer interface {
@@ -90,7 +97,7 @@ func Auth(v TokenValidator, opts ...AuthOption) func(http.Handler) http.Handler 
 				return
 			}
 
-			subject, err := v.ValidateToken(r.Context(), token, audience)
+			subject, rotated, err := v.ValidateToken(r.Context(), token, audience)
 			if err != nil {
 				var ue upstreamErrorer
 				if errors.As(err, &ue) {
@@ -118,7 +125,11 @@ func Auth(v TokenValidator, opts ...AuthOption) func(http.Handler) http.Handler 
 			}
 
 			ctx := context.WithValue(r.Context(), ContextKeyIdentity, subject)
-			ctx = context.WithValue(ctx, ContextKeyToken, token)
+			forwardedToken := token
+			if rotated != "" {
+				forwardedToken = rotated
+			}
+			ctx = context.WithValue(ctx, ContextKeyToken, forwardedToken)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}

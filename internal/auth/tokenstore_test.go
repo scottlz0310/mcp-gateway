@@ -129,6 +129,125 @@ func TestFileTokenStorePersistence(t *testing.T) {
 	}
 }
 
+// TestFileTokenStoreProviderRefreshRoundTrip verifies that provider refresh
+// metadata persisted via SaveProviderRefresh survives a reload of the
+// FileTokenStore.  Restart preservation is the contract relied on by the
+// rotation path so that an in-flight refresh-token / access-expiry pair is
+// not lost on container reboot.
+func TestFileTokenStoreProviderRefreshRoundTrip(t *testing.T) {
+	cases := []struct {
+		name             string
+		setup            func(t *testing.T, ts TokenStore)
+		expectedRefresh  string
+		expectedAccessIn time.Duration
+		expectExpiryZero bool
+	}{
+		{
+			name: "metadata attached after Save survives reload",
+			setup: func(t *testing.T, ts TokenStore) {
+				t.Helper()
+				if err := ts.Save("rt-host", "alice", []string{"https://gw.example/mcp"}, time.Now().Add(time.Hour)); err != nil {
+					t.Fatalf("Save: %v", err)
+				}
+				if err := ts.SaveProviderRefresh("rt-host", "ghrt-1", time.Now().Add(30*time.Minute)); err != nil {
+					t.Fatalf("SaveProviderRefresh: %v", err)
+				}
+			},
+			expectedRefresh:  "ghrt-1",
+			expectedAccessIn: 30 * time.Minute,
+		},
+		{
+			name: "SaveProviderRefresh on missing entry is a no-op (not resurrected on reload)",
+			setup: func(t *testing.T, ts TokenStore) {
+				t.Helper()
+				if err := ts.SaveProviderRefresh("ghost", "ghrt-missing", time.Now().Add(30*time.Minute)); err != nil {
+					t.Fatalf("SaveProviderRefresh: %v", err)
+				}
+			},
+			expectExpiryZero: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := tempStorePath(t)
+			ts1, err := NewFileTokenStore(path)
+			if err != nil {
+				t.Fatalf("initial NewFileTokenStore: %v", err)
+			}
+			tc.setup(t, ts1)
+
+			ts2, err := NewFileTokenStore(path)
+			if err != nil {
+				t.Fatalf("reloaded NewFileTokenStore: %v", err)
+			}
+			if tc.expectedRefresh == "" {
+				if _, ok := ts2.Lookup("ghost"); ok {
+					t.Fatal("SaveProviderRefresh must not create an entry for an unknown token")
+				}
+				return
+			}
+			rec, ok := ts2.Lookup("rt-host")
+			if !ok {
+				t.Fatal("after reload: expected cache hit for rt-host")
+			}
+			if rec.ProviderRefreshToken != tc.expectedRefresh {
+				t.Errorf("provider refresh: got %q, want %q", rec.ProviderRefreshToken, tc.expectedRefresh)
+			}
+			if rec.ProviderAccessExpiry.IsZero() {
+				t.Fatal("provider access expiry: got zero, want non-zero after reload")
+			}
+			// Use a wide tolerance because file IO timing varies; what matters
+			// is that the expiry remains close to the original (not zeroed).
+			diff := time.Until(rec.ProviderAccessExpiry)
+			if diff < tc.expectedAccessIn-time.Minute || diff > tc.expectedAccessIn+time.Minute {
+				t.Errorf("provider access expiry drift: got %v, want ~%v", diff, tc.expectedAccessIn)
+			}
+		})
+	}
+}
+
+// TestFileTokenStoreSaveProviderRefreshFlushFailureRollsBack verifies that a
+// flush failure during SaveProviderRefresh rolls back the in-memory change so
+// the cache and disk remain consistent. We trigger flush failure by replacing
+// the store directory with a non-writable read-only file once setup is done.
+func TestFileTokenStoreSaveProviderRefreshFlushFailureRollsBack(t *testing.T) {
+	path := tempStorePath(t)
+	ts, err := NewFileTokenStore(path)
+	if err != nil {
+		t.Fatalf("NewFileTokenStore: %v", err)
+	}
+	if err := ts.Save("rt-host", "alice", nil, time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := ts.SaveProviderRefresh("rt-host", "ghrt-1", time.Now().Add(30*time.Minute)); err != nil {
+		t.Fatalf("first SaveProviderRefresh: %v", err)
+	}
+
+	// Force flush failure by removing the parent directory so rename targets fail.
+	parent := filepath.Dir(path)
+	t.Cleanup(func() { _ = os.MkdirAll(parent, 0o700) })
+	if err := os.RemoveAll(parent); err != nil {
+		t.Fatalf("RemoveAll: %v", err)
+	}
+
+	err = ts.SaveProviderRefresh("rt-host", "ghrt-2", time.Now().Add(45*time.Minute))
+	if err == nil {
+		t.Fatal("expected SaveProviderRefresh to surface flush failure")
+	}
+	// Restore the directory before asserting Lookup so the assertion is
+	// independent of FS state.
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		t.Fatalf("recreate parent: %v", err)
+	}
+	rec, ok := ts.Lookup("rt-host")
+	if !ok {
+		t.Fatal("Lookup after rollback: expected entry to still be present")
+	}
+	if rec.ProviderRefreshToken != "ghrt-1" {
+		t.Errorf("rollback: provider refresh got %q, want previous %q", rec.ProviderRefreshToken, "ghrt-1")
+	}
+}
+
 // TestFileTokenStoreExpiredNotLoaded verifies that expired entries written before
 // a reload do not surface after the reload's startup sweep.
 func TestFileTokenStoreExpiredNotLoaded(t *testing.T) {

@@ -3,7 +3,29 @@
 // gateway can be wired to GitHub, fly.io, OIDC, etc. via configuration.
 package provider
 
-import "context"
+import (
+	"context"
+	"errors"
+	"time"
+)
+
+// ErrRefreshNotSupported is returned by Provider.RefreshToken when the
+// implementation does not support refresh-token rotation (e.g. GitHub OAuth
+// Apps with expiring tokens disabled).
+var ErrRefreshNotSupported = errors.New("provider does not support refresh tokens")
+
+// TokenResponse is the normalized result of an OAuth token endpoint call.
+//
+// AccessTokenExpiresIn and RefreshTokenExpiresIn carry the provider-advertised
+// lifetime when available; a zero value means the provider did not return that
+// hint and the caller should fall back to its own default policy.
+type TokenResponse struct {
+	AccessToken           string
+	Scopes                []string
+	RefreshToken          string
+	AccessTokenExpiresIn  time.Duration
+	RefreshTokenExpiresIn time.Duration
+}
 
 // Provider abstracts OAuth 2.0 provider-specific operations.
 //
@@ -25,10 +47,16 @@ type Provider interface {
 	// endpoint. The state and (optional) PKCE code_challenge are forwarded.
 	AuthorizeURL(state, codeChallenge string) string
 
-	// ExchangeCode exchanges an authorization code for an access token.
-	// scopes is the granted scope list as reported by the provider; the
-	// concrete delimiter (comma / space) is normalized by the implementation.
-	ExchangeCode(ctx context.Context, code string) (token string, scopes []string, err error)
+	// ExchangeCode exchanges an authorization code for tokens. The returned
+	// TokenResponse carries the access token, granted scopes, and (when the
+	// provider advertises them) a refresh token and expiry hints.
+	ExchangeCode(ctx context.Context, code string) (TokenResponse, error)
+
+	// RefreshToken rotates a provider-issued refresh token, returning a fresh
+	// access token (and typically a new refresh token).  Implementations that
+	// do not support refresh return ErrRefreshNotSupported so callers can
+	// distinguish "not supported" from transient upstream failures.
+	RefreshToken(ctx context.Context, refreshToken string) (TokenResponse, error)
 
 	// ValidateToken validates a bearer token and returns the authenticated
 	// identity. Implementations should return UpstreamError for transient

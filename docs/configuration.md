@@ -30,6 +30,7 @@ Configuration is resolved in this order:
 | OAuth scopes | `GITHUB_MCP_OAUTH_SCOPES` > `gateway.oauth_scopes` > `repo,user` |
 | Trusted proxies | `MCP_GATEWAY_TRUSTED_PROXIES` > `gateway.trusted_proxies` > none |
 | Token audience strict mode | `MCP_GATEWAY_TOKEN_AUDIENCE_STRICT` > `gateway.token_audience_strict` > `false` |
+| GitHub refresh token rotation | `MCP_GATEWAY_GITHUB_REFRESH_ENABLED` > `gateway.github_refresh_enabled` > `false` |
 
 The GitHub client secret is intentionally special: once `config.yaml` contains a
 secret, `GITHUB_MCP_CLIENT_SECRET` is ignored except during first-start seeding.
@@ -53,6 +54,7 @@ secret, `GITHUB_MCP_CLIENT_SECRET` is ignored except during first-start seeding.
 | `MCP_GATEWAY_TRUSTED_PROXIES` | none | Comma-separated CIDR list for immediate reverse proxies whose `X-Forwarded-*` headers are trusted. |
 | `MCP_GATEWAY_TOKEN_STORE_PATH` | `/data/tokens.json` | Persistent token store path. Set to an empty value to disable persistence. |
 | `MCP_GATEWAY_TOKEN_AUDIENCE_STRICT` | `false` | Reject legacy tokens that have no recorded audience metadata. Leave disabled during migration. |
+| `MCP_GATEWAY_GITHUB_REFRESH_ENABLED` | `false` | Enable transparent rotation of expiring GitHub OAuth user access tokens. Safe to leave on with non-expiring OAuth Apps; the rotation path stays dormant unless GitHub returns `refresh_token` + `expires_in`. See [GitHub OAuth Refresh Token Rotation](#github-oauth-refresh-token-rotation). |
 | `LOG_LEVEL` | `info` | JSON log level: `debug`, `info`, `warn`, or `error`. |
 | `SESSION_TTL_MIN` | `10` | OAuth authorization session lifetime in minutes. |
 | `TOKEN_CACHE_TTL_MIN` | `30` | In-memory validation cache TTL in minutes. Used when token persistence is disabled. |
@@ -107,6 +109,7 @@ setup:
 | `gateway.oauth_scopes` | OAuth scopes requested from GitHub. |
 | `gateway.trusted_proxies` | CIDR list for trusted reverse proxy peers. |
 | `gateway.token_audience_strict` | Strict legacy-token audience enforcement. |
+| `gateway.github_refresh_enabled` | Enable transparent GitHub OAuth access token rotation; see [GitHub OAuth Refresh Token Rotation](#github-oauth-refresh-token-rotation). |
 | `routes[].name` | Route name. Must be non-empty. |
 | `routes[].prefix` | URL path prefix. Must start with `/`; trailing slashes are trimmed except for `/`. |
 | `routes[].upstream` | Absolute `http` or `https` upstream URL. |
@@ -202,6 +205,25 @@ When token persistence is enabled, refresh tokens are stored in
 access token value in plaintext because the gateway must re-present the access
 token to GitHub during refresh. Treat it as sensitive data.
 
+When `MCP_GATEWAY_GITHUB_REFRESH_ENABLED=true` (or `gateway.github_refresh_enabled: true`),
+the gateway also stores the GitHub OAuth **refresh token** in `tokens.json`
+(the primary store, not the `.refresh` sibling) so rotation continues to work
+across restarts. The refresh token is written as plaintext because the
+gateway must replay it to GitHub's `/login/oauth/access_token` endpoint.
+
+Operational implications of refresh-token persistence:
+
+- A reader of `tokens.json` can hijack the logged-in user's GitHub session for
+  the lifetime of the refresh token. With GitHub's expiring-user-token
+  configuration this is typically **six months** unless the user revokes the
+  authorization or the OAuth App is reconfigured.
+- Backups of `tokens.json` carry the same risk. Encrypt backup volumes at
+  rest, or exclude `tokens.json` and `tokens.json.refresh` from broad backup
+  scopes.
+- Container images and snapshots should not bake either file in.
+- If you do not need rotation across restarts, leave `github_refresh_enabled`
+  off; the refresh token is then never written to disk.
+
 ## Reverse Proxy Headers
 
 When TLS terminates before mcp-gateway:
@@ -238,6 +260,80 @@ and proxying run.
 | `/setup` | GET/POST | First-run setup wizard endpoint, available only in setup mode. |
 | `/health` | GET | Health check in normal mode. |
 | `/<prefix>` | ANY | Reverse proxy to the matched upstream. Bearer-validated unless `auth=none` is set. |
+
+## GitHub OAuth Refresh Token Rotation
+
+When the GitHub OAuth App is configured with **Expire user authorization tokens**
+enabled, GitHub returns a `refresh_token` and an `expires_in` value alongside
+each access token (typically 8 hours of access-token lifetime and 6 months of
+refresh-token lifetime). The gateway can transparently rotate these tokens
+before they expire, so a long-running upstream operation does not see the
+access token become invalid mid-request.
+
+### Enabling
+
+Set one of:
+
+```bash
+MCP_GATEWAY_GITHUB_REFRESH_ENABLED=true
+```
+
+or in `config.yaml`:
+
+```yaml
+gateway:
+  github_refresh_enabled: true
+```
+
+Defaults to `false`. The flag is safe to leave on even with non-expiring OAuth
+Apps: the rotation path only fires when the cached token entry has a non-zero
+`expires_in` hint and a refresh token, which classic OAuth Apps do not provide.
+
+### Behavior
+
+When the flag is on, every `ValidateToken` call inspects the cached provider
+metadata for the bearer token:
+
+1. If the provider access expiry is more than ~5 minutes away, rotation is
+   skipped and the cached subject is returned as usual.
+2. If the access expiry is within the leeway window, the gateway calls the
+   GitHub token endpoint with `grant_type=refresh_token`.
+3. On success, the new access token is cached under its own key and the
+   rotated token is forwarded to the upstream MCP server via the request
+   context. The original token's cache entry is **kept** (MCP clients
+   continue presenting the original bearer), and its provider refresh
+   metadata is updated to the freshly issued refresh token / expiry so the
+   next in-window request from the same client triggers another rotation.
+4. On any provider failure the gateway logs `rotation_failed`, leaves the
+   cache as-is, and continues with the original token. If the upstream
+   subsequently returns 401, the existing cache-invalidation path handles
+   re-authentication.
+
+The rotation is bound to whichever request happens to trigger it; in-flight
+upstream operations on the old token are not interrupted. The
+`copilot-review-mcp` watch goroutines (issue #70) still see only the token they
+captured at watch start — Phase A makes follow-on requests use the rotated
+token, but does not retroactively patch background workers.
+
+### Limitations
+
+- A gateway restart loses the refresh token if `MCP_GATEWAY_TOKEN_STORE_PATH`
+  is unset. Persist token state to disk to keep rotation working across
+  restarts.
+- The rotation lead time is fixed at ~5 minutes. Operators with significantly
+  longer upstream operations should consider Phase B (delegated background
+  access) instead of widening the leeway.
+- Rotation requires `gateway.github_client_secret` because GitHub's refresh
+  endpoint authenticates the rotation request the same way as the initial
+  exchange.
+
+### Troubleshooting
+
+| Symptom | Likely cause |
+|---------|--------------|
+| Log entry `rotation_failed err=bad_refresh_token` | The OAuth App revoked the refresh token (manually or because the user reset it). Clients must re-authenticate. |
+| Rotation never fires for any token | The OAuth App is not configured for expiring tokens, or `expires_in` is missing from the token response. Verify the app setting in GitHub Developer Settings. |
+| Rotation fires but the upstream still sees 401 | The upstream cached the old bearer in its own state (e.g. a `copilot-review-mcp` watch goroutine). Phase A intentionally does not patch upstream state — this is the Phase B scope. |
 
 ## OAuth Resource Parameters
 

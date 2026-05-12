@@ -7,6 +7,18 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Transparent rotation of expiring GitHub OAuth user access tokens ([#70](https://github.com/scottlz0310/mcp-gateway/issues/70), Phase A).
+  - New `MCP_GATEWAY_GITHUB_REFRESH_ENABLED` / `gateway.github_refresh_enabled` flag enables the rotation path. Defaults to `false`.
+  - When the upstream provider advertises `refresh_token` + `expires_in`, the gateway re-uses the refresh token to rotate the access token within ~5 minutes of expiry. The rotated token is forwarded transparently to upstream MCP servers.
+  - Rotation is a best-effort optimization: provider failures log `rotation_failed` and fall back to the existing 401-and-reauthenticate path.
+  - Provider interface (`internal/auth/provider`) now exposes a normalized `TokenResponse` from `ExchangeCode` and a `RefreshToken` method.
+
+### Changed
+
+- `auth.Handler.ValidateToken` now returns a rotated access token alongside the subject so middleware can substitute it in the request context. Internal API only; no public surface affected.
+
 ## [0.3.0] - 2026-05-07
 
 ### Added

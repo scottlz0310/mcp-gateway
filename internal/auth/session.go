@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 )
@@ -19,14 +20,16 @@ var ErrRefreshTokenDeleteFailed = errors.New("refresh token delete failed")
 
 // Session holds OAuth flow state between /authorize and /token.
 type Session struct {
-	State         string
-	RedirectURI   string
-	CodeChallenge string
-	Audience      string
-	InternalCode  string
-	AccessToken   string
-	Scope         string
-	ExpiresAt     time.Time
+	State                 string
+	RedirectURI           string
+	CodeChallenge         string
+	Audience              string
+	InternalCode          string
+	AccessToken           string
+	Scope                 string
+	ExpiresAt             time.Time
+	ProviderRefreshToken  string    // optional GitHub refresh token (expiring tokens)
+	ProviderAccessExpiry  time.Time // optional GitHub access-token expiry (zero = no expiry hint)
 }
 
 type deviceStatus int
@@ -133,7 +136,10 @@ func (s *Store) HasSession(state string) bool {
 }
 
 // CompleteCallback attaches an internal code and access token to the session.
-func (s *Store) CompleteCallback(state, accessToken, scope string) (string, error) {
+// providerRefreshToken and providerAccessExpiry are zero-valued when the
+// upstream provider did not advertise them (e.g. classic non-expiring GitHub
+// OAuth tokens).
+func (s *Store) CompleteCallback(state, accessToken, scope, providerRefreshToken string, providerAccessExpiry time.Time) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -150,36 +156,54 @@ func (s *Store) CompleteCallback(state, accessToken, scope string) (string, erro
 	sess.InternalCode = code
 	sess.AccessToken = accessToken
 	sess.Scope = scope
+	sess.ProviderRefreshToken = providerRefreshToken
+	sess.ProviderAccessExpiry = providerAccessExpiry
 	s.codes[code] = sess
 	return code, nil
 }
 
+// ExchangeCodeResult bundles the values returned by Store.ExchangeCode so
+// callers can pick up provider-issued refresh metadata without growing the
+// function signature past five return values.
+type ExchangeCodeResult struct {
+	AccessToken          string
+	Scope                string
+	Audience             string
+	ProviderRefreshToken string
+	ProviderAccessExpiry time.Time
+}
+
 // ExchangeCode validates PKCE and returns the access token, granted scope, and
-// requested audience. The code is consumed on success (one-time use).
-func (s *Store) ExchangeCode(code, redirectURI, codeVerifier string) (string, string, string, error) {
+// requested audience along with any upstream provider refresh metadata.  The
+// code is consumed on success (one-time use).
+func (s *Store) ExchangeCode(code, redirectURI, codeVerifier string) (ExchangeCodeResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	sess, ok := s.codes[code]
 	if !ok || time.Now().After(sess.ExpiresAt) {
 		delete(s.codes, code)
-		return "", "", "", fmt.Errorf("code not found or expired")
+		return ExchangeCodeResult{}, fmt.Errorf("code not found or expired")
 	}
 	if sess.RedirectURI != redirectURI {
-		return "", "", "", fmt.Errorf("redirect_uri mismatch")
+		return ExchangeCodeResult{}, fmt.Errorf("redirect_uri mismatch")
 	}
 	if sess.CodeChallenge != "" {
 		if err := verifyPKCE(codeVerifier, sess.CodeChallenge); err != nil {
-			return "", "", "", err
+			return ExchangeCodeResult{}, err
 		}
 	}
 
-	token := sess.AccessToken
-	scope := sess.Scope
-	audience := sess.Audience
+	result := ExchangeCodeResult{
+		AccessToken:          sess.AccessToken,
+		Scope:                sess.Scope,
+		Audience:             sess.Audience,
+		ProviderRefreshToken: sess.ProviderRefreshToken,
+		ProviderAccessExpiry: sess.ProviderAccessExpiry,
+	}
 	delete(s.codes, code)
 	delete(s.sessions, sess.State)
-	return token, scope, audience, nil
+	return result, nil
 }
 
 // CreateDevice stores a new Device Authorization Grant session and returns the gateway-internal device code.
@@ -395,6 +419,32 @@ func (s *Store) saveTokenRecord(token, subject, audience string) {
 // LookupToken returns cached metadata if token is known and not expired.
 func (s *Store) LookupToken(token string) (TokenRecord, bool) {
 	return s.tokens.Lookup(token)
+}
+
+// RecordProviderRefresh attaches provider-issued refresh metadata (GitHub OAuth
+// refresh token + access expiry) to an already-cached token entry. It is a
+// no-op when providerRefreshToken is empty or when the underlying cache entry
+// is missing; the latter happens when CacheToken has not yet run for this
+// token, in which case the metadata is intentionally dropped rather than
+// overwriting unrelated state.
+func (s *Store) RecordProviderRefresh(token, providerRefreshToken string, providerAccessExpiry time.Time) {
+	if strings.TrimSpace(providerRefreshToken) == "" {
+		return
+	}
+	if err := s.tokens.SaveProviderRefresh(token, providerRefreshToken, providerAccessExpiry); err != nil {
+		slog.Warn("token store provider refresh save failed", "err", err)
+	}
+}
+
+// ClearProviderRefresh drops the provider refresh metadata for token (sets
+// both the refresh token and access expiry to their zero values). Used after
+// a permanent rotation failure (e.g. bad_refresh_token) so subsequent
+// ValidateToken calls do not re-attempt rotation until the entry is rebuilt
+// by a fresh OAuth flow.
+func (s *Store) ClearProviderRefresh(token string) {
+	if err := s.tokens.SaveProviderRefresh(token, "", time.Time{}); err != nil {
+		slog.Warn("token store provider refresh clear failed", "err", err)
+	}
 }
 
 // InvalidateCachedToken removes a token from the store immediately.
