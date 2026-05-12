@@ -1701,6 +1701,98 @@ func TestValidateTokenGitHubRotationSingleflight(t *testing.T) {
 	}
 }
 
+// TestValidateTokenGitHubRotationFailureClearsMetadata verifies that a
+// permanent provider failure (e.g. bad_refresh_token) clears the cached
+// provider refresh metadata so subsequent ValidateToken calls do not keep
+// hammering the provider with the same poisoned refresh token. Transient
+// (UpstreamError) failures must NOT clear metadata so they can be retried
+// once the provider recovers.
+func TestValidateTokenGitHubRotationFailureClearsMetadata(t *testing.T) {
+	const audience = "http://localhost:8080/mcp"
+	cases := []struct {
+		name              string
+		refreshFunc       func(ctx context.Context, rt string) (provider.TokenResponse, error)
+		wantMetadataKept  bool // true means metadata must remain intact for next retry
+	}{
+		{
+			name: "bad_refresh_token (permanent) clears metadata",
+			refreshFunc: func(_ context.Context, _ string) (provider.TokenResponse, error) {
+				return provider.TokenResponse{}, fmt.Errorf("bad_refresh_token")
+			},
+			wantMetadataKept: false,
+		},
+		{
+			name: "ErrRefreshNotSupported clears metadata",
+			refreshFunc: func(_ context.Context, _ string) (provider.TokenResponse, error) {
+				return provider.TokenResponse{}, provider.ErrRefreshNotSupported
+			},
+			wantMetadataKept: false,
+		},
+		{
+			name: "empty access_token clears metadata",
+			refreshFunc: func(_ context.Context, _ string) (provider.TokenResponse, error) {
+				return provider.TokenResponse{AccessToken: ""}, nil
+			},
+			wantMetadataKept: false,
+		},
+		{
+			name: "transient UpstreamError keeps metadata for retry",
+			refreshFunc: func(_ context.Context, _ string) (provider.TokenResponse, error) {
+				return provider.TokenResponse{}, &provider.UpstreamError{Err: fmt.Errorf("network down")}
+			},
+			wantMetadataKept: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &provider.Mock{
+				ClientIDValue: "test-client-id",
+				ValidateFunc: func(_ context.Context, _ string) (provider.Identity, error) {
+					return provider.Identity{Provider: "mock", Subject: "alice"}, nil
+				},
+				RefreshTokenFunc: tc.refreshFunc,
+			}
+			h, err := NewHandler(Config{
+				BaseURL:              "http://localhost:8080",
+				SessionTTL:           10 * time.Minute,
+				CacheTTL:             5 * time.Minute,
+				ExpiresIn:            90 * 24 * time.Hour,
+				AllowedAudiences:     []string{audience},
+				GitHubRefreshEnabled: true,
+			}, p)
+			if err != nil {
+				t.Fatalf("NewHandler: %v", err)
+			}
+			h.store.CacheToken("at", "alice", audience)
+			h.store.RecordProviderRefresh("at", "rt-original", time.Now().Add(30*time.Second))
+
+			_, rotated, err := h.ValidateToken(context.Background(), "at", audience)
+			if err != nil {
+				t.Fatalf("ValidateToken: %v", err)
+			}
+			if rotated != "" {
+				t.Errorf("rotated must be empty on failure, got %q", rotated)
+			}
+			rec, ok := h.store.LookupToken("at")
+			if !ok {
+				t.Fatal("token entry must still exist after rotation failure")
+			}
+			if tc.wantMetadataKept {
+				if rec.ProviderRefreshToken != "rt-original" {
+					t.Errorf("transient failure must keep refresh metadata, got %q", rec.ProviderRefreshToken)
+				}
+			} else {
+				if rec.ProviderRefreshToken != "" {
+					t.Errorf("permanent failure must clear refresh metadata, got %q", rec.ProviderRefreshToken)
+				}
+				if !rec.ProviderAccessExpiry.IsZero() {
+					t.Errorf("permanent failure must clear access expiry, got %v", rec.ProviderAccessExpiry)
+				}
+			}
+		})
+	}
+}
+
 // TestValidateTokenGitHubRotationSkipsWhenSubjectUnknown verifies that
 // rotation is skipped when the cached entry has not yet been validated
 // against the provider (Subject is empty), so downstream services never see

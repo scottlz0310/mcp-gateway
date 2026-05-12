@@ -841,12 +841,18 @@ func (h *Handler) tryGitHubRotation(ctx context.Context, token string, record To
 		return "", "", false
 	}
 
-	v, _, _ := h.rotationGroup.Do(tokenFingerprint(token), func() (any, error) {
+	// Use the full tokenKey (SHA-256 over the raw bearer) for the
+	// singleflight key. The shorter tokenFingerprint is only safe for log
+	// correlation: collisions in the 8-character prefix would let one
+	// caller's rotation result be served to a holder of a different token,
+	// which is an auth boundary violation.
+	sfKey := tokenKey(token)
+	v, _, _ := h.rotationGroup.Do(sfKey, func() (any, error) {
 		return h.runGitHubRotation(ctx, token, audience), nil
 	})
 	// Forget the key so future rotations (after another leeway window passes)
 	// are not blocked by a stale completed entry.
-	h.rotationGroup.Forget(tokenFingerprint(token))
+	h.rotationGroup.Forget(sfKey)
 	res, _ := v.(rotationResult)
 	return res.newToken, res.subject, res.ok
 }
@@ -871,19 +877,41 @@ func (h *Handler) runGitHubRotation(ctx context.Context, token, audience string)
 	tokens, err := h.provider.RefreshToken(ctx, record.ProviderRefreshToken)
 	if err != nil {
 		if errors.Is(err, provider.ErrRefreshNotSupported) {
+			// Permanent: provider does not implement rotation. Clear so
+			// subsequent ValidateToken calls do not retry this branch.
+			h.store.ClearProviderRefresh(token)
 			return rotationResult{}
 		}
+		var upstreamErr *provider.UpstreamError
+		if errors.As(err, &upstreamErr) {
+			// Transient (network failure / 5xx). Leave metadata intact so
+			// the next request retries — provider will likely recover.
+			slog.Warn("rotation_failed",
+				"token_hash", tokenFingerprint(token),
+				"err", err,
+				"action", "retry_next",
+			)
+			return rotationResult{}
+		}
+		// Permanent failure (bad_refresh_token, 4xx, malformed response,
+		// etc.). Clearing metadata stops every subsequent ValidateToken
+		// from re-hitting the provider with the same poisoned refresh
+		// token until the cache entry expires.
 		slog.Warn("rotation_failed",
 			"token_hash", tokenFingerprint(token),
 			"err", err,
+			"action", "metadata_cleared",
 		)
+		h.store.ClearProviderRefresh(token)
 		return rotationResult{}
 	}
 	if tokens.AccessToken == "" {
 		slog.Warn("rotation_failed",
 			"token_hash", tokenFingerprint(token),
 			"err", "empty access_token from provider",
+			"action", "metadata_cleared",
 		)
+		h.store.ClearProviderRefresh(token)
 		return rotationResult{}
 	}
 	cacheAudience := ""

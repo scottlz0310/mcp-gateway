@@ -436,6 +436,17 @@ func (s *Store) RecordProviderRefresh(token, providerRefreshToken string, provid
 	}
 }
 
+// ClearProviderRefresh drops the provider refresh metadata for token (sets
+// both the refresh token and access expiry to their zero values). Used after
+// a permanent rotation failure (e.g. bad_refresh_token) so subsequent
+// ValidateToken calls do not re-attempt rotation until the entry is rebuilt
+// by a fresh OAuth flow.
+func (s *Store) ClearProviderRefresh(token string) {
+	if err := s.tokens.SaveProviderRefresh(token, "", time.Time{}); err != nil {
+		slog.Warn("token store provider refresh clear failed", "err", err)
+	}
+}
+
 // InvalidateCachedToken removes a token from the store immediately.
 func (s *Store) InvalidateCachedToken(token string) {
 	if err := s.tokens.Delete(token); err != nil {
