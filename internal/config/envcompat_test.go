@@ -87,3 +87,26 @@ func TestResolveOAuthEnv_EmptyTreatedAsUnset(t *testing.T) {
 		t.Fatalf("expected fallback to legacy, got %q ok=%v", v, ok)
 	}
 }
+
+// TestResolveOAuthEnv_TrimsWhitespace verifies values returned by
+// ResolveOAuthEnv have surrounding whitespace trimmed so downstream consumers
+// (e.g. OAuth scopes, client IDs forwarded to GitHub) never see stray
+// whitespace from container env injection or shell heredocs.
+func TestResolveOAuthEnv_TrimsWhitespace(t *testing.T) {
+	resetLegacyEnvWarnedForTest()
+	t.Setenv("OAUTH_CLIENT_ID", "  client-id-with-spaces  ")
+	t.Setenv("GITHUB_MCP_CLIENT_ID", "")
+
+	v, ok := ResolveOAuthEnv("OAUTH_CLIENT_ID", "GITHUB_MCP_CLIENT_ID")
+	if !ok || v != "client-id-with-spaces" {
+		t.Fatalf("expected trimmed value, got %q ok=%v", v, ok)
+	}
+
+	resetLegacyEnvWarnedForTest()
+	t.Setenv("OAUTH_CLIENT_ID", "")
+	t.Setenv("GITHUB_MCP_CLIENT_ID", "\tlegacy-id\n")
+	v, ok = ResolveOAuthEnv("OAUTH_CLIENT_ID", "GITHUB_MCP_CLIENT_ID")
+	if !ok || v != "legacy-id" {
+		t.Fatalf("expected trimmed legacy value, got %q ok=%v", v, ok)
+	}
+}

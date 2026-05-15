@@ -12,7 +12,7 @@ import (
 // per process lifetime even when the variable is consulted multiple times.
 var legacyEnvWarned sync.Map
 
-// warnLegacyEnvOncelogs a deprecation warning for a legacy env var the first
+// warnLegacyEnvOnce logs a deprecation warning for a legacy env var the first
 // time it is observed. When ignored is true, the warning indicates that the
 // legacy variable was ignored because the canonical variable is also set;
 // otherwise, the warning indicates the legacy variable is in use.
@@ -73,8 +73,9 @@ func lookupNonEmptyEnv(key string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	if strings.TrimSpace(v) == "" {
+	trimmed := strings.TrimSpace(v)
+	if trimmed == "" {
 		return "", false
 	}
-	return v, true
+	return trimmed, true
 }
