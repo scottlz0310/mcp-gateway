@@ -185,8 +185,11 @@ work).
 
 ## Deployment and limitations
 
-- **Loopback-only by design.** The listener binds 127.0.0.1 / ::1 only,
-  so the upstream client must share the gateway's network namespace.
+- **Loopback-only by design.** The listener binds 127.0.0.1 only (IPv4
+  loopback). The request handler additionally accepts `::1` for
+  defense-in-depth, but no IPv6 listener is started in this PoC, so
+  upstream clients must connect over IPv4. The upstream must share the
+  gateway's network namespace.
   Concretely:
   - **Same host, bare binary**: works as-is — the upstream connects to
     `127.0.0.1:<INTERNAL_PORT>`.
@@ -213,11 +216,23 @@ work).
 The Copilot review on PR #76 surfaced two rotation-correctness gaps
 that are **not** addressed in this PoC because each requires a design
 change larger than the PoC envelope. They are accepted as risks because
-the blast radius is bounded by the gateway cache TTL (minutes) and by
-the loopback + shared-secret trust boundary, and because background
-watch goroutines tolerate transient 401s by re-issuing the delegated
-call. They are tracked under Future work and should be resolved before
-this API leaves PoC status.
+the loopback + shared-secret trust boundary keeps the blast radius
+inside the host, and because background watch goroutines tolerate
+transient 401s by re-issuing the delegated call. They are tracked
+under Future work and should be resolved before this API leaves PoC
+status.
+
+Note that the **temporal** blast radius depends on which token store is
+configured:
+
+- In-memory store (default for short-lived dev): bounded by
+  `cfg.CacheTTL` (a few minutes).
+- Persistent store (`auth.NewHandler` with a non-nil TokenStore):
+  bounded by `cfg.ExpiresIn` — **90 days by default** — because that
+  value drives both the issued session expiry and the cache TTL
+  applied to saved token records. A dead bearer / old-bearer
+  preference can therefore persist for days unless the operator
+  invalidates the entry manually or the user re-authenticates.
 
 1. **Dead bearer after permanent rotation failure.** When
    `runGitHubRotation` hits a real failure (`bad_refresh_token`, empty
@@ -226,13 +241,17 @@ this API leaves PoC status.
    `/internal/v1/whoami` call then finds no provider-refresh metadata
    and falls into the lenient "no rotation contract" branch, which
    returns the cached bearer with `200`. That bearer is almost certainly
-   already invalid on GitHub's side. Background callers will observe a
-   `401` from GitHub on first use and recover on the next polling
-   cycle, but the gateway is technically lying about freshness for one
-   round. Proper fix: persist a `RotationFailed` (or equivalent) flag
-   on `TokenRecord` and surface `ErrRotationFailed` on the next call.
+   already invalid on GitHub's side. **Recovery does not happen by
+   simply re-issuing the delegated call on the next polling cycle**:
+   subsequent calls keep taking the same lenient branch and return the
+   same dead bearer until the underlying token-store/index TTL expires
+   (see the per-store bounds above) or the user re-authenticates.
+   Background callers will observe a `401` from GitHub on every use
+   and the gateway has no in-band recovery path. Proper fix: persist a
+   `RotationFailed` (or equivalent) flag on `TokenRecord` and surface
+   `ErrRotationFailed` on the next call.
 
-2. **Old/new bearer tie-break in `LatestBySubject`.**On successful
+2. **Old/new bearer tie-break in `LatestBySubject`.** On successful
    rotation, `runGitHubRotation` updates the *old* token entry's
    `ProviderAccessExpiry` to the same value as the new entry (so a
    client that keeps presenting the old bearer can still be rotated on

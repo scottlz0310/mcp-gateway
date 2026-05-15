@@ -530,9 +530,16 @@ func (s *Store) LatestBySubject(subject string) (string, TokenRecord, bool) {
 	var best subjectIndexEntry
 	var bestRec TokenRecord
 	foundRotatable := false
+	// Track entries that should be pruned from the index because their
+	// authoritative record disappeared or has been re-associated with a
+	// different subject. These index entries hold raw bearer tokens, so
+	// leaving them in place would let stale credentials linger until the
+	// index TTL expires.
+	stale := make(map[string]struct{})
 	for _, e := range candidates {
 		rec, ok := s.tokens.Lookup(e.rawToken)
 		if !ok {
+			stale[e.rawToken] = struct{}{}
 			continue
 		}
 		// Defense-in-depth: skip records whose authoritative Subject
@@ -543,6 +550,7 @@ func (s *Store) LatestBySubject(subject string) (string, TokenRecord, bool) {
 		// case the index entry is stale and must not be returned, lest
 		// we hand out another subject's bearer.
 		if rec.Subject != "" && rec.Subject != subject {
+			stale[e.rawToken] = struct{}{}
 			continue
 		}
 		// Rank against the authoritative record so a stale subject-index
@@ -564,10 +572,41 @@ func (s *Store) LatestBySubject(subject string) (string, TokenRecord, bool) {
 			bestRec = rec
 		}
 	}
+	if len(stale) > 0 {
+		s.pruneSubjectIndexEntries(subject, stale)
+	}
 	if best.rawToken == "" {
 		return "", TokenRecord{}, false
 	}
 	return best.rawToken, bestRec, true
+}
+
+// pruneSubjectIndexEntries removes the given raw tokens from subject's index
+// slice. Used by LatestBySubject to drop entries whose authoritative
+// TokenStore lookup failed or whose Subject was re-assigned, so stale bearer
+// strings do not remain reachable for the rest of the index TTL.
+func (s *Store) pruneSubjectIndexEntries(subject string, toRemove map[string]struct{}) {
+	if len(toRemove) == 0 {
+		return
+	}
+	s.subjectIndexMu.Lock()
+	defer s.subjectIndexMu.Unlock()
+	entries := s.subjectIndex[subject]
+	if len(entries) == 0 {
+		return
+	}
+	kept := make([]subjectIndexEntry, 0, len(entries))
+	for _, e := range entries {
+		if _, drop := toRemove[e.rawToken]; drop {
+			continue
+		}
+		kept = append(kept, e)
+	}
+	if len(kept) == 0 {
+		delete(s.subjectIndex, subject)
+		return
+	}
+	s.subjectIndex[subject] = kept
 }
 
 // LookupToken returns cached metadata if token is known and not expired.

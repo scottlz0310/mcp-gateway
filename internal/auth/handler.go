@@ -799,10 +799,19 @@ func (h *Handler) ValidateToken(ctx context.Context, token, audience string) (su
 
 // rotationResult is the value type stored in the singleflight group so that
 // concurrent callers of tryGitHubRotation can share a single rotation outcome.
+//
+// noOp signals that runGitHubRotation entered under the gate, but the second
+// (authoritative) cache re-read showed that rotation was no longer needed —
+// either another goroutine just rotated successfully and moved the expiry
+// outside the leeway window, or the cache entry was invalidated entirely.
+// Callers that distinguish "rotation failed" from "no rotation required"
+// (notably the delegated-access path) use this to avoid surfacing a 502 when
+// a concurrent rotation already produced a fresh cached bearer.
 type rotationResult struct {
 	newToken string
 	subject  string
 	ok       bool
+	noOp     bool
 }
 
 // rotationAttemptResult mirrors rotationResult but additionally records
@@ -898,13 +907,20 @@ func (h *Handler) runGitHubRotation(ctx context.Context, token, audience string)
 	// leeway window and there is nothing more to do.
 	record, cached := h.store.LookupToken(token)
 	if !cached {
-		return rotationResult{}
+		return rotationResult{noOp: true}
 	}
 	if record.ProviderRefreshToken == "" || record.ProviderAccessExpiry.IsZero() {
+		// Metadata cleared (either by a previous permanent failure on this
+		// same call's first attempt, or by a concurrent permanent failure).
+		// Not a "successful concurrent rotation" — caller must treat this
+		// as a real failure.
 		return rotationResult{}
 	}
 	if time.Until(record.ProviderAccessExpiry) > h.githubRefreshLeeway() {
-		return rotationResult{}
+		// Concurrent rotation moved the expiry outside the leeway window.
+		// The cached bearer at `token` was just refreshed; signal noOp so
+		// the caller returns it instead of surfacing a spurious 502.
+		return rotationResult{noOp: true}
 	}
 	tokens, err := h.provider.RefreshToken(ctx, record.ProviderRefreshToken)
 	if err != nil {
@@ -999,12 +1015,21 @@ type DelegatedAccessResult struct {
 var ErrSubjectNotFound = errors.New("auth: subject not cached")
 
 // ErrRotationFailed is returned by EnsureFreshAccessTokenForSubject when the
-// cached token is within the rotation leeway window but provider rotation
-// did not produce a fresh token (either the rotation call failed or the
-// provider metadata had been cleared by a previous permanent failure).
-// Callers should surface this as a 502-class upstream failure: returning
-// the cached token in this state would hand the caller a credential it
-// cannot use.
+// cached token is within the rotation leeway window, the refresh gate is on,
+// the subject and provider refresh metadata are present, and a refresh
+// request was issued but did not yield a fresh token (transient provider
+// error, an upstream rejection, or — within the same call — a permanent
+// failure that cleared metadata mid-flight). Callers should surface this as
+// a 502-class upstream failure: returning the cached token in this state
+// would hand the caller a credential it cannot use.
+//
+// Note: when provider metadata has been cleared by a *prior* permanent
+// failure, the next call sees no rotation preconditions (empty
+// ProviderRefreshToken) and takes the lenient no-metadata branch that
+// returns the cached token without an error. ErrRotationFailed therefore
+// fires only when a refresh was attempted; it does not cover the
+// "metadata already cleared before we ran" case. See Known limitations
+// in the spike doc for the operational consequence.
 var ErrRotationFailed = errors.New("auth: rotation failed for delegated access")
 
 // EnsureFreshAccessTokenForSubject returns the latest valid access token for
@@ -1057,6 +1082,21 @@ func (h *Handler) EnsureFreshAccessTokenForSubject(ctx context.Context, subject 
 		}, nil
 	}
 	if rotRes.attempted {
+		if rotRes.noOp {
+			// Concurrent rotation already produced a fresh bearer (or the
+			// cache entry was invalidated). Re-read the authoritative
+			// record: if it is still present with metadata, treat the
+			// raw token as freshly rotated. If it disappeared entirely,
+			// fall through to ErrRotationFailed — we cannot vouch for
+			// freshness without a record.
+			if freshRec, stillCached := h.store.LookupToken(rawToken); stillCached {
+				return DelegatedAccessResult{
+					AccessToken:          rawToken,
+					ProviderAccessExpiry: freshRec.ProviderAccessExpiry,
+					Scopes:               parseScopes(h.provider.Scopes()),
+				}, nil
+			}
+		}
 		// All preconditions for rotation were satisfied (refresh gate on,
 		// known subject, metadata present, expiry within leeway) but the
 		// refresh attempt did not yield a fresh token. The cached bearer

@@ -187,3 +187,113 @@ func TestEnsureFreshAccessTokenForSubject_NoRotationMetadataReturnsCached(t *tes
 			res.ProviderAccessExpiry)
 	}
 }
+
+// TestRunGitHubRotation_NoOpWhenSecondReadOutsideLeeway verifies that the
+// singleflight leader signals noOp (not failure) when the authoritative
+// re-read inside runGitHubRotation shows the cached expiry has already
+// moved outside the leeway window. This simulates the race where a prior
+// leader on the same key has just completed a successful rotation and
+// updated the original entry's metadata.
+func TestRunGitHubRotation_NoOpWhenSecondReadOutsideLeeway(t *testing.T) {
+	p := &provider.Mock{
+		NameValue:   "github",
+		ScopesValue: "repo",
+		RefreshTokenFunc: func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			t.Fatal("RefreshToken should not be called when re-read shows expiry outside leeway")
+			return provider.TokenResponse{}, nil
+		},
+	}
+	h := newDelegatedTestHandler(t, p, 1*time.Minute)
+	h.store.CacheToken("tok-rotated", "alice", "")
+	farFuture := time.Now().Add(1 * time.Hour)
+	h.store.RecordProviderRefresh("tok-rotated", "refresh-secret", farFuture)
+
+	res := h.runGitHubRotation(context.Background(), "tok-rotated", "")
+	if res.ok {
+		t.Errorf("expected ok=false (no rotation produced), got ok=true")
+	}
+	if !res.noOp {
+		t.Errorf("expected noOp=true (concurrent success / outside leeway), got noOp=false")
+	}
+}
+
+// TestRunGitHubRotation_NoOpWhenCacheMiss verifies that runGitHubRotation
+// reports noOp=true when the cache entry has disappeared between the outer
+// precondition check and the inner re-read. The entry is gone, so the caller
+// has nothing to rotate; this is not a rotation failure.
+func TestRunGitHubRotation_NoOpWhenCacheMiss(t *testing.T) {
+	p := &provider.Mock{NameValue: "github", ScopesValue: "repo"}
+	h := newDelegatedTestHandler(t, p, 1*time.Minute)
+	// Deliberately no CacheToken — Lookup will return ok=false inside
+	// runGitHubRotation.
+	res := h.runGitHubRotation(context.Background(), "missing-tok", "")
+	if res.ok {
+		t.Errorf("expected ok=false, got ok=true")
+	}
+	if !res.noOp {
+		t.Errorf("expected noOp=true when cache entry is missing, got noOp=false")
+	}
+}
+
+// TestLatestBySubject_PrunesStaleSubjectIndexEntries verifies that entries
+// whose authoritative TokenStore lookup fails are removed from the in-memory
+// subject index, so stale bearer strings do not remain reachable until the
+// index TTL expires.
+func TestLatestBySubject_PrunesStaleSubjectIndexEntries(t *testing.T) {
+	p := &provider.Mock{NameValue: "github", ScopesValue: "repo"}
+	h := newDelegatedTestHandler(t, p, 1*time.Minute)
+	// Live entry: present in both the token store and the subject index.
+	h.store.CacheToken("tok-live", "alice", "")
+	// Stale entry: pushed directly into the subject index but never
+	// stored in the underlying token store, so Lookup returns false.
+	h.store.indexSubjectToken("alice", "tok-stale", time.Now().Add(1*time.Hour))
+
+	gotToken, _, ok := h.store.LatestBySubject("alice")
+	if !ok {
+		t.Fatalf("LatestBySubject ok=false, want true")
+	}
+	if gotToken != "tok-live" {
+		t.Errorf("returned token: got %q want %q", gotToken, "tok-live")
+	}
+	// The stale entry must have been pruned from the index.
+	h.store.subjectIndexMu.Lock()
+	entries := h.store.subjectIndex["alice"]
+	h.store.subjectIndexMu.Unlock()
+	for _, e := range entries {
+		if e.rawToken == "tok-stale" {
+			t.Errorf("expected stale entry %q to be pruned from subjectIndex, still present", e.rawToken)
+		}
+	}
+}
+
+// TestLatestBySubject_PrunesSubjectMismatchEntries verifies that an index
+// entry whose authoritative record carries a different Subject is pruned —
+// this defense-in-depth path must not leave another subject's bearer
+// reachable through the index.
+func TestLatestBySubject_PrunesSubjectMismatchEntries(t *testing.T) {
+	p := &provider.Mock{NameValue: "github", ScopesValue: "repo"}
+	h := newDelegatedTestHandler(t, p, 1*time.Minute)
+	// "tok-bob" was originally indexed under alice but the authoritative
+	// record now belongs to bob. Simulate by writing the token record as
+	// bob and then forging an alice index entry.
+	h.store.CacheToken("tok-bob", "bob", "")
+	h.store.indexSubjectToken("alice", "tok-bob", time.Now().Add(1*time.Hour))
+	h.store.CacheToken("tok-alice", "alice", "")
+
+	gotToken, _, ok := h.store.LatestBySubject("alice")
+	if !ok {
+		t.Fatalf("LatestBySubject ok=false, want true")
+	}
+	if gotToken != "tok-alice" {
+		t.Errorf("returned token: got %q want %q", gotToken, "tok-alice")
+	}
+	h.store.subjectIndexMu.Lock()
+	entries := h.store.subjectIndex["alice"]
+	h.store.subjectIndexMu.Unlock()
+	for _, e := range entries {
+		if e.rawToken == "tok-bob" {
+			t.Errorf("expected subject-mismatch entry %q to be pruned, still present", e.rawToken)
+		}
+	}
+}
+
