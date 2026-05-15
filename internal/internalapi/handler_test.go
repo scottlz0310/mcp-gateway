@@ -204,6 +204,75 @@ func TestWhoamiGETRejected(t *testing.T) {
 	if resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Fatalf("status: got %d want 405", resp.StatusCode)
 	}
+	if got := resp.Header.Get("Content-Type"); !strings.HasPrefix(got, "application/json") {
+		t.Errorf("content-type: got %q want application/json", got)
+	}
+	if got := resp.Header.Get("Allow"); got != "POST" {
+		t.Errorf("Allow header: got %q want POST", got)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body["error"] != "method_not_allowed" {
+		t.Errorf("error code: got %q want method_not_allowed", body["error"])
+	}
+}
+
+// TestWhoamiTrailingJSONRejected verifies that a request body with extra
+// tokens after the JSON object is rejected as invalid_body. Without this
+// check, json.Decoder would silently accept the first object and ignore
+// the rest -- letting a caller smuggle additional payload.
+func TestWhoamiTrailingJSONRejected(t *testing.T) {
+	srv, cleanup := newTestServer(t, &fakeResolver{
+		result: auth.DelegatedAccessResult{AccessToken: "tok"},
+	}, testSecret)
+	defer cleanup()
+	body := `{"subject":"alice"}{"subject":"mallory"}`
+	req, _ := http.NewRequest("POST", srv.URL+"/internal/v1/whoami", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+testSecret)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status: got %d want 400 for trailing JSON", resp.StatusCode)
+	}
+	var env map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if env["error"] != "invalid_body" {
+		t.Errorf("error code: got %q want invalid_body", env["error"])
+	}
+}
+
+// TestWhoamiRotationFailedMaps502 verifies that auth.ErrRotationFailed is
+// surfaced as a 502 with a dedicated error code, distinct from a generic
+// upstream_failure.
+func TestWhoamiRotationFailedMaps502(t *testing.T) {
+	srv, cleanup := newTestServer(t, &fakeResolver{err: auth.ErrRotationFailed}, testSecret)
+	defer cleanup()
+	body := `{"subject":"alice"}`
+	req, _ := http.NewRequest("POST", srv.URL+"/internal/v1/whoami", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+testSecret)
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status: got %d want 502", resp.StatusCode)
+	}
+	var env map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if env["error"] != "rotation_failed" {
+		t.Errorf("error code: got %q want rotation_failed", env["error"])
+	}
 }
 
 // TestIsLoopback covers the helper directly because relying on httptest to

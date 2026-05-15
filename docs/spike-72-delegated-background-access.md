@@ -50,8 +50,9 @@ This is the Option C ("gateway-managed delegated access") candidate from
 
 **Chosen: B**. Rationale: smallest PoC surface that still answers the
 "is delegated access useful?" question. Migration to A (Unix socket) is
-straightforward later: only the listener wiring changes; the handler is
-already loopback-restricted.
+mostly straightforward later: the listener wiring changes, and the
+handler's loopback re-validation needs to become socket-aware (peer
+credential / `SO_PEERCRED`-style check instead of `r.RemoteAddr`).
 
 ## API
 
@@ -63,7 +64,7 @@ Host: 127.0.0.1:<INTERNAL_PORT>
 Authorization: Bearer <MCP_GATEWAY_INTERNAL_SECRET>
 Content-Type: application/json
 
-{ "subject": "github|alice" }
+{ "subject": "alice" }
 ```
 
 The endpoint is named `whoami` (rather than `token/refresh`) so the
@@ -90,14 +91,12 @@ list (best-effort identifier for what the access token can do).
 
 | Status | Reason |
 |---|---|
-| 400 | malformed body, missing `subject` |
+| 400 | malformed body, missing `subject`, or trailing data after JSON object |
 | 401 | missing/invalid `Authorization` (constant-time compared) |
 | 403 | request did not originate from a loopback address |
 | 404 | no cached token record for this subject |
-| 405 | non-POST method |
-| 413 | request body > 4 KB |
-| 502 | provider rotation call failed (transient) |
-| 503 | token store read/write failed |
+| 405 | non-POST method (response includes `Allow: POST`) |
+| 502 | provider rotation was required (cached token inside the leeway window) but did not produce a fresh token (`error: "rotation_failed"`) |
 
 ## Security model
 
@@ -108,8 +107,8 @@ list (best-effort identifier for what the access token can do).
    - Compared with `crypto/subtle.ConstantTimeCompare`.
    - Internal listener is **not started** unless both the secret and port are set (fail-closed).
 4. **Body cap**: `http.MaxBytesReader` at 4 KiB.
-5. **Logging**: access tokens never appear in logs. The handler uses the existing `tokenFingerprint` shorthand for correlation.
-6. **No introspection by attacker**: 404 is returned uniformly for "subject not found" and "subject found but no rotation metadata", so an attacker who already has the secret cannot enumerate active subjects beyond what they could already do by guessing.
+5. **Logging**: access tokens never appear in logs. Subject is logged in clear (it is the GitHub login, which is already non-sensitive in the gateway's threat model); the upstream listener emits the same structured fields as the public HTTP server.
+6. **Limited enumeration resistance**: 404 is returned for "subject not present in the cache". An attacker who has already obtained the shared secret can use timing or status to probe which subjects currently have an active session — this PoC does not attempt to flatten that signal. The mitigation is the shared-secret + loopback boundary, not response-shape obfuscation.
 
 ## Subject → token index
 
@@ -149,9 +148,12 @@ On `POST /internal/v1/whoami`:
    (the same Phase A policy used on the client request path). If the
    token is still outside the leeway window, the current raw token is
    returned unchanged; otherwise rotation is attempted.
-4. On transient provider failure → 502; on permanent failure (refresh
-   metadata cleared) → return the soon-to-expire current token with a
-   `Warning` header so the caller can decide.
+4. If rotation was required (cached token inside the leeway window) but
+   did not produce a fresh token — whether the provider returned a
+   transient error or a permanent one that cleared the refresh metadata —
+   the response is **502 `rotation_failed`**. The gateway never hands
+   back a cached bearer that is at or past the rotation threshold; the
+   caller is expected to surface the failure to the user.
 
 The Phase B PoC deliberately does **not** introduce a dedicated leeway
 constant for delegated background access. It reuses the same GitHub
@@ -161,6 +163,31 @@ behaviour across both the client request path and the internal API.
 Splitting the leeway out per code path — e.g. a tighter window for
 long-running watch goroutines — is intentionally deferred (see Future
 work).
+
+## Deployment and limitations
+
+- **Loopback-only by design.** The listener binds 127.0.0.1 / ::1 only,
+  so the upstream client must share the gateway's network namespace.
+  Concretely:
+  - **Same host, bare binary**: works as-is — the upstream connects to
+    `127.0.0.1:<INTERNAL_PORT>`.
+  - **Docker bridge network**: a container running on the default bridge
+    cannot reach the gateway container's loopback. The upstream
+    container must be started with `--network=container:<gateway>` (or
+    the same compose `network_mode: "service:<gateway>"`), or be
+    co-located in the same pod / network namespace.
+  - **Reverse proxies**: do not route the internal API through any
+    public-facing reverse proxy; the loopback re-validation in the
+    handler will reject forwarded requests.
+- **No persistence across gateway restart.** The subject index is
+  in-memory; after a restart, the upstream watch goroutine will get 404
+  for that subject until the user issues a fresh client request that
+  re-seeds the cache. The upstream is expected to treat 404 as
+  "session-not-yet-ready" rather than a hard failure.
+- **Single shared secret.** All upstream consumers share one secret. A
+  compromised upstream effectively has the keys to every cached
+  subject's access token. Per-upstream identities are listed under
+  Future work.
 
 ## Future work
 

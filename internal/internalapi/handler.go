@@ -62,8 +62,13 @@ func NewHandler(resolver TokenResolver, secret string) (*Handler, error) {
 // RegisterRoutes wires the internal API onto mux. Currently a single
 // endpoint, but kept as a method so future delegated-access routes can be
 // added without touching the listener wiring.
+//
+// We register the route without an HTTP method prefix and check r.Method
+// inside the handler. The Go 1.22+ ServeMux method-matching syntax
+// ("POST /path") would auto-respond to other methods with a plain-text
+// 405, bypassing our JSON error envelope.
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("POST /internal/v1/whoami", h.Whoami)
+	mux.HandleFunc("/internal/v1/whoami", h.Whoami)
 }
 
 // whoamiRequest is the body shape for POST /internal/v1/whoami.
@@ -85,11 +90,27 @@ type whoamiResponse struct {
 // configured leeway.
 //
 // Errors are returned as JSON {"error": "<code>"} bodies with appropriate
-// HTTP status codes. We deliberately do NOT distinguish "subject not found"
-// from "subject found but no rotation metadata" so that an attacker holding
-// the shared secret cannot use the endpoint as a subject-enumeration oracle
-// beyond what they could already discover from the OAuth flow.
+// HTTP status codes. The status surface is:
+//
+//   - 200: usable token returned (cached or freshly rotated).
+//   - 400: malformed request body, oversized body, missing subject, or
+//     trailing data after the JSON object.
+//   - 401: missing or invalid shared secret.
+//   - 403: request did not arrive over a loopback address.
+//   - 404: no cached token entry exists for the subject. NOTE: this is
+//     not a strong enumeration-resistance guarantee -- a caller already
+//     holding the shared secret could learn the same fact via the OAuth
+//     flow. Stricter enumeration resistance is future work.
+//   - 405: non-POST method.
+//   - 502: rotation_failed (token is in the leeway window and rotation
+//     did not yield a fresh token) or upstream_failure (other resolver
+//     errors).
 func (h *Handler) Whoami(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
 	if !isLoopback(r.RemoteAddr) {
 		// Defense-in-depth: the listener should only bind to loopback,
 		// but if it ever drifts (misconfigured reverse proxy, future
@@ -109,6 +130,12 @@ func (h *Handler) Whoami(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_body")
 		return
 	}
+	// Reject any trailing tokens after the JSON object so callers can't
+	// sneak in extra payload past DisallowUnknownFields.
+	if dec.More() {
+		writeError(w, http.StatusBadRequest, "invalid_body")
+		return
+	}
 	subject := strings.TrimSpace(req.Subject)
 	if subject == "" {
 		writeError(w, http.StatusBadRequest, "missing_subject")
@@ -119,6 +146,14 @@ func (h *Handler) Whoami(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, auth.ErrSubjectNotFound) {
 			writeError(w, http.StatusNotFound, "subject_not_found")
+			return
+		}
+		if errors.Is(err, auth.ErrRotationFailed) {
+			slog.Warn("internalapi: whoami rotation failed",
+				"subject", subject,
+				"err", err,
+			)
+			writeError(w, http.StatusBadGateway, "rotation_failed")
 			return
 		}
 		slog.Warn("internalapi: whoami lookup failed",

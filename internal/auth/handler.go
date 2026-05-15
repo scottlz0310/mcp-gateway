@@ -966,17 +966,29 @@ type DelegatedAccessResult struct {
 // this as a 404 to upstream clients.
 var ErrSubjectNotFound = errors.New("auth: subject not cached")
 
+// ErrRotationFailed is returned by EnsureFreshAccessTokenForSubject when the
+// cached token is within the rotation leeway window but provider rotation
+// did not produce a fresh token (either the rotation call failed or the
+// provider metadata had been cleared by a previous permanent failure).
+// Callers should surface this as a 502-class upstream failure: returning
+// the cached token in this state would hand the caller a credential it
+// cannot use.
+var ErrRotationFailed = errors.New("auth: rotation failed for delegated access")
+
 // EnsureFreshAccessTokenForSubject returns the latest valid access token for
 // the given subject, transparently rotating it when its provider-advertised
 // expiry falls within the configured leeway. Used by the Phase B
 // delegated-access internal API so background workers (e.g. an upstream MCP
 // watcher) can pull a fresh bearer without re-authenticating the user.
 //
-// Returns ErrSubjectNotFound when no cached token exists for subject. A nil
-// error with a non-empty AccessToken means a valid token was returned, even
-// if rotation was attempted and failed transiently (the still-valid current
-// token is returned). Permanent rotation failures clear the provider refresh
-// metadata via the same path used by per-request rotation.
+// Returns ErrSubjectNotFound when no cached token exists for subject.
+// Returns ErrRotationFailed when the cached token is at or inside the
+// rotation leeway window but no fresh token could be obtained (rotation
+// failed or no rotation metadata is available). A nil error with a
+// non-empty AccessToken means a usable token was returned: either freshly
+// rotated, or the existing cached token that is still safely outside the
+// leeway window (e.g. classic non-expiring PATs, or any token whose
+// expiry is sufficiently far in the future).
 func (h *Handler) EnsureFreshAccessTokenForSubject(ctx context.Context, subject string) (DelegatedAccessResult, error) {
 	rawToken, record, ok := h.store.LatestBySubject(subject)
 	if !ok {
@@ -1003,9 +1015,31 @@ func (h *Handler) EnsureFreshAccessTokenForSubject(ctx context.Context, subject 
 			Scopes:      parseScopes(h.provider.Scopes()),
 		}, nil
 	}
+	// Rotation either didn't run (no metadata / too early) or failed.
+	// Decide based on the pre-rotation snapshot whether we were supposed
+	// to rotate. The post-rotation re-read can be misleading: a permanent
+	// failure clears provider metadata, which would otherwise make this
+	// look like the lenient "no rotation metadata" branch.
+	shouldHaveRotated := record.ProviderRefreshToken != "" &&
+		!record.ProviderAccessExpiry.IsZero() &&
+		time.Until(record.ProviderAccessExpiry) <= h.githubRefreshLeeway()
+	if shouldHaveRotated {
+		// We tried to rotate (or would have, given the inputs) and did
+		// not get a fresh token. The cached bearer is at or past its
+		// useful life; do not hand it out.
+		return DelegatedAccessResult{}, ErrRotationFailed
+	}
+	// Lenient branch: no rotation metadata, or expiry comfortably outside
+	// the leeway window. Re-read the record so we report the most current
+	// expiry hint (it may have changed under us).
+	freshRec, stillCached := h.store.LookupToken(rawToken)
+	if !stillCached {
+		// Concurrent invalidation between LatestBySubject and now.
+		return DelegatedAccessResult{}, ErrSubjectNotFound
+	}
 	return DelegatedAccessResult{
 		AccessToken:          rawToken,
-		ProviderAccessExpiry: record.ProviderAccessExpiry,
+		ProviderAccessExpiry: freshRec.ProviderAccessExpiry,
 		Scopes:               parseScopes(h.provider.Scopes()),
 	}, nil
 }

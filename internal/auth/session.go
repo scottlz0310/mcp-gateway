@@ -486,9 +486,13 @@ func (s *Store) indexSubjectProviderExpiry(subject, rawToken string, providerAcc
 // Returns ok=false when no live entry exists. Used by the Phase B internal
 // delegated-access API.
 //
-// Selection rule: prefer the entry with the largest non-zero
-// ProviderAccessExpiry; fall back to the largest cache expiresAt when no
-// entry has rotation metadata (classic non-expiring tokens).
+// Selection rule: prefer the entry whose **authoritative TokenRecord**
+// carries the largest non-zero ProviderAccessExpiry; fall back to the
+// largest cache expiresAt when no entry has rotation metadata (classic
+// non-expiring tokens). We rank on the authoritative record rather than
+// the subject-index hint because the latter is a copy that can drift
+// (e.g. after ClearProviderRefresh wipes provider metadata in the token
+// store but the hint is still present in RAM).
 func (s *Store) LatestBySubject(subject string) (string, TokenRecord, bool) {
 	if subject == "" {
 		return "", TokenRecord{}, false
@@ -496,8 +500,11 @@ func (s *Store) LatestBySubject(subject string) (string, TokenRecord, bool) {
 	s.subjectIndexMu.Lock()
 	entries := s.subjectIndex[subject]
 	now := time.Now()
-	// Prune expired entries in place.
-	live := entries[:0]
+	// Prune expired entries by building a fresh slice. Reusing the original
+	// backing array (entries[:0]) would keep references to skipped raw
+	// tokens alive whenever any live entry remains, which matters here
+	// because these strings are bearer tokens.
+	live := make([]subjectIndexEntry, 0, len(entries))
 	for _, e := range entries {
 		if now.Before(e.expiresAt) {
 			live = append(live, e)
@@ -522,8 +529,11 @@ func (s *Store) LatestBySubject(subject string) (string, TokenRecord, bool) {
 		if !ok {
 			continue
 		}
-		if !e.providerAccessExpiry.IsZero() {
-			if !foundRotatable || e.providerAccessExpiry.After(best.providerAccessExpiry) {
+		// Rank against the authoritative record so a stale subject-index
+		// hint (e.g. cleared metadata after a permanent rotation failure)
+		// cannot cause us to prefer an unrotatable token.
+		if !rec.ProviderAccessExpiry.IsZero() {
+			if !foundRotatable || rec.ProviderAccessExpiry.After(bestRec.ProviderAccessExpiry) {
 				best = e
 				bestRec = rec
 				foundRotatable = true
@@ -561,6 +571,10 @@ func (s *Store) RecordProviderRefresh(token, providerRefreshToken string, provid
 	}
 	if err := s.tokens.SaveProviderRefresh(token, providerRefreshToken, providerAccessExpiry); err != nil {
 		slog.Warn("token store provider refresh save failed", "err", err)
+		// Bail out: the metadata was not persisted, so propagating the
+		// expiry hint into the subject index would let LatestBySubject
+		// rank on state that does not actually back a rotation call.
+		return
 	}
 	// Also propagate the expiry hint to the subject index so the Phase B
 	// delegated-access API can pick the freshest rotatable entry.
@@ -582,11 +596,46 @@ func (s *Store) ClearProviderRefresh(token string) {
 
 // InvalidateCachedToken removes a token from the store immediately.
 func (s *Store) InvalidateCachedToken(token string) {
+	// Capture the subject before deletion so we can drop the matching
+	// subject-index entry too. Without this, an invalidated bearer would
+	// linger in RAM (and be visible to LatestBySubject) until the cache
+	// TTL or the janitor sweep removed it.
+	var subject string
+	if rec, ok := s.tokens.Lookup(token); ok {
+		subject = rec.Subject
+	}
 	if err := s.tokens.Delete(token); err != nil {
 		// Non-fatal: the token will expire naturally, but operators should know
 		// if the store is unwritable.
 		slog.Warn("token store delete failed", "err", err)
 	}
+	if subject != "" {
+		s.removeSubjectIndexEntry(subject, token)
+	}
+}
+
+// removeSubjectIndexEntry drops the entry matching rawToken from subject's
+// in-memory index. Builds a fresh slice rather than reusing the backing
+// array so the dropped bearer string is released for GC promptly.
+func (s *Store) removeSubjectIndexEntry(subject, rawToken string) {
+	s.subjectIndexMu.Lock()
+	defer s.subjectIndexMu.Unlock()
+	entries, ok := s.subjectIndex[subject]
+	if !ok {
+		return
+	}
+	out := make([]subjectIndexEntry, 0, len(entries))
+	for _, e := range entries {
+		if e.rawToken == rawToken {
+			continue
+		}
+		out = append(out, e)
+	}
+	if len(out) == 0 {
+		delete(s.subjectIndex, subject)
+		return
+	}
+	s.subjectIndex[subject] = out
 }
 
 func (s *Store) janitor() {
@@ -634,7 +683,11 @@ func (s *Store) sweepSubjectIndex(now time.Time) {
 	s.subjectIndexMu.Lock()
 	defer s.subjectIndexMu.Unlock()
 	for subject, entries := range s.subjectIndex {
-		live := entries[:0]
+		// Build a fresh slice instead of reusing the backing array. These
+		// entries hold raw bearer tokens; reusing entries[:0] would keep
+		// the skipped (expired) tokens reachable via the array's tail for
+		// as long as any live entry remained.
+		live := make([]subjectIndexEntry, 0, len(entries))
 		for _, e := range entries {
 			if now.Before(e.expiresAt) {
 				live = append(live, e)
