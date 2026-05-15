@@ -25,7 +25,7 @@
   - Provider インターフェース（`internal/auth/provider`）に正規化された `TokenResponse` と `RefreshToken` メソッドを追加
 - バックグラウンド処理向け委任アクセス PoC（[#72](https://github.com/scottlz0310/mcp-gateway/issues/72), Phase B）
   - loopback 専用の内部 API `POST /internal/v1/whoami` を追加。指定 subject の最新有効 access token を返し、期限間近なら gateway 側で透過的にローテーションする
-  - `MCP_GATEWAY_INTERNAL_SECRET`（32 文字以上）と `MCP_GATEWAY_INTERNAL_PORT` の両方が設定されたときのみ起動する fail-closed 設計。未設定時は API を提供せず、その旨をログ出力する
+  - `MCP_GATEWAY_INTERNAL_SECRET`（32 文字以上）と `MCP_GATEWAY_INTERNAL_PORT` の両方が設定されたときのみ起動する fail-closed 設計。未設定時は API を提供せず、その旨をログ出力する。API 内部の透過的ローテーションには Phase A の `MCP_GATEWAY_GITHUB_REFRESH_ENABLED=true` も必要。未有効時はキャッシュ済みトークンを返すのみでローテーションは行わない
   - listener は `127.0.0.1` にのみ bind し、共有 Bearer secret は定数時間比較で検証。リクエストボディ上限 4KB、未知の JSON フィールドは拒否
   - レスポンスは `{access_token, token_type, expires_at, scopes}`（refresh token は返さない）。エラーは `404 subject_not_found`、`401 invalid_authorization`、`403 loopback_required`、`400 invalid_body`/`missing_subject`、`405 method_not_allowed`（`Allow: POST` ヘッダ付き）、`502 upstream_failure`、`502 rotation_failed`（キャッシュ済みトークンが GitHub refresh leeway 内だがローテーションで新しいトークンを得られなかった場合）
   - 想定利用者: upstream MCP server の長寿命バックグラウンド処理（例: `copilot-review-mcp` の watch goroutine）が、通常の MCP リクエスト経路の外で新しい access token を取得するケース。設計とセキュリティモデルは `docs/spike-72-delegated-background-access.md` 参照

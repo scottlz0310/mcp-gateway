@@ -347,6 +347,50 @@ func TestValidateTokenAudienceMismatch(t *testing.T) {
 	}
 }
 
+// TestValidateTokenReseedsSubjectIndexOnCacheHit simulates a gateway restart
+// where the persistent token store still has cached records but the in-memory
+// subject index has been lost. The first ValidateToken cache hit must
+// re-seed the subject index so that the Phase B delegated-access API
+// (LatestBySubject) can resolve the subject immediately.
+func TestValidateTokenReseedsSubjectIndexOnCacheHit(t *testing.T) {
+	h := newTestHandler(t)
+	const subject = "github|reseed-user"
+	const tok = "reseed-token"
+	h.store.CacheToken(tok, subject, "")
+
+	// Drop the in-memory subject index to simulate a process restart with a
+	// persistent token store that has rehydrated records but no live index.
+	h.store.subjectIndexMu.Lock()
+	delete(h.store.subjectIndex, subject)
+	h.store.subjectIndexMu.Unlock()
+
+	if _, _, ok := h.store.LatestBySubject(subject); ok {
+		t.Fatalf("precondition: LatestBySubject should be empty after index clear")
+	}
+
+	got, rotated, err := h.ValidateToken(context.Background(), tok, "")
+	if err != nil {
+		t.Fatalf("ValidateToken err: %v", err)
+	}
+	if got != subject {
+		t.Errorf("ValidateToken subject: got %q, want %q", got, subject)
+	}
+	if rotated != "" {
+		t.Errorf("ValidateToken rotated: got %q, want empty", rotated)
+	}
+
+	rawToken, rec, ok := h.store.LatestBySubject(subject)
+	if !ok {
+		t.Fatalf("LatestBySubject ok: got false, want true (cache-hit must re-seed)")
+	}
+	if rawToken != tok {
+		t.Errorf("LatestBySubject token: got %q, want %q", rawToken, tok)
+	}
+	if rec.Subject != subject {
+		t.Errorf("LatestBySubject subject: got %q, want %q", rec.Subject, subject)
+	}
+}
+
 // TestValidateTokenAudiencePrefixMatching covers the gateway-wide → route-scoped
 // acceptance path required by MCP clients (e.g. Codex) that acquire a single
 // token at the public URL and then call multiple authenticated sub-routes.

@@ -172,7 +172,15 @@ func (h *Handler) Whoami(w http.ResponseWriter, r *http.Request) {
 	if result.AccessToken == "" {
 		// Defensive: should not happen given the contract above, but
 		// returning an empty access_token would silently break callers.
-		writeError(w, http.StatusBadGateway, "empty_access_token")
+		// Map to the same upstream_failure code used for rotation
+		// failures: from the caller's perspective both indicate "the
+		// gateway could not produce a usable bearer", which is the
+		// documented public contract. Keeping a distinct internal code
+		// would force callers to handle two equivalent failure modes.
+		slog.Warn("internalapi: whoami returned empty access token despite no error",
+			"subject", subject,
+		)
+		writeError(w, http.StatusBadGateway, "upstream_failure")
 		return
 	}
 	resp := whoamiResponse{

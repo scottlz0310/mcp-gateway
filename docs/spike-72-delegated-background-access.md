@@ -115,7 +115,9 @@ list (best-effort identifier for what the access token can do).
 ## Subject → token index
 
 Internal lookup design: `auth.Store` gains an **in-memory** secondary
-index `subject → []indexEntry{rawToken, expiresAt, providerAccessExpiry}`.
+index `subject → []indexEntry{rawToken, expiresAt}`. The
+authoritative `ProviderAccessExpiry` is read from the underlying
+`TokenRecord` at lookup time so the index stays minimal.
 
 - Updated whenever `CacheToken` is called (sign-up, rotation).
 - Pruned lazily on read: expired entries removed.
@@ -208,7 +210,7 @@ work).
 
 ## Known limitations (PoC scope)
 
-The Copilot review on PR #76 surfaced three rotation-correctness gaps
+The Copilot review on PR #76 surfaced two rotation-correctness gaps
 that are **not** addressed in this PoC because each requires a design
 change larger than the PoC envelope. They are accepted as risks because
 the blast radius is bounded by the gateway cache TTL (minutes) and by
@@ -217,20 +219,7 @@ watch goroutines tolerate transient 401s by re-issuing the delegated
 call. They are tracked under Future work and should be resolved before
 this API leaves PoC status.
 
-1. **Concurrent rotation can be reported as `rotation_failed`.**
-   `EnsureFreshAccessTokenForSubject` decides whether to raise
-   `ErrRotationFailed` based on the *pre-rotation* snapshot of the
-   `TokenRecord`. If another goroutine successfully rotates the same
-   token between `LatestBySubject` and `tryGitHubRotation`, our call
-   sees `ok=false` from the singleflight'd inner rotation (which
-   correctly detects that no work is needed) but our snapshot still
-   shows an in-leeway expiry, so we return 502 `rotation_failed` even
-   though a fresh token is now cached. Callers will retry and observe
-   success on the next call. Proper fix: re-read the record after the
-   rotation miss and distinguish "concurrent success" from "real
-   failure".
-
-2. **Dead bearer after permanent rotation failure.** When
+1. **Dead bearer after permanent rotation failure.** When
    `runGitHubRotation` hits a real failure (`bad_refresh_token`, empty
    `access_token`, generic upstream error) it calls
    `ClearProviderRefresh` on the token entry. The next
@@ -243,7 +232,7 @@ this API leaves PoC status.
    round. Proper fix: persist a `RotationFailed` (or equivalent) flag
    on `TokenRecord` and surface `ErrRotationFailed` on the next call.
 
-3. **Old/new bearer tie-break in `LatestBySubject`.** On successful
+2. **Old/new bearer tie-break in `LatestBySubject`.**On successful
    rotation, `runGitHubRotation` updates the *old* token entry's
    `ProviderAccessExpiry` to the same value as the new entry (so a
    client that keeps presenting the old bearer can still be rotated on

@@ -465,6 +465,28 @@ func (s *Store) indexSubjectToken(subject, rawToken string, expiresAt time.Time)
 	})
 }
 
+// RefreshSubjectIndex re-seeds the in-memory subject → token index for a
+// token that is already present in the authoritative TokenStore. It is
+// idempotent and reuses the configured cache TTL (time.Now() + tokensTTL)
+// as the index entry's expiresAt, matching what saveTokenRecord would
+// have written.
+//
+// The intended caller is the cache-hit branch of ValidateToken: after a
+// process restart with a persistent TokenStore the in-memory
+// subjectIndex is empty even though records exist on disk, and a normal
+// proxied request that hits the cache would otherwise never re-populate
+// the index — leaving /internal/v1/whoami returning subject_not_found
+// until a cache miss or rotation eventually triggers CacheToken.
+//
+// Callers that perform a full cache write should use CacheToken (which
+// also refreshes the index via saveTokenRecord) rather than this method.
+func (s *Store) RefreshSubjectIndex(subject, rawToken string) {
+	if subject == "" || rawToken == "" {
+		return
+	}
+	s.indexSubjectToken(subject, rawToken, time.Now().Add(s.tokensTTL))
+}
+
 // LatestBySubject returns the raw access token with the latest provider
 // access expiry for the given subject, along with its cached TokenRecord.
 // Returns ok=false when no live entry exists. Used by the Phase B internal

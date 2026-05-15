@@ -774,6 +774,12 @@ func (h *Handler) ValidateToken(ctx context.Context, token, audience string) (su
 			return newSubject, rotated, nil
 		}
 		if record.Subject != "" {
+			// Re-seed the subject index on a cache hit. After process
+			// restart with a persistent TokenStore, subjectIndex (in-memory
+			// only) is empty even though tokens are readable from disk;
+			// otherwise the Phase B /internal/v1/whoami would keep
+			// returning subject_not_found until the cache TTL expires.
+			h.store.RefreshSubjectIndex(record.Subject, token)
 			return record.Subject, "", nil
 		}
 	} else if err := h.validateAudience(token, TokenRecord{}, audience); err != nil {
@@ -797,6 +803,18 @@ type rotationResult struct {
 	newToken string
 	subject  string
 	ok       bool
+}
+
+// rotationAttemptResult mirrors rotationResult but additionally records
+// whether the leader actually invoked the provider refresh. attempted=true
+// means all preconditions (gate enabled, known subject, refresh metadata
+// present, expiry within leeway) were satisfied and we issued a refresh
+// request — regardless of whether the rotation succeeded. This lets callers
+// distinguish "we tried and could not produce a fresh token" (502) from
+// "rotation was not applicable for this token" (lenient fallthrough).
+type rotationAttemptResult struct {
+	rotationResult
+	attempted bool
 }
 
 // tryGitHubRotation attempts to rotate a GitHub-issued access token when its
@@ -825,22 +843,36 @@ type rotationResult struct {
 // second refresh request (GitHub treats sequential rotations of the same
 // refresh token as a security violation and returns bad_refresh_token).
 func (h *Handler) tryGitHubRotation(ctx context.Context, token string, record TokenRecord, audience string) (newToken, subject string, ok bool) {
+	res := h.tryGitHubRotationWithAttempt(ctx, token, record, audience)
+	return res.newToken, res.subject, res.ok
+}
+
+// tryGitHubRotationWithAttempt is the underlying implementation that also
+// reports whether a rotation was actually attempted. Callers that need to
+// distinguish "applicable-but-failed" from "not applicable" (notably the
+// internal delegated-access path) use this directly. Public callers can
+// keep using tryGitHubRotation.
+func (h *Handler) tryGitHubRotationWithAttempt(ctx context.Context, token string, record TokenRecord, audience string) rotationAttemptResult {
 	if !h.cfg.GitHubRefreshEnabled {
-		return "", "", false
+		return rotationAttemptResult{}
 	}
 	if record.Subject == "" {
 		// Without a known subject we would propagate an empty identity into the
 		// proxy headers, which downstream services treat as anonymous. Wait
 		// until the provider has been queried once and Subject is populated.
-		return "", "", false
+		return rotationAttemptResult{}
 	}
 	if record.ProviderRefreshToken == "" || record.ProviderAccessExpiry.IsZero() {
-		return "", "", false
+		return rotationAttemptResult{}
 	}
 	if time.Until(record.ProviderAccessExpiry) > h.githubRefreshLeeway() {
-		return "", "", false
+		return rotationAttemptResult{}
 	}
 
+	// All preconditions satisfied — from here on a refresh request is (or
+	// was concurrently) issued, so callers see attempted=true even if the
+	// provider call ultimately fails.
+	//
 	// Use the full tokenKey (SHA-256 over the raw bearer) for the
 	// singleflight key. The shorter tokenFingerprint is only safe for log
 	// correlation: collisions in the 8-character prefix would let one
@@ -854,7 +886,7 @@ func (h *Handler) tryGitHubRotation(ctx context.Context, token string, record To
 	// are not blocked by a stale completed entry.
 	h.rotationGroup.Forget(sfKey)
 	res, _ := v.(rotationResult)
-	return res.newToken, res.subject, res.ok
+	return rotationAttemptResult{rotationResult: res, attempted: true}
 }
 
 // runGitHubRotation performs a single rotation attempt under the singleflight
@@ -982,19 +1014,21 @@ var ErrRotationFailed = errors.New("auth: rotation failed for delegated access")
 // watcher) can pull a fresh bearer without re-authenticating the user.
 //
 // Returns ErrSubjectNotFound when no cached token exists for subject.
-// Returns ErrRotationFailed when the cached token is at or inside the
-// rotation leeway window AND has provider refresh metadata, but no
-// fresh token could be obtained (rotation attempt failed). A nil error
-// with a non-empty AccessToken means a usable token was returned: a
-// freshly rotated bearer, a cached token whose expiry is comfortably
-// outside the leeway window, or — for entries without provider refresh
-// metadata (e.g. classic non-expiring PATs, or PAT-like tokens whose
-// rotation metadata was intentionally cleared) — the cached token as-is.
-// The latter "lenient" branch deliberately does not raise
-// ErrRotationFailed: there is no rotation contract for those entries to
-// violate. Note that this also means a delegated caller cannot
-// distinguish "no rotation needed" from "rotation was permanently
-// disabled by a prior failure" — see Known limitations in the spike doc.
+// Returns ErrRotationFailed when all rotation preconditions were
+// satisfied (GitHubRefreshEnabled, known subject, provider refresh
+// metadata present, expiry within leeway) and a refresh request was
+// issued but produced no fresh token. A nil error with a non-empty
+// AccessToken means a usable token was returned: a freshly rotated
+// bearer, a cached token whose expiry is comfortably outside the
+// leeway window, or — for entries that do not satisfy the rotation
+// preconditions (refresh gate disabled, classic non-expiring PATs, or
+// entries whose rotation metadata was cleared by a permanent failure) —
+// the cached token as-is. The latter "lenient" branch deliberately
+// does not raise ErrRotationFailed: there is no rotation contract for
+// those entries to violate. Note that this also means a delegated
+// caller cannot distinguish "no rotation needed" from "rotation was
+// permanently disabled by a prior failure" — see Known limitations in
+// the spike doc.
 func (h *Handler) EnsureFreshAccessTokenForSubject(ctx context.Context, subject string) (DelegatedAccessResult, error) {
 	rawToken, record, ok := h.store.LatestBySubject(subject)
 	if !ok {
@@ -1007,37 +1041,39 @@ func (h *Handler) EnsureFreshAccessTokenForSubject(ctx context.Context, subject 
 	if len(record.Audiences) > 0 {
 		audience = record.Audiences[0]
 	}
-	if rotated, _, rotatedOK := h.tryGitHubRotation(ctx, rawToken, record, audience); rotatedOK {
+	rotRes := h.tryGitHubRotationWithAttempt(ctx, rawToken, record, audience)
+	if rotRes.ok {
 		// Re-read the rotated record to pick up its provider expiry.
-		if newRec, newOK := h.store.LookupToken(rotated); newOK {
+		if newRec, newOK := h.store.LookupToken(rotRes.newToken); newOK {
 			return DelegatedAccessResult{
-				AccessToken:          rotated,
+				AccessToken:          rotRes.newToken,
 				ProviderAccessExpiry: newRec.ProviderAccessExpiry,
 				Scopes:               parseScopes(h.provider.Scopes()),
 			}, nil
 		}
 		return DelegatedAccessResult{
-			AccessToken: rotated,
+			AccessToken: rotRes.newToken,
 			Scopes:      parseScopes(h.provider.Scopes()),
 		}, nil
 	}
-	// Rotation either didn't run (no metadata / too early) or failed.
-	// Decide based on the pre-rotation snapshot whether we were supposed
-	// to rotate. The post-rotation re-read can be misleading: a permanent
-	// failure clears provider metadata, which would otherwise make this
-	// look like the lenient "no rotation metadata" branch.
-	shouldHaveRotated := record.ProviderRefreshToken != "" &&
-		!record.ProviderAccessExpiry.IsZero() &&
-		time.Until(record.ProviderAccessExpiry) <= h.githubRefreshLeeway()
-	if shouldHaveRotated {
-		// We tried to rotate (or would have, given the inputs) and did
-		// not get a fresh token. The cached bearer is at or past its
-		// useful life; do not hand it out.
+	if rotRes.attempted {
+		// All preconditions for rotation were satisfied (refresh gate on,
+		// known subject, metadata present, expiry within leeway) but the
+		// refresh attempt did not yield a fresh token. The cached bearer
+		// is at or past its useful life; do not hand it out.
+		//
+		// Note: we deliberately do NOT recompute the leeway window here
+		// against the post-rotation timestamp. Basing the decision on
+		// rotRes.attempted instead of re-evaluating time.Until guarantees
+		// the same input that drove tryGitHubRotation drives this
+		// fallthrough — no boundary race between the two checks.
 		return DelegatedAccessResult{}, ErrRotationFailed
 	}
-	// Lenient branch: no rotation metadata, or expiry comfortably outside
-	// the leeway window. Re-read the record so we report the most current
-	// expiry hint (it may have changed under us).
+	// Lenient branch: rotation was not applicable — either the refresh
+	// gate is disabled, no provider refresh metadata is present, or the
+	// cached expiry is comfortably outside the leeway window. Re-read the
+	// record so we report the most current expiry hint (it may have
+	// changed under us).
 	freshRec, stillCached := h.store.LookupToken(rawToken)
 	if !stillCached {
 		// Concurrent invalidation between LatestBySubject and now.
