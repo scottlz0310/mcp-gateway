@@ -9,6 +9,17 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Generic OAuth environment variables to decouple configuration from GitHub-specific naming ([#5](https://github.com/scottlz0310/mcp-gateway/issues/5)).
+  - New canonical variables: `OAUTH_PROVIDER` (default `github`), `OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET`, `OAUTH_SCOPES`.
+  - `OAUTH_PROVIDER` is plumbed through to the provider factory and enables future non-GitHub providers (#6).
+  - Migration map:
+
+    | New | Legacy (deprecated) |
+    |---|---|
+    | `OAUTH_PROVIDER` | _(new; default `github`)_ |
+    | `OAUTH_CLIENT_ID` | `GITHUB_MCP_CLIENT_ID` |
+    | `OAUTH_CLIENT_SECRET` | `GITHUB_MCP_CLIENT_SECRET` |
+    | `OAUTH_SCOPES` | `GITHUB_MCP_OAUTH_SCOPES` |
 - Transparent rotation of expiring GitHub OAuth user access tokens ([#70](https://github.com/scottlz0310/mcp-gateway/issues/70), Phase A).
   - New `MCP_GATEWAY_GITHUB_REFRESH_ENABLED` / `gateway.github_refresh_enabled` flag enables the rotation path. Defaults to `false`.
   - When the upstream provider advertises `refresh_token` + `expires_in`, the gateway re-uses the refresh token to rotate the access token within ~5 minutes of expiry. The rotated token is forwarded transparently to upstream MCP servers.
@@ -17,6 +28,7 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- OAuth environment variables read precedence: `OAUTH_*` wins over legacy `GITHUB_MCP_*`. If only the legacy variable is set the gateway uses it but logs a one-time deprecation warning per process. If both are set the canonical wins and the legacy value is ignored with a warning. The legacy names will be removed in a future major release. YAML config keys (`auth.github_client_id`, `auth.github_client_secret`, `gateway.oauth_scopes`) are unchanged ([#5](https://github.com/scottlz0310/mcp-gateway/issues/5)).
 - `auth.Handler.ValidateToken` now returns a rotated access token alongside the subject so middleware can substitute it in the request context. Internal API only; no public surface affected.
 
 ## [0.3.0] - 2026-05-07

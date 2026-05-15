@@ -32,8 +32,8 @@ services:
     ports:
       - "8080:8080"
     environment:
-      GITHUB_MCP_CLIENT_ID: <your-client-id>
-      GITHUB_MCP_CLIENT_SECRET: <your-client-secret>
+      OAUTH_CLIENT_ID: <your-client-id>
+      OAUTH_CLIENT_SECRET: <your-client-secret>
       MCP_GATEWAY_BIND_ADDR: 0.0.0.0:8080
       MCP_GATEWAY_PUBLIC_URL: http://127.0.0.1:8080
       ROUTE_GITHUB: /mcp/github|http://github-mcp:8082
@@ -185,8 +185,8 @@ setup token を消費して終了コード 0 で終了します。その後 supe
 
 ```yaml
 environment:
-  GITHUB_MCP_CLIENT_ID: <your-client-id>
-  GITHUB_MCP_CLIENT_SECRET: <your-client-secret>
+  OAUTH_CLIENT_ID: <your-client-id>
+  OAUTH_CLIENT_SECRET: <your-client-secret>
   MCP_GATEWAY_BIND_ADDR: 0.0.0.0:8080
   MCP_GATEWAY_PUBLIC_URL: http://127.0.0.1:8080
   ROUTE_GITHUB: /mcp/github|http://github-mcp:8082

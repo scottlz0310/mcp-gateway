@@ -28,8 +28,8 @@ services:
     ports:
       - "8080:8080"
     environment:
-      GITHUB_MCP_CLIENT_ID: <your-client-id>
-      GITHUB_MCP_CLIENT_SECRET: <your-client-secret>
+      OAUTH_CLIENT_ID: <your-client-id>
+      OAUTH_CLIENT_SECRET: <your-client-secret>
       MCP_GATEWAY_BIND_ADDR: 0.0.0.0:8080
       MCP_GATEWAY_PUBLIC_URL: http://127.0.0.1:8080
       ROUTE_GITHUB: /mcp/github|http://github-mcp:8082
@@ -48,8 +48,8 @@ usually does not exist. Point runtime files at writable local paths:
 export MCP_GATEWAY_TOKEN_STORE_PATH=./tokens.json
 export MCP_CONFIG_FILE=./config.yaml
 export MCP_GATEWAY_KEY_PATH=./gateway.key
-export GITHUB_MCP_CLIENT_ID=<your-client-id>
-export GITHUB_MCP_CLIENT_SECRET=<your-client-secret>
+export OAUTH_CLIENT_ID=<your-client-id>
+export OAUTH_CLIENT_SECRET=<your-client-secret>
 export ROUTE_GITHUB=/mcp/github|http://127.0.0.1:8082
 
 go run ./cmd/server
@@ -237,7 +237,8 @@ Fix:
    regenerated.
 3. If no backup or master key exists, remove or replace the encrypted
    `auth.github_client_secret` in `config.yaml`, provide
-   `GITHUB_MCP_CLIENT_SECRET` again, and let the gateway write a new encrypted
+   `OAUTH_CLIENT_SECRET` again (legacy `GITHUB_MCP_CLIENT_SECRET` also accepted
+   with a deprecation warning), and let the gateway write a new encrypted
    value with a new key.
 
 Do not delete `gateway.key` as a first response unless you know how the current
@@ -252,13 +253,14 @@ Symptoms:
 Cause:
 
 - Neither `auth.github_client_secret` in `config.yaml` nor
-  `GITHUB_MCP_CLIENT_SECRET` is available.
+  `OAUTH_CLIENT_SECRET` (or legacy `GITHUB_MCP_CLIENT_SECRET`) is available.
 
 Fix:
 
-- Provide `GITHUB_MCP_CLIENT_SECRET` once so the gateway can encrypt and persist
+- Provide `OAUTH_CLIENT_SECRET` once so the gateway can encrypt and persist
   it, or restore a valid encrypted `auth.github_client_secret` and matching
-  `gateway.key`.
+  `gateway.key`. The deprecated `GITHUB_MCP_CLIENT_SECRET` is still accepted
+  for backward compatibility but emits a startup warning.
 
 ### No Routes Configured
 

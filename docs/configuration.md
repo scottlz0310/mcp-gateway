@@ -9,8 +9,8 @@ mcp-gateway needs all of the following before it can run in normal mode:
 
 | Requirement | Environment source | `config.yaml` source |
 |-------------|--------------------|----------------------|
-| GitHub OAuth client ID | `GITHUB_MCP_CLIENT_ID` | `auth.github_client_id` |
-| GitHub OAuth client secret | `GITHUB_MCP_CLIENT_SECRET` for first-start seeding | `auth.github_client_secret` |
+| OAuth client ID | `OAUTH_CLIENT_ID` (legacy: `GITHUB_MCP_CLIENT_ID`) | `auth.github_client_id` |
+| OAuth client secret | `OAUTH_CLIENT_SECRET` for first-start seeding (legacy: `GITHUB_MCP_CLIENT_SECRET`) | `auth.github_client_secret` |
 | At least one route | `ROUTE_<NAME>` | `routes:` |
 
 If any required value is missing, the gateway enters setup mode and prints a
@@ -22,26 +22,37 @@ Configuration is resolved in this order:
 
 | Setting | Precedence |
 |---------|------------|
-| GitHub client ID | `GITHUB_MCP_CLIENT_ID` > `auth.github_client_id` |
-| GitHub client secret | encrypted/plain `auth.github_client_secret` > non-empty `GITHUB_MCP_CLIENT_SECRET` used to seed `config.yaml` |
+| OAuth provider | `OAUTH_PROVIDER` > `github` (default) |
+| OAuth client ID | `OAUTH_CLIENT_ID` > deprecated `GITHUB_MCP_CLIENT_ID` > `auth.github_client_id` |
+| OAuth client secret | encrypted/plain `auth.github_client_secret` > non-empty `OAUTH_CLIENT_SECRET` > deprecated `GITHUB_MCP_CLIENT_SECRET` used to seed `config.yaml` |
 | Routes | `ROUTE_<NAME>` env vars > `routes:` in `config.yaml` > deprecated `GITHUB_MCP_UPSTREAM_URL` fallback |
 | Public URL | `MCP_GATEWAY_PUBLIC_URL` > deprecated `MCP_GATEWAY_BASE_URL` > `gateway.public_url` > deprecated `gateway.base_url` > default |
 | Bind address | `MCP_GATEWAY_BIND_ADDR` > `gateway.bind_addr` > `127.0.0.1:<resolved-port>` |
-| OAuth scopes | `GITHUB_MCP_OAUTH_SCOPES` > `gateway.oauth_scopes` > `repo,user` |
+| OAuth scopes | `OAUTH_SCOPES` > deprecated `GITHUB_MCP_OAUTH_SCOPES` > `gateway.oauth_scopes` > `repo,user` |
 | Trusted proxies | `MCP_GATEWAY_TRUSTED_PROXIES` > `gateway.trusted_proxies` > none |
 | Token audience strict mode | `MCP_GATEWAY_TOKEN_AUDIENCE_STRICT` > `gateway.token_audience_strict` > `false` |
 | GitHub refresh token rotation | `MCP_GATEWAY_GITHUB_REFRESH_ENABLED` > `gateway.github_refresh_enabled` > `false` |
 
-The GitHub client secret is intentionally special: once `config.yaml` contains a
-secret, `GITHUB_MCP_CLIENT_SECRET` is ignored except during first-start seeding.
+The OAuth client secret is intentionally special: once `config.yaml` contains a
+secret, `OAUTH_CLIENT_SECRET` / `GITHUB_MCP_CLIENT_SECRET` are ignored except
+during first-start seeding.
+
+When the legacy `GITHUB_MCP_*` variables are observed at startup, the gateway
+emits a one-time `slog.Warn` per legacy variable. If both the canonical
+`OAUTH_*` and its legacy counterpart are set, the canonical wins and a warning
+is logged that the legacy is ignored.
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `GITHUB_MCP_CLIENT_ID` | none | GitHub OAuth App client ID. Required unless `auth.github_client_id` is set. |
-| `GITHUB_MCP_CLIENT_SECRET` | none | GitHub OAuth App client secret. Used to seed encrypted `config.yaml` when no config secret exists. |
-| `GITHUB_MCP_OAUTH_SCOPES` | `repo,user` | GitHub OAuth scopes requested by the gateway. |
+| `OAUTH_PROVIDER` | `github` | OAuth provider kind. Currently only `github` is supported. |
+| `OAUTH_CLIENT_ID` | none | OAuth App client ID. Required unless `auth.github_client_id` is set. Supersedes `GITHUB_MCP_CLIENT_ID`. |
+| `OAUTH_CLIENT_SECRET` | none | OAuth App client secret. Used to seed encrypted `config.yaml` when no config secret exists. Supersedes `GITHUB_MCP_CLIENT_SECRET`. |
+| `OAUTH_SCOPES` | `repo,user` | OAuth scopes requested by the gateway. Supersedes `GITHUB_MCP_OAUTH_SCOPES`. |
+| `GITHUB_MCP_CLIENT_ID` | none | **Deprecated** — use `OAUTH_CLIENT_ID`. Still accepted with a startup warning. |
+| `GITHUB_MCP_CLIENT_SECRET` | none | **Deprecated** — use `OAUTH_CLIENT_SECRET`. Still accepted with a startup warning. |
+| `GITHUB_MCP_OAUTH_SCOPES` | none | **Deprecated** — use `OAUTH_SCOPES`. Still accepted with a startup warning. |
 | `ROUTE_<NAME>` | none | Route definition in `<prefix>|<upstream_url>[|auth=none]` form. At least one route is required unless configured in `config.yaml`. |
 | `MCP_CONFIG_FILE` | `./config.yaml` | Path to persisted YAML configuration. |
 | `MCP_GATEWAY_KEY_PATH` | `./gateway.key` | Path to the age X25519 identity used to encrypt `auth.github_client_secret`. |
@@ -163,7 +174,7 @@ Startup behavior:
 3. Resolve the secret:
    - `ENC[age:]...` in config: decrypt and use.
    - Plaintext in config: encrypt, rewrite config, and use.
-   - No config secret plus `GITHUB_MCP_CLIENT_SECRET`: encrypt, save to config, and use.
+   - No config secret plus `OAUTH_CLIENT_SECRET` (or legacy `GITHUB_MCP_CLIENT_SECRET`): encrypt, save to config, and use.
    - No source: fail startup.
 
 Key generation priority:
