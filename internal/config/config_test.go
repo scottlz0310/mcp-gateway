@@ -86,7 +86,7 @@ func TestMigrateSecret_FromEnvVar(t *testing.T) {
 	km := testKeyMaterial(t)
 	envSecret := "secret-from-env-var-xyz"
 	t.Setenv("OAUTH_CLIENT_SECRET", envSecret)
-	_ = os.Unsetenv("GITHUB_MCP_CLIENT_SECRET")
+	t.Setenv("GITHUB_MCP_CLIENT_SECRET", "")
 	resetLegacyEnvWarnedForTest()
 
 	cfg := &AppConfig{} // no secret in config
@@ -119,7 +119,7 @@ func TestMigrateSecret_FromLegacyEnvVar(t *testing.T) {
 
 	km := testKeyMaterial(t)
 	envSecret := "legacy-secret-abc"
-	_ = os.Unsetenv("OAUTH_CLIENT_SECRET")
+	t.Setenv("OAUTH_CLIENT_SECRET", "")
 	t.Setenv("GITHUB_MCP_CLIENT_SECRET", envSecret)
 	resetLegacyEnvWarnedForTest()
 
@@ -182,8 +182,8 @@ func TestMigrateSecret_NoSecretAnywhere(t *testing.T) {
 	configPath := filepath.Join(dir, "config.yaml")
 
 	km := testKeyMaterial(t)
-	_ = os.Unsetenv("OAUTH_CLIENT_SECRET")
-	_ = os.Unsetenv("GITHUB_MCP_CLIENT_SECRET")
+	t.Setenv("OAUTH_CLIENT_SECRET", "")
+	t.Setenv("GITHUB_MCP_CLIENT_SECRET", "")
 
 	cfg := &AppConfig{}
 	_, err := MigrateSecret(configPath, cfg, km)
@@ -204,7 +204,7 @@ func TestMigrateSecret_NoSecretInLogs(t *testing.T) {
 	km := testKeyMaterial(t)
 	secretValue := "ultrasecret-do-not-log-me-abc123"
 	t.Setenv("OAUTH_CLIENT_SECRET", secretValue)
-	_ = os.Unsetenv("GITHUB_MCP_CLIENT_SECRET")
+	t.Setenv("GITHUB_MCP_CLIENT_SECRET", "")
 	resetLegacyEnvWarnedForTest()
 
 	cfg := &AppConfig{}

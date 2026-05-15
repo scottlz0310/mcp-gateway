@@ -12,18 +12,7 @@ import (
 // per process lifetime even when the variable is consulted multiple times.
 var legacyEnvWarned sync.Map
 
-// resetLegacyEnvWarnedForTest clears the legacy-env warning tracker. Tests use
-// it to keep deprecation-warning assertions independent of each other; it is
-// not exported because production code must not reset the once-per-process
-// guarantee.
-func resetLegacyEnvWarnedForTest() {
-	legacyEnvWarned.Range(func(key, _ any) bool {
-		legacyEnvWarned.Delete(key)
-		return true
-	})
-}
-
-// warnLegacyEnvOnce logs a deprecation warning for a legacy env var the first
+// warnLegacyEnvOncelogs a deprecation warning for a legacy env var the first
 // time it is observed. When ignored is true, the warning indicates that the
 // legacy variable was ignored because the canonical variable is also set;
 // otherwise, the warning indicates the legacy variable is in use.

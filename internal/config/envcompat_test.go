@@ -1,7 +1,6 @@
 package config
 
 import (
-	"os"
 	"strings"
 	"testing"
 )
@@ -29,7 +28,7 @@ func TestResolveOAuthEnv_PrefersCanonical(t *testing.T) {
 func TestResolveOAuthEnv_FallsBackToLegacy(t *testing.T) {
 	logBuf := captureLogs(t)
 	resetLegacyEnvWarnedForTest()
-	_ = os.Unsetenv("OAUTH_CLIENT_ID")
+	t.Setenv("OAUTH_CLIENT_ID", "")
 	t.Setenv("GITHUB_MCP_CLIENT_ID", "legacy-id")
 
 	v, ok := ResolveOAuthEnv("OAUTH_CLIENT_ID", "GITHUB_MCP_CLIENT_ID")
@@ -45,8 +44,8 @@ func TestResolveOAuthEnv_FallsBackToLegacy(t *testing.T) {
 // TestResolveOAuthEnv_NeitherSet returns ok=false when neither var is set.
 func TestResolveOAuthEnv_NeitherSet(t *testing.T) {
 	resetLegacyEnvWarnedForTest()
-	_ = os.Unsetenv("OAUTH_CLIENT_ID")
-	_ = os.Unsetenv("GITHUB_MCP_CLIENT_ID")
+	t.Setenv("OAUTH_CLIENT_ID", "")
+	t.Setenv("GITHUB_MCP_CLIENT_ID", "")
 
 	v, ok := ResolveOAuthEnv("OAUTH_CLIENT_ID", "GITHUB_MCP_CLIENT_ID")
 	if ok || v != "" {
@@ -59,7 +58,7 @@ func TestResolveOAuthEnv_NeitherSet(t *testing.T) {
 func TestResolveOAuthEnv_WarnOnce(t *testing.T) {
 	logBuf := captureLogs(t)
 	resetLegacyEnvWarnedForTest()
-	_ = os.Unsetenv("OAUTH_CLIENT_ID")
+	t.Setenv("OAUTH_CLIENT_ID", "")
 	t.Setenv("GITHUB_MCP_CLIENT_ID", "legacy-id")
 
 	for i := 0; i < 3; i++ {
