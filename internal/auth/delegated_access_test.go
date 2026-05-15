@@ -297,3 +297,37 @@ func TestLatestBySubject_PrunesSubjectMismatchEntries(t *testing.T) {
 	}
 }
 
+// TestEnsureFreshAccessTokenForSubject_PermanentFailureLenientBranchReturnsError
+// verifies Gap 2 fix: after a permanent rotation failure clears provider
+// refresh metadata, a *subsequent* call to EnsureFreshAccessTokenForSubject
+// must not return the (now-dead) cached bearer via the lenient branch.
+// Instead, it must surface ErrRotationFailed so callers know the credential
+// is unusable.
+func TestEnsureFreshAccessTokenForSubject_PermanentFailureLenientBranchReturnsError(t *testing.T) {
+	p := &provider.Mock{
+		NameValue:   "github",
+		ScopesValue: "repo,user",
+		RefreshTokenFunc: func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{}, errors.New("bad_refresh_token")
+		},
+	}
+	h := newDelegatedTestHandler(t, p, 5*time.Minute)
+	h.store.CacheToken("tok-dead", "alice", "http://localhost:8080/mcp")
+	soon := time.Now().Add(30 * time.Second)
+	h.store.RecordProviderRefresh("tok-dead", "refresh-bad", soon)
+
+	// First call: token is inside leeway → rotation attempted → permanent
+	// failure → metadata cleared, permanently-failed flag set.
+	_, err := h.EnsureFreshAccessTokenForSubject(context.Background(), "alice")
+	if !errors.Is(err, ErrRotationFailed) {
+		t.Fatalf("first call: err=%v want ErrRotationFailed", err)
+	}
+
+	// Second call: metadata is cleared, so rotation preconditions are not
+	// met → lenient branch. But the permanently-failed flag must prevent
+	// the dead bearer from being returned.
+	_, err = h.EnsureFreshAccessTokenForSubject(context.Background(), "alice")
+	if !errors.Is(err, ErrRotationFailed) {
+		t.Fatalf("second call (lenient branch): err=%v want ErrRotationFailed (Gap 2 fix)", err)
+	}
+}

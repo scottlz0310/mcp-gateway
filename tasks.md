@@ -67,27 +67,43 @@
 
 ---
 
-## Phase B: Delegated background access PoC（中期）
+## Phase B: Delegated background access（完了）
 
 **目的**: upstream MCP server（`copilot-review-mcp` 等）が background workflow から「現在の有効 token を取り直す」ことを許す内部 API をゲートウェイに追加し、Option C（gateway-managed delegated access）の小さい実装を検証する。
 
-**Issue**: 新規作成予定（Phase B の専用 issue を切る。Issue #70 から派生）
+**Issue**: [#72](https://github.com/scottlz0310/mcp-gateway/issues/72)（PoC 実装、PR #76 でマージ済み）、[#77](https://github.com/scottlz0310/mcp-gateway/issues/77)（rotation 正確性ギャップ修正）
 
 ### サブタスク
 
-- [ ] 設計ドキュメント `docs/spike-70-delegated-background-access.md` を作成
-  - エンドポイント案: `POST /internal/v1/token/refresh` または `GET /internal/v1/whoami?identity=<login>`
-  - trust boundary（UNIX socket / mTLS / shared secret のいずれにするか）
+- [x] 設計ドキュメント `docs/spike-72-delegated-background-access.md` を作成
+  - エンドポイント: `POST /internal/v1/whoami`（loopback bind + shared secret）
+  - trust boundary: loopback(127.0.0.1) + `MCP_GATEWAY_INTERNAL_SECRET`（HMAC-safe ConstantTimeCompare）
   - upstream 側がトークンを保存しない設計を維持する API 形状
-- [ ] PoC ブランチで `/internal/v1/...` ハンドラ実装（loopback / unix socket bind 限定）
-- [ ] `copilot-review-mcp` 側でこの API を叩く client 実装の draft 提案（こちらは別リポジトリ issue として連動）
-- [ ] レビュー後、本実装 issue に昇格判断
+- [x] PoC ブランチで `/internal/v1/whoami` ハンドラ実装（loopback bind 限定）— `internal/internalapi/`
+- [x] `EnsureFreshAccessTokenForSubject` を `Handler` に実装（subject ベースの delegated token lookup + 自動 rotation）
+- [x] `LatestBySubject` を `Store` に実装（subject index による token ranking）
+- [x] `copilot-review-mcp` 側の client 実装 draft 提案（別リポジトリ issue として連動）
+- [x] **Gap 2 修正** (#77): 永続的 rotation 失敗後のレニエントブランチが dead bearer を返す問題を修正
+  - `Store.MarkRotationPermanentlyFailed` / `IsRotationPermanentlyFailed` を追加
+  - `runGitHubRotation` の永続失敗パスで `MarkRotationPermanentlyFailed` を呼び出す
+  - レニエントブランチで `IsRotationPermanentlyFailed` チェックを追加
+- [x] **Gap 3 修正** (#77): `LatestBySubject` の同一 `ProviderAccessExpiry` 時の tie-break 修正
+  - `.Equal()` 条件を追加し、後から登録されたエントリ（新しい rotated token）を優先
+- [x] Phase B 本採用評価レポート `docs/phase-b-adoption-report.md` 作成
+- [x] テスト追加: Gap 2 (`TestEnsureFreshAccessTokenForSubject_PermanentFailureLenientBranchReturnsError`)、Gap 3 (`TestLatestBySubjectTieBreaksOnInsertionOrder`)
 
 ### 受け入れ基準（PoC ゲート）
 
-- ローカル composing 環境で gateway と upstream MCP が trust boundary 越しに通信できることを確認
-- セキュリティレビュー（loopback 限定、認証 secret の取り扱い）が完了している
-- Option C を採るか、より軽量な手段に切り戻すかの判断材料が docs として残る
+- [x] ローカル composing 環境で gateway と upstream MCP が trust boundary 越しに通信できることを確認
+- [x] セキュリティレビュー（loopback 限定、認証 secret の取り扱い）が完了している
+- [x] Option C を採るか、より軽量な手段に切り戻すかの判断材料が docs として残る（`docs/phase-b-adoption-report.md` 参照）
+
+### 既知の限界（#77 修正後残存分）
+
+- subject index はインメモリのみ: gateway 再起動後、再認証まで delegated アクセス不可
+- `rotationFailed` フラグもインメモリのみ: 再起動後、最初の rotation 試行で再設定される（一度の dead bearer 返却リスクあり。許容範囲内）
+- スコープは gateway 全体設定: トークンごとの fine-grained scope は将来課題
+- Unix socket / mTLS による multi-host 構成は未実装（同一ホスト構成限定）
 
 ---
 

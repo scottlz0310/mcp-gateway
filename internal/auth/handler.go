@@ -944,13 +944,16 @@ func (h *Handler) runGitHubRotation(ctx context.Context, token, audience string)
 		// Permanent failure (bad_refresh_token, 4xx, malformed response,
 		// etc.). Clearing metadata stops every subsequent ValidateToken
 		// from re-hitting the provider with the same poisoned refresh
-		// token until the cache entry expires.
+		// token until the cache entry expires. Marking the token as
+		// permanently failed additionally causes EnsureFreshAccessToken-
+		// ForSubject's lenient branch to return ErrRotationFailed instead
+		// of the (now-dead) cached bearer.
 		slog.Warn("rotation_failed",
 			"token_hash", tokenFingerprint(token),
 			"err", err,
 			"action", "metadata_cleared",
 		)
-		h.store.ClearProviderRefresh(token)
+		h.store.MarkRotationPermanentlyFailed(token)
 		return rotationResult{}
 	}
 	if tokens.AccessToken == "" {
@@ -959,7 +962,7 @@ func (h *Handler) runGitHubRotation(ctx context.Context, token, audience string)
 			"err", "empty access_token from provider",
 			"action", "metadata_cleared",
 		)
-		h.store.ClearProviderRefresh(token)
+		h.store.MarkRotationPermanentlyFailed(token)
 		return rotationResult{}
 	}
 	cacheAudience := ""
@@ -1019,17 +1022,12 @@ var ErrSubjectNotFound = errors.New("auth: subject not cached")
 // the subject and provider refresh metadata are present, and a refresh
 // request was issued but did not yield a fresh token (transient provider
 // error, an upstream rejection, or — within the same call — a permanent
-// failure that cleared metadata mid-flight). Callers should surface this as
-// a 502-class upstream failure: returning the cached token in this state
-// would hand the caller a credential it cannot use.
-//
-// Note: when provider metadata has been cleared by a *prior* permanent
-// failure, the next call sees no rotation preconditions (empty
-// ProviderRefreshToken) and takes the lenient no-metadata branch that
-// returns the cached token without an error. ErrRotationFailed therefore
-// fires only when a refresh was attempted; it does not cover the
-// "metadata already cleared before we ran" case. See Known limitations
-// in the spike doc for the operational consequence.
+// failure that cleared metadata mid-flight). Also returned by the lenient
+// branch when a prior permanent rotation failure was recorded for the token
+// (IsRotationPermanentlyFailed), preventing a dead bearer from being handed
+// to callers. Callers should surface this as a 502-class upstream failure:
+// returning the cached token in this state would hand the caller a credential
+// it cannot use.
 var ErrRotationFailed = errors.New("auth: rotation failed for delegated access")
 
 // EnsureFreshAccessTokenForSubject returns the latest valid access token for
@@ -1118,6 +1116,14 @@ func (h *Handler) EnsureFreshAccessTokenForSubject(ctx context.Context, subject 
 	if !stillCached {
 		// Concurrent invalidation between LatestBySubject and now.
 		return DelegatedAccessResult{}, ErrSubjectNotFound
+	}
+	// Gap 2 fix: a prior permanent rotation failure (bad_refresh_token,
+	// revoked credentials) cleared the provider refresh metadata and set
+	// the permanently-failed flag. The cached bearer is at or past its
+	// useful life; do not hand it out even though no fresh rotation was
+	// attempted in this call.
+	if h.store.IsRotationPermanentlyFailed(rawToken) {
+		return DelegatedAccessResult{}, ErrRotationFailed
 	}
 	return DelegatedAccessResult{
 		AccessToken:          rawToken,

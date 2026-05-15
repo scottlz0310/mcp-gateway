@@ -79,6 +79,17 @@ type Store struct {
 	subjectIndexMu sync.RWMutex
 	subjectIndex   map[string][]subjectIndexEntry
 
+	// rotationFailed tracks raw tokens for which a permanent provider
+	// rotation failure has been observed (e.g. bad_refresh_token,
+	// revoked credentials). Keys are SHA-256 hashes (tokenKey) of raw
+	// bearers. In-memory only: on gateway restart the set is empty and
+	// the permanent failure will be re-recorded on the first attempted
+	// rotation. The map is never explicitly pruned — it grows at most
+	// as large as the number of tokens that ever hit a permanent failure,
+	// which is expected to be small.
+	rotationFailedMu sync.RWMutex
+	rotationFailed   map[string]struct{}
+
 	stopCh chan struct{}
 }
 
@@ -121,8 +132,9 @@ func NewStore(sessionTTL, tokensTTL time.Duration, ts TokenStore, opts ...StoreO
 		tokens:       ts,
 		tokensTTL:    tokensTTL,
 		refreshStore: NewMemRefreshTokenStore(),
-		subjectIndex: make(map[string][]subjectIndexEntry),
-		stopCh:       make(chan struct{}),
+		subjectIndex:   make(map[string][]subjectIndexEntry),
+		rotationFailed: make(map[string]struct{}),
+		stopCh:         make(chan struct{}),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -565,7 +577,8 @@ func (s *Store) LatestBySubject(subject string) (string, TokenRecord, bool) {
 		// hint (e.g. cleared metadata after a permanent rotation failure)
 		// cannot cause us to prefer an unrotatable token.
 		if !rec.ProviderAccessExpiry.IsZero() {
-			if !foundRotatable || rec.ProviderAccessExpiry.After(bestRec.ProviderAccessExpiry) {
+			if !foundRotatable || rec.ProviderAccessExpiry.After(bestRec.ProviderAccessExpiry) ||
+				(foundRotatable && rec.ProviderAccessExpiry.Equal(bestRec.ProviderAccessExpiry)) {
 				best = e
 				bestRec = rec
 				foundRotatable = true
@@ -657,6 +670,29 @@ func (s *Store) ClearProviderRefresh(token string) {
 	if err := s.tokens.SaveProviderRefresh(token, "", time.Time{}); err != nil {
 		slog.Warn("token store provider refresh clear failed", "err", err)
 	}
+}
+
+// MarkRotationPermanentlyFailed records a permanent rotation failure for
+// token. It clears provider refresh metadata (so the rotation path is not
+// retried on subsequent ValidateToken calls) and sets an in-memory flag
+// checked by EnsureFreshAccessTokenForSubject's lenient branch, causing
+// that branch to return ErrRotationFailed instead of the (potentially
+// expired) cached bearer. The flag is in-memory only: it is re-set on
+// the first attempted rotation after a gateway restart.
+func (s *Store) MarkRotationPermanentlyFailed(token string) {
+	s.ClearProviderRefresh(token)
+	s.rotationFailedMu.Lock()
+	s.rotationFailed[tokenKey(token)] = struct{}{}
+	s.rotationFailedMu.Unlock()
+}
+
+// IsRotationPermanentlyFailed reports whether a permanent rotation failure
+// has been recorded for the given raw token.
+func (s *Store) IsRotationPermanentlyFailed(token string) bool {
+	s.rotationFailedMu.RLock()
+	_, failed := s.rotationFailed[tokenKey(token)]
+	s.rotationFailedMu.RUnlock()
+	return failed
 }
 
 // InvalidateCachedToken removes a token from the store immediately.
