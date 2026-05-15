@@ -673,22 +673,25 @@ func (s *Store) ClearProviderRefresh(token string) {
 }
 
 // MarkRotationPermanentlyFailed records a permanent rotation failure for
-// token. It clears provider refresh metadata (so the rotation path is not
-// retried on subsequent ValidateToken calls), sets a durable
-// RotationPermanentlyFailed flag in the token store (persisted to disk when
-// using a file-backed store), removes the token from the subject index so
-// EnsureFreshAccessTokenForSubject cannot return it via the lenient branch,
-// and sets an in-memory flag for belt-and-suspenders within the same process.
+// token. It persists a durable RotationPermanentlyFailed flag in the token
+// store (flushed to disk first when using a file-backed store so a subsequent
+// flush failure when clearing metadata cannot leave the restart-durable
+// invariant unset), then clears provider refresh metadata, removes the token
+// from the subject index so EnsureFreshAccessTokenForSubject cannot return it
+// via the lenient branch, and sets an in-memory flag for belt-and-suspenders
+// within the same process.
 //
 // After a gateway restart with a file-backed store, the
 // RotationPermanentlyFailed flag is restored from disk and ValidateToken
 // skips RefreshSubjectIndex, so the dead bearer is never re-inserted into
 // the subject index.
 func (s *Store) MarkRotationPermanentlyFailed(token string) {
-	s.ClearProviderRefresh(token)
+	// Persist the durable flag FIRST so that even if ClearProviderRefresh
+	// fails, the next restart will see the flag and skip RefreshSubjectIndex.
 	if err := s.tokens.MarkRotationFailed(token); err != nil {
 		slog.Warn("token store mark rotation failed", "err", err)
 	}
+	s.ClearProviderRefresh(token)
 	// Remove from subject index so EnsureFreshAccessTokenForSubject cannot
 	// serve the dead bearer via the lenient branch (no rotation metadata).
 	if rec, ok := s.tokens.Lookup(token); ok && rec.Subject != "" {

@@ -137,7 +137,7 @@ mTLS for the internal API — this is deferred to a future phase.
 | # | Limitation | Impact | Mitigation / Future |
 |---|---|---|---|
 | L1 | Subject index is in-memory only | After restart, delegated access returns `ErrSubjectNotFound` until the subject re-authenticates via the public gateway | Users must re-authenticate after gateway restart (same as current behavior) |
-| L2 | `rotationFailed` flag is in-memory only | After restart, one extra rotation attempt is made before the flag is re-set | Single extra request, same final `ErrRotationFailed` outcome |
+| L2 | `RotationPermanentlyFailed` flag persistence requires file-backed store | In-memory-only mode: after restart, one extra rotation attempt is made before the flag is re-set | Use `token_store_path` (file-backed) for durable flag; in durable mode, `ValidateToken` skips `RefreshSubjectIndex` post-restart → `ErrSubjectNotFound` returned |
 | L3 | Scopes are gateway-wide (`gateway.github_scopes`) | Cannot grant per-token or per-subject scope subsets | Fine-grained scopes deferred |
 | L4 | `expires_in` not always sent by GitHub | `ProviderAccessExpiry` may be zero if GitHub omits the field | Rotation falls back to leeway-based heuristic; behaviour unchanged from Phase A |
 | L5 | Multi-host deployments unsupported | Loopback-only bind; container isolation may block internal API | Unix socket or mTLS support deferred |

@@ -1042,7 +1042,10 @@ var ErrRotationFailed = errors.New("auth: rotation failed for delegated access")
 // delegated-access internal API so background workers (e.g. an upstream MCP
 // watcher) can pull a fresh bearer without re-authenticating the user.
 //
-// Returns ErrSubjectNotFound when no cached token exists for subject.
+// Returns ErrSubjectNotFound when no cached token exists for subject (including
+// after a permanent rotation failure: MarkRotationPermanentlyFailed removes the
+// token from the subject index so this function never reaches the lenient branch
+// for permanently-failed tokens — ErrSubjectNotFound is returned instead).
 // Returns ErrRotationFailed when all rotation preconditions were
 // satisfied (GitHubRefreshEnabled, known subject, provider refresh
 // metadata present, expiry within leeway) and a refresh request was
@@ -1050,14 +1053,10 @@ var ErrRotationFailed = errors.New("auth: rotation failed for delegated access")
 // AccessToken means a usable token was returned: a freshly rotated
 // bearer, a cached token whose expiry is comfortably outside the
 // leeway window, or — for entries that do not satisfy the rotation
-// preconditions (refresh gate disabled, classic non-expiring PATs, or
-// entries whose rotation metadata was cleared by a permanent failure) —
+// preconditions (refresh gate disabled, classic non-expiring PATs) —
 // the cached token as-is. The latter "lenient" branch deliberately
 // does not raise ErrRotationFailed: there is no rotation contract for
-// those entries to violate. Note that this also means a delegated
-// caller cannot distinguish "no rotation needed" from "rotation was
-// permanently disabled by a prior failure" — see Known limitations in
-// the spike doc.
+// those entries to violate.
 func (h *Handler) EnsureFreshAccessTokenForSubject(ctx context.Context, subject string) (DelegatedAccessResult, error) {
 	rawToken, record, ok := h.store.LatestBySubject(subject)
 	if !ok {
