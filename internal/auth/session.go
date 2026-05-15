@@ -467,9 +467,9 @@ func (s *Store) indexSubjectToken(subject, rawToken string, expiresAt time.Time)
 
 // RefreshSubjectIndex re-seeds the in-memory subject → token index for a
 // token that is already present in the authoritative TokenStore. It is
-// idempotent and reuses the configured cache TTL (time.Now() + tokensTTL)
-// as the index entry's expiresAt, matching what saveTokenRecord would
-// have written.
+// idempotent and uses recordExpiresAt (the authoritative TokenRecord's
+// ExpiresAt) as the index entry's expiresAt, so the index never outlives
+// the underlying record.
 //
 // The intended caller is the cache-hit branch of ValidateToken: after a
 // process restart with a persistent TokenStore the in-memory
@@ -480,11 +480,11 @@ func (s *Store) indexSubjectToken(subject, rawToken string, expiresAt time.Time)
 //
 // Callers that perform a full cache write should use CacheToken (which
 // also refreshes the index via saveTokenRecord) rather than this method.
-func (s *Store) RefreshSubjectIndex(subject, rawToken string) {
-	if subject == "" || rawToken == "" {
+func (s *Store) RefreshSubjectIndex(subject, rawToken string, recordExpiresAt time.Time) {
+	if subject == "" || rawToken == "" || recordExpiresAt.IsZero() {
 		return
 	}
-	s.indexSubjectToken(subject, rawToken, time.Now().Add(s.tokensTTL))
+	s.indexSubjectToken(subject, rawToken, recordExpiresAt)
 }
 
 // LatestBySubject returns the raw access token with the latest provider
@@ -535,11 +535,19 @@ func (s *Store) LatestBySubject(subject string) (string, TokenRecord, bool) {
 	// different subject. These index entries hold raw bearer tokens, so
 	// leaving them in place would let stale credentials linger until the
 	// index TTL expires.
-	stale := make(map[string]struct{})
+	//
+	// We snapshot each stale candidate's expiresAt as well, so the prune
+	// pass can refuse to drop an entry whose expiresAt has since been
+	// bumped by a concurrent CacheToken/indexSubjectToken (i.e. another
+	// request re-validated the same raw token between our snapshot here
+	// and the prune below). Without this guard the freshly re-indexed
+	// entry would be dropped and delegated lookups would return
+	// subject_not_found until re-auth.
+	stale := make(map[string]time.Time)
 	for _, e := range candidates {
 		rec, ok := s.tokens.Lookup(e.rawToken)
 		if !ok {
-			stale[e.rawToken] = struct{}{}
+			stale[e.rawToken] = e.expiresAt
 			continue
 		}
 		// Defense-in-depth: skip records whose authoritative Subject
@@ -550,7 +558,7 @@ func (s *Store) LatestBySubject(subject string) (string, TokenRecord, bool) {
 		// case the index entry is stale and must not be returned, lest
 		// we hand out another subject's bearer.
 		if rec.Subject != "" && rec.Subject != subject {
-			stale[e.rawToken] = struct{}{}
+			stale[e.rawToken] = e.expiresAt
 			continue
 		}
 		// Rank against the authoritative record so a stale subject-index
@@ -585,8 +593,15 @@ func (s *Store) LatestBySubject(subject string) (string, TokenRecord, bool) {
 // slice. Used by LatestBySubject to drop entries whose authoritative
 // TokenStore lookup failed or whose Subject was re-assigned, so stale bearer
 // strings do not remain reachable for the rest of the index TTL.
-func (s *Store) pruneSubjectIndexEntries(subject string, toRemove map[string]struct{}) {
-	if len(toRemove) == 0 {
+//
+// snapshotExpiry maps rawToken to the expiresAt observed when the entry was
+// identified as stale. If a concurrent CacheToken/indexSubjectToken has since
+// updated the live entry's expiresAt (re-validating the same raw token), the
+// snapshot will not match the live value and we skip the drop — otherwise we
+// would delete a freshly-validated entry and cause delegated lookups to fail
+// until the user re-authenticates.
+func (s *Store) pruneSubjectIndexEntries(subject string, snapshotExpiry map[string]time.Time) {
+	if len(snapshotExpiry) == 0 {
 		return
 	}
 	s.subjectIndexMu.Lock()
@@ -597,7 +612,8 @@ func (s *Store) pruneSubjectIndexEntries(subject string, toRemove map[string]str
 	}
 	kept := make([]subjectIndexEntry, 0, len(entries))
 	for _, e := range entries {
-		if _, drop := toRemove[e.rawToken]; drop {
+		snap, marked := snapshotExpiry[e.rawToken]
+		if marked && e.expiresAt.Equal(snap) {
 			continue
 		}
 		kept = append(kept, e)

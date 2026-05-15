@@ -95,6 +95,10 @@ func TestWhoamiHappyPath(t *testing.T) {
 	if payload["expires_at"] != "2030-01-02T03:04:05Z" {
 		t.Errorf("expires_at: got %v", payload["expires_at"])
 	}
+	gotScopes, _ := payload["scopes"].([]any)
+	if len(gotScopes) != 2 || gotScopes[0] != "repo" || gotScopes[1] != "read:user" {
+		t.Errorf("scopes: got %v want [repo read:user]", payload["scopes"])
+	}
 	if resolver.gotSubject != "github|123" {
 		t.Errorf("subject forwarded: got %q", resolver.gotSubject)
 	}

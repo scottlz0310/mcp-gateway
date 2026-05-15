@@ -99,6 +99,7 @@ list (best-effort identifier for what the access token can do).
 | 404 | no cached token record for this subject |
 | 405 | non-POST method (response includes `Allow: POST`) |
 | 502 | provider rotation was required (cached token inside the leeway window) but did not produce a fresh token (`error: "rotation_failed"`) |
+| 502 | upstream resolver failed for a non-rotation reason, or returned an empty access token despite reporting success (`error: "upstream_failure"`) |
 
 ## Security model
 
@@ -235,14 +236,20 @@ configured:
   invalidates the entry manually or the user re-authenticates.
 
 1. **Dead bearer after permanent rotation failure.** When
-   `runGitHubRotation` hits a real failure (`bad_refresh_token`, empty
-   `access_token`, generic upstream error) it calls
-   `ClearProviderRefresh` on the token entry. The next
-   `/internal/v1/whoami` call then finds no provider-refresh metadata
-   and falls into the lenient "no rotation contract" branch, which
-   returns the cached bearer with `200`. That bearer is almost certainly
-   already invalid on GitHub's side. **Recovery does not happen by
-   simply re-issuing the delegated call on the next polling cycle**:
+   `runGitHubRotation` hits a *permanent* failure (`bad_refresh_token`
+   or an upstream response that reports success but returns an empty
+   `access_token`) it calls `ClearProviderRefresh` on the token entry.
+   The next `/internal/v1/whoami` call then finds no provider-refresh
+   metadata and falls into the lenient "no rotation contract" branch,
+   which returns the cached bearer with `200`. That bearer is almost
+   certainly already invalid on GitHub's side. Note that *transient*
+   upstream failures (5xx, network errors surfaced as
+   `auth.UpstreamError`) do **not** trigger `ClearProviderRefresh`;
+   they return `502 upstream_failure` with rotation metadata preserved
+   so the next call still takes the rotation path
+   (`action=retry_next`). The dead-bearer pitfall therefore applies
+   only to the permanent-failure subset. **Recovery does not happen
+   by simply re-issuing the delegated call on the next polling cycle**:
    subsequent calls keep taking the same lenient branch and return the
    same dead bearer until the underlying token-store/index TTL expires
    (see the per-store bounds above) or the user re-authenticates.
@@ -255,13 +262,17 @@ configured:
    rotation, `runGitHubRotation` updates the *old* token entry's
    `ProviderAccessExpiry` to the same value as the new entry (so a
    client that keeps presenting the old bearer can still be rotated on
-   the next request). `LatestBySubject` ranks candidates by strict
-   `.After(...)`; when both entries carry the same expiry, ranking
-   falls back to map-iteration order and can prefer the *old* bearer
+   the next request). `LatestBySubject` walks the subject-index slice
+   in deterministic insertion order and ranks candidates by strict
+   `.After(...)`; when both entries carry an equal `ProviderAccessExpiry`
+   the strict comparison fails for the later-visited entry, so the
+   *first-inserted* (i.e. older) bearer keeps the lead and is returned
    — even though only the *new* bearer is actually valid against
-   GitHub's original access token. Proper fix: break ties in favour of
-   the newest index entry, or track the currently-active access token
-   explicitly on the rotation chain.
+   GitHub's original access token. The hazard is therefore the
+   insertion-order + equal-expiry combination, not map iteration
+   non-determinism. Proper fix: break ties in favour of the newest
+   index entry, or track the currently-active access token explicitly
+   on the rotation chain.
 
 ## Future work
 

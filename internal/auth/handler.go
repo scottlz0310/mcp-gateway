@@ -779,7 +779,7 @@ func (h *Handler) ValidateToken(ctx context.Context, token, audience string) (su
 			// only) is empty even though tokens are readable from disk;
 			// otherwise the Phase B /internal/v1/whoami would keep
 			// returning subject_not_found until the cache TTL expires.
-			h.store.RefreshSubjectIndex(record.Subject, token)
+			h.store.RefreshSubjectIndex(record.Subject, token, record.ExpiresAt)
 			return record.Subject, "", nil
 		}
 	} else if err := h.validateAudience(token, TokenRecord{}, audience); err != nil {
