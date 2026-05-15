@@ -18,9 +18,11 @@ using it for the entire watch lifetime — even after rotation has issued
 a new access token.
 
 The Phase A rotation does cache *both* the old and new bearer for the
-leeway period, but once the underlying GitHub access token actually
-expires, the old bearer presented by the background goroutine starts
-returning `401` from GitHub and the watch dies.
+gateway's own cache TTL (so MCP requests presenting either bearer continue
+to validate inside the gateway), but the underlying **GitHub-side access
+token validity** is independent of that cache: once the original GitHub
+access token actually expires, the old bearer presented by the background
+goroutine starts returning `401` from GitHub and the watch dies.
 
 ## Goal
 
@@ -203,6 +205,55 @@ work).
   compromised upstream effectively has the keys to every cached
   subject's access token. Per-upstream identities are listed under
   Future work.
+
+## Known limitations (PoC scope)
+
+The Copilot review on PR #76 surfaced three rotation-correctness gaps
+that are **not** addressed in this PoC because each requires a design
+change larger than the PoC envelope. They are accepted as risks because
+the blast radius is bounded by the gateway cache TTL (minutes) and by
+the loopback + shared-secret trust boundary, and because background
+watch goroutines tolerate transient 401s by re-issuing the delegated
+call. They are tracked under Future work and should be resolved before
+this API leaves PoC status.
+
+1. **Concurrent rotation can be reported as `rotation_failed`.**
+   `EnsureFreshAccessTokenForSubject` decides whether to raise
+   `ErrRotationFailed` based on the *pre-rotation* snapshot of the
+   `TokenRecord`. If another goroutine successfully rotates the same
+   token between `LatestBySubject` and `tryGitHubRotation`, our call
+   sees `ok=false` from the singleflight'd inner rotation (which
+   correctly detects that no work is needed) but our snapshot still
+   shows an in-leeway expiry, so we return 502 `rotation_failed` even
+   though a fresh token is now cached. Callers will retry and observe
+   success on the next call. Proper fix: re-read the record after the
+   rotation miss and distinguish "concurrent success" from "real
+   failure".
+
+2. **Dead bearer after permanent rotation failure.** When
+   `runGitHubRotation` hits a real failure (`bad_refresh_token`, empty
+   `access_token`, generic upstream error) it calls
+   `ClearProviderRefresh` on the token entry. The next
+   `/internal/v1/whoami` call then finds no provider-refresh metadata
+   and falls into the lenient "no rotation contract" branch, which
+   returns the cached bearer with `200`. That bearer is almost certainly
+   already invalid on GitHub's side. Background callers will observe a
+   `401` from GitHub on first use and recover on the next polling
+   cycle, but the gateway is technically lying about freshness for one
+   round. Proper fix: persist a `RotationFailed` (or equivalent) flag
+   on `TokenRecord` and surface `ErrRotationFailed` on the next call.
+
+3. **Old/new bearer tie-break in `LatestBySubject`.** On successful
+   rotation, `runGitHubRotation` updates the *old* token entry's
+   `ProviderAccessExpiry` to the same value as the new entry (so a
+   client that keeps presenting the old bearer can still be rotated on
+   the next request). `LatestBySubject` ranks candidates by strict
+   `.After(...)`; when both entries carry the same expiry, ranking
+   falls back to map-iteration order and can prefer the *old* bearer
+   — even though only the *new* bearer is actually valid against
+   GitHub's original access token. Proper fix: break ties in favour of
+   the newest index entry, or track the currently-active access token
+   explicitly on the rotation chain.
 
 ## Future work
 

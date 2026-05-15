@@ -983,12 +983,18 @@ var ErrRotationFailed = errors.New("auth: rotation failed for delegated access")
 //
 // Returns ErrSubjectNotFound when no cached token exists for subject.
 // Returns ErrRotationFailed when the cached token is at or inside the
-// rotation leeway window but no fresh token could be obtained (rotation
-// failed or no rotation metadata is available). A nil error with a
-// non-empty AccessToken means a usable token was returned: either freshly
-// rotated, or the existing cached token that is still safely outside the
-// leeway window (e.g. classic non-expiring PATs, or any token whose
-// expiry is sufficiently far in the future).
+// rotation leeway window AND has provider refresh metadata, but no
+// fresh token could be obtained (rotation attempt failed). A nil error
+// with a non-empty AccessToken means a usable token was returned: a
+// freshly rotated bearer, a cached token whose expiry is comfortably
+// outside the leeway window, or — for entries without provider refresh
+// metadata (e.g. classic non-expiring PATs, or PAT-like tokens whose
+// rotation metadata was intentionally cleared) — the cached token as-is.
+// The latter "lenient" branch deliberately does not raise
+// ErrRotationFailed: there is no rotation contract for those entries to
+// violate. Note that this also means a delegated caller cannot
+// distinguish "no rotation needed" from "rotation was permanently
+// disabled by a prior failure" — see Known limitations in the spike doc.
 func (h *Handler) EnsureFreshAccessTokenForSubject(ctx context.Context, subject string) (DelegatedAccessResult, error) {
 	rawToken, record, ok := h.store.LatestBySubject(subject)
 	if !ok {

@@ -223,29 +223,47 @@ func TestWhoamiGETRejected(t *testing.T) {
 // tokens after the JSON object is rejected as invalid_body. Without this
 // check, json.Decoder would silently accept the first object and ignore
 // the rest -- letting a caller smuggle additional payload.
+//
+// Each case exercises a different trailing-data shape. The closing-bracket
+// case in particular is the one that motivated the cycle-3 review fix:
+// dec.More() returns false for a stray "]" because it does not begin a
+// new JSON value, so the second-Decode-requires-io.EOF strategy is needed
+// to catch it.
 func TestWhoamiTrailingJSONRejected(t *testing.T) {
-	srv, cleanup := newTestServer(t, &fakeResolver{
-		result: auth.DelegatedAccessResult{AccessToken: "tok"},
-	}, testSecret)
-	defer cleanup()
-	body := `{"subject":"alice"}{"subject":"mallory"}`
-	req, _ := http.NewRequest("POST", srv.URL+"/internal/v1/whoami", strings.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+testSecret)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := srv.Client().Do(req)
-	if err != nil {
-		t.Fatalf("Do: %v", err)
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"second object", `{"subject":"alice"}{"subject":"mallory"}`},
+		{"trailing bracket", `{"subject":"alice"}]`},
+		{"trailing brace", `{"subject":"alice"}}`},
+		{"trailing array", `{"subject":"alice"}[1]`},
 	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("status: got %d want 400 for trailing JSON", resp.StatusCode)
-	}
-	var env map[string]string
-	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
-		t.Fatalf("decode body: %v", err)
-	}
-	if env["error"] != "invalid_body" {
-		t.Errorf("error code: got %q want invalid_body", env["error"])
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, cleanup := newTestServer(t, &fakeResolver{
+				result: auth.DelegatedAccessResult{AccessToken: "tok"},
+			}, testSecret)
+			defer cleanup()
+			req, _ := http.NewRequest("POST", srv.URL+"/internal/v1/whoami", strings.NewReader(tc.body))
+			req.Header.Set("Authorization", "Bearer "+testSecret)
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := srv.Client().Do(req)
+			if err != nil {
+				t.Fatalf("Do: %v", err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status: got %d want 400 for trailing JSON", resp.StatusCode)
+			}
+			var env map[string]string
+			if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+				t.Fatalf("decode body: %v", err)
+			}
+			if env["error"] != "invalid_body" {
+				t.Errorf("error code: got %q want invalid_body", env["error"])
+			}
+		})
 	}
 }
 

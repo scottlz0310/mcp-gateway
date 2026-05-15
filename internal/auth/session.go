@@ -513,6 +513,16 @@ func (s *Store) LatestBySubject(subject string) (string, TokenRecord, bool) {
 		if !ok {
 			continue
 		}
+		// Defense-in-depth: skip records whose authoritative Subject
+		// disagrees with the requested subject. The subject index is
+		// only updated via indexSubjectToken (called from CacheToken),
+		// so a mismatch here would indicate the raw token was re-cached
+		// under a different subject after we indexed it -- in which
+		// case the index entry is stale and must not be returned, lest
+		// we hand out another subject's bearer.
+		if rec.Subject != "" && rec.Subject != subject {
+			continue
+		}
 		// Rank against the authoritative record so a stale subject-index
 		// hint (e.g. cleared metadata after a permanent rotation failure)
 		// cannot cause us to prefer an unrotatable token.

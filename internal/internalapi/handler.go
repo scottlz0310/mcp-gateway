@@ -14,6 +14,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -131,8 +132,13 @@ func (h *Handler) Whoami(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Reject any trailing tokens after the JSON object so callers can't
-	// sneak in extra payload past DisallowUnknownFields.
-	if dec.More() {
+	// sneak in extra payload past DisallowUnknownFields. dec.More() alone
+	// is insufficient: it returns false for a stray closing delimiter
+	// (`]`, `}`) or whitespace-only suffix because those tokens do not
+	// begin a new JSON value. A second Decode that must return io.EOF
+	// definitively confirms the stream contained exactly one JSON value.
+	var trailing json.RawMessage
+	if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
 		writeError(w, http.StatusBadRequest, "invalid_body")
 		return
 	}
