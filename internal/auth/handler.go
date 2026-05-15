@@ -951,6 +951,88 @@ func (h *Handler) InvalidateCachedToken(token string) {
 	h.store.InvalidateCachedToken(token)
 }
 
+// DelegatedAccessResult is the outcome of EnsureFreshAccessTokenForSubject:
+// the raw access token to hand to the calling upstream, the provider-advertised
+// expiry (zero when the provider does not advertise one), and the OAuth scopes
+// configured for this gateway (best-effort identifier of what the token can do).
+type DelegatedAccessResult struct {
+	AccessToken          string
+	ProviderAccessExpiry time.Time
+	Scopes               []string
+}
+
+// ErrSubjectNotFound is returned by EnsureFreshAccessTokenForSubject when no
+// cached token entry exists for the requested subject. Callers should surface
+// this as a 404 to upstream clients.
+var ErrSubjectNotFound = errors.New("auth: subject not cached")
+
+// EnsureFreshAccessTokenForSubject returns the latest valid access token for
+// the given subject, transparently rotating it when its provider-advertised
+// expiry falls within the configured leeway. Used by the Phase B
+// delegated-access internal API so background workers (e.g. an upstream MCP
+// watcher) can pull a fresh bearer without re-authenticating the user.
+//
+// Returns ErrSubjectNotFound when no cached token exists for subject. A nil
+// error with a non-empty AccessToken means a valid token was returned, even
+// if rotation was attempted and failed transiently (the still-valid current
+// token is returned). Permanent rotation failures clear the provider refresh
+// metadata via the same path used by per-request rotation.
+func (h *Handler) EnsureFreshAccessTokenForSubject(ctx context.Context, subject string) (DelegatedAccessResult, error) {
+	rawToken, record, ok := h.store.LatestBySubject(subject)
+	if !ok {
+		return DelegatedAccessResult{}, ErrSubjectNotFound
+	}
+	// Choose a representative audience: prefer one already on the record
+	// (so HasAudience semantics in tryGitHubRotation hit cache), otherwise
+	// fall back to the gateway base URL.
+	audience := h.cfg.BaseURL
+	if len(record.Audiences) > 0 {
+		audience = record.Audiences[0]
+	}
+	if rotated, _, rotatedOK := h.tryGitHubRotation(ctx, rawToken, record, audience); rotatedOK {
+		// Re-read the rotated record to pick up its provider expiry.
+		if newRec, newOK := h.store.LookupToken(rotated); newOK {
+			return DelegatedAccessResult{
+				AccessToken:          rotated,
+				ProviderAccessExpiry: newRec.ProviderAccessExpiry,
+				Scopes:               parseScopes(h.provider.Scopes()),
+			}, nil
+		}
+		return DelegatedAccessResult{
+			AccessToken: rotated,
+			Scopes:      parseScopes(h.provider.Scopes()),
+		}, nil
+	}
+	return DelegatedAccessResult{
+		AccessToken:          rawToken,
+		ProviderAccessExpiry: record.ProviderAccessExpiry,
+		Scopes:               parseScopes(h.provider.Scopes()),
+	}, nil
+}
+
+// parseScopes splits a provider scope string (space- or comma-separated) into
+// a slice. Empty input yields nil. Whitespace-only tokens are dropped.
+func parseScopes(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	fields := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t'
+	})
+	if len(fields) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		f = strings.TrimSpace(f)
+		if f != "" {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
 func (h *Handler) resolveRequestedAudience(resources []string) (string, error) {
 	for _, raw := range resources {
 		if strings.TrimSpace(raw) == "" {

@@ -15,6 +15,7 @@ import (
 	"github.com/scottlz0310/mcp-gateway/internal/auth"
 	"github.com/scottlz0310/mcp-gateway/internal/auth/provider"
 	appconfig "github.com/scottlz0310/mcp-gateway/internal/config"
+	"github.com/scottlz0310/mcp-gateway/internal/internalapi"
 	"github.com/scottlz0310/mcp-gateway/internal/middleware"
 	"github.com/scottlz0310/mcp-gateway/internal/proxy"
 	"github.com/scottlz0310/mcp-gateway/internal/router"
@@ -290,6 +291,12 @@ func main() {
 		WriteTimeout:      0, // unlimited: MCP streaming responses may be long-lived
 		IdleTimeout:       120 * time.Second,
 	}
+
+	// Phase B (#72) delegated-access PoC: optional loopback-only internal API.
+	// Activated only when both env vars are set; missing either → disabled
+	// (fail-closed) with an explicit log so misconfiguration is obvious.
+	startInternalAPI(oauthHandler)
+
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		slog.Error("server error", "err", err)
 		os.Exit(1)
@@ -490,4 +497,45 @@ func parseLogLevel(level string) slog.Level {
 	default:
 		return slog.LevelInfo
 	}
+}
+
+// startInternalAPI launches the Phase B (#72) delegated-access loopback API
+// when MCP_GATEWAY_INTERNAL_SECRET and MCP_GATEWAY_INTERNAL_PORT are both set.
+// Missing or invalid configuration fails closed: the API is simply not served
+// and a log line announces the disabled state. We never bind to a non-loopback
+// address.
+func startInternalAPI(resolver internalapi.TokenResolver) {
+	secret := strings.TrimSpace(os.Getenv("MCP_GATEWAY_INTERNAL_SECRET"))
+	portRaw := strings.TrimSpace(os.Getenv("MCP_GATEWAY_INTERNAL_PORT"))
+	if secret == "" || portRaw == "" {
+		slog.Info("internal delegated access API disabled", "reason", "env vars not set")
+		return
+	}
+	port, err := strconv.Atoi(portRaw)
+	if err != nil || port <= 0 || port > 65535 {
+		slog.Error("internal delegated access API disabled: invalid port", "port", portRaw)
+		return
+	}
+	handler, err := internalapi.NewHandler(resolver, secret)
+	if err != nil {
+		slog.Error("internal delegated access API disabled: invalid configuration", "err", err)
+		return
+	}
+	mux := http.NewServeMux()
+	handler.RegisterRoutes(mux)
+	addr := "127.0.0.1:" + portRaw
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           middleware.Logger()(mux),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	slog.Info("internal delegated access API listening", "addr", addr)
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("internal delegated access API exited", "err", err)
+		}
+	}()
 }
