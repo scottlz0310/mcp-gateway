@@ -673,23 +673,40 @@ func (s *Store) ClearProviderRefresh(token string) {
 }
 
 // MarkRotationPermanentlyFailed records a permanent rotation failure for
-// token. It persists a durable RotationPermanentlyFailed flag in the token
-// store (flushed to disk first when using a file-backed store so a subsequent
-// flush failure when clearing metadata cannot leave the restart-durable
-// invariant unset), then clears provider refresh metadata, removes the token
-// from the subject index so EnsureFreshAccessTokenForSubject cannot return it
-// via the lenient branch, and sets an in-memory flag for belt-and-suspenders
-// within the same process.
+// token. It first persists a durable RotationPermanentlyFailed flag in the
+// token store. If that flush fails, the function updates in-memory state only
+// (subject index eviction + rotationFailed map) and returns without clearing
+// provider refresh metadata — this guarantees the file store is never left in
+// the non-durable intermediate state (cleared metadata, no flag) that would
+// allow a dead bearer to be re-seeded after a gateway restart. The next
+// rotation attempt will retry the flush and eventually converge.
+//
+// When the flush succeeds, ClearProviderRefresh is called next, then the
+// token is removed from the subject index so EnsureFreshAccessTokenForSubject
+// cannot return it via the lenient branch, and an in-memory flag is set for
+// belt-and-suspenders protection within the same process.
 //
 // After a gateway restart with a file-backed store, the
 // RotationPermanentlyFailed flag is restored from disk and ValidateToken
 // skips RefreshSubjectIndex, so the dead bearer is never re-inserted into
 // the subject index.
 func (s *Store) MarkRotationPermanentlyFailed(token string) {
-	// Persist the durable flag FIRST so that even if ClearProviderRefresh
-	// fails, the next restart will see the flag and skip RefreshSubjectIndex.
+	// Persist the durable flag FIRST. If the flush fails, do not proceed to
+	// ClearProviderRefresh: leaving cleared metadata on disk without the
+	// RotationPermanentlyFailed flag recreates the original restart bug
+	// (ValidateToken re-seeds the subject index → dead bearer returned).
+	// On flush failure we still update in-memory state so the dead bearer is
+	// blocked within this process; the next rotation attempt will retry the
+	// flush and eventually converge.
 	if err := s.tokens.MarkRotationFailed(token); err != nil {
-		slog.Warn("token store mark rotation failed", "err", err)
+		slog.Warn("token store mark rotation failed; not clearing metadata to preserve durable-state invariant", "err", err)
+		if rec, ok := s.tokens.Lookup(token); ok && rec.Subject != "" {
+			s.removeSubjectIndexEntry(rec.Subject, token)
+		}
+		s.rotationFailedMu.Lock()
+		s.rotationFailed[tokenKey(token)] = struct{}{}
+		s.rotationFailedMu.Unlock()
+		return
 	}
 	s.ClearProviderRefresh(token)
 	// Remove from subject index so EnsureFreshAccessTokenForSubject cannot

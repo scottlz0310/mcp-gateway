@@ -149,7 +149,7 @@ mTLS for the internal API — this is deferred to a future phase.
 
 | Test | File | What it verifies |
 |---|---|---|
-| `TestEnsureFreshAccessTokenForSubject_PermanentFailureLenientBranchReturnsError` | `delegated_access_test.go` | Gap 2: second call after permanent failure returns `ErrRotationFailed`, not dead bearer |
+| `TestEnsureFreshAccessTokenForSubject_PermanentFailureLenientBranchReturnsError` | `delegated_access_test.go` | Gap 2: second call after permanent failure returns `ErrSubjectNotFound` (token evicted from subject index by `MarkRotationPermanentlyFailed`), not a dead bearer |
 | `TestLatestBySubjectTieBreaksOnInsertionOrder` | `subject_index_test.go` | Gap 3: equal-expiry tie-break returns the most recently registered token |
 
 All 8 pre-existing Phase B delegated-access tests continue to pass. Total auth package test suite:
