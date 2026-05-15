@@ -54,7 +54,7 @@ func TestLatestBySubjectPrefersProviderExpiry(t *testing.T) {
 	}
 }
 
-// TestLatestBySubjectIgnoresUnknownSubjectsAfterPrune verifies that the
+// TestLatestBySubjectPrunesExpired verifies that the
 // subject index entry is dropped entirely once every cached token for it has
 // expired, so a later lookup returns ok=false rather than a stale record.
 func TestLatestBySubjectPrunesExpired(t *testing.T) {
@@ -97,5 +97,31 @@ func TestLatestBySubjectSkipsSubjectMismatch(t *testing.T) {
 	}
 	if rec.Subject != "bob" {
 		t.Errorf("rec.Subject: got %q want bob", rec.Subject)
+	}
+}
+
+// TestLatestBySubjectTieBreaksOnInsertionOrder verifies that when two entries
+// for the same subject have identical ProviderAccessExpiry (as happens right
+// after runGitHubRotation writes the new expiry to both the old and new
+// token entries), LatestBySubject returns the most recently registered token
+// (last in the subject index slice) rather than the older one.
+func TestLatestBySubjectTieBreaksOnInsertionOrder(t *testing.T) {
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
+
+	sameExpiry := time.Now().Add(1 * time.Hour)
+
+	// Register old token first, new token second (mirrors rotation order).
+	s.CacheToken("tok-old", "alice", "https://gw.example/mcp")
+	s.RecordProviderRefresh("tok-old", "refresh-old", sameExpiry)
+
+	s.CacheToken("tok-new", "alice", "https://gw.example/mcp")
+	s.RecordProviderRefresh("tok-new", "refresh-new", sameExpiry)
+
+	raw, _, ok := s.LatestBySubject("alice")
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	if raw != "tok-new" {
+		t.Errorf("rawToken: got %q want %q — tie should prefer the most recently indexed entry", raw, "tok-new")
 	}
 }

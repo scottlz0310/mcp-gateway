@@ -774,12 +774,18 @@ func (h *Handler) ValidateToken(ctx context.Context, token, audience string) (su
 			return newSubject, rotated, nil
 		}
 		if record.Subject != "" {
-			// Re-seed the subject index on a cache hit. After process
-			// restart with a persistent TokenStore, subjectIndex (in-memory
-			// only) is empty even though tokens are readable from disk;
-			// otherwise the Phase B /internal/v1/whoami would keep
-			// returning subject_not_found until the cache TTL expires.
-			h.store.RefreshSubjectIndex(record.Subject, token, record.ExpiresAt)
+			if !record.RotationPermanentlyFailed {
+				// Re-seed the subject index on a cache hit. After process
+				// restart with a persistent TokenStore, subjectIndex (in-memory
+				// only) is empty even though tokens are readable from disk;
+				// otherwise the Phase B /internal/v1/whoami would keep
+				// returning subject_not_found until the cache TTL expires.
+				// Permanently-failed tokens are intentionally excluded: they
+				// must not be re-inserted into the subject index or
+				// EnsureFreshAccessTokenForSubject would serve a dead bearer
+				// via the lenient (no-metadata) branch after a restart.
+				h.store.RefreshSubjectIndex(record.Subject, token, record.ExpiresAt)
+			}
 			return record.Subject, "", nil
 		}
 	} else if err := h.validateAudience(token, TokenRecord{}, audience); err != nil {
@@ -944,13 +950,16 @@ func (h *Handler) runGitHubRotation(ctx context.Context, token, audience string)
 		// Permanent failure (bad_refresh_token, 4xx, malformed response,
 		// etc.). Clearing metadata stops every subsequent ValidateToken
 		// from re-hitting the provider with the same poisoned refresh
-		// token until the cache entry expires.
+		// token until the cache entry expires. Marking the token as
+		// permanently failed additionally causes EnsureFreshAccessToken-
+		// ForSubject's lenient branch to return ErrRotationFailed instead
+		// of the (now-dead) cached bearer.
 		slog.Warn("rotation_failed",
 			"token_hash", tokenFingerprint(token),
 			"err", err,
 			"action", "metadata_cleared",
 		)
-		h.store.ClearProviderRefresh(token)
+		h.store.MarkRotationPermanentlyFailed(token)
 		return rotationResult{}
 	}
 	if tokens.AccessToken == "" {
@@ -959,7 +968,7 @@ func (h *Handler) runGitHubRotation(ctx context.Context, token, audience string)
 			"err", "empty access_token from provider",
 			"action", "metadata_cleared",
 		)
-		h.store.ClearProviderRefresh(token)
+		h.store.MarkRotationPermanentlyFailed(token)
 		return rotationResult{}
 	}
 	cacheAudience := ""
@@ -1019,17 +1028,12 @@ var ErrSubjectNotFound = errors.New("auth: subject not cached")
 // the subject and provider refresh metadata are present, and a refresh
 // request was issued but did not yield a fresh token (transient provider
 // error, an upstream rejection, or — within the same call — a permanent
-// failure that cleared metadata mid-flight). Callers should surface this as
-// a 502-class upstream failure: returning the cached token in this state
-// would hand the caller a credential it cannot use.
-//
-// Note: when provider metadata has been cleared by a *prior* permanent
-// failure, the next call sees no rotation preconditions (empty
-// ProviderRefreshToken) and takes the lenient no-metadata branch that
-// returns the cached token without an error. ErrRotationFailed therefore
-// fires only when a refresh was attempted; it does not cover the
-// "metadata already cleared before we ran" case. See Known limitations
-// in the spike doc for the operational consequence.
+// failure that cleared metadata mid-flight). Also returned by the lenient
+// branch when a prior permanent rotation failure was recorded for the token
+// (IsRotationPermanentlyFailed), preventing a dead bearer from being handed
+// to callers. Callers should surface this as a 502-class upstream failure:
+// returning the cached token in this state would hand the caller a credential
+// it cannot use.
 var ErrRotationFailed = errors.New("auth: rotation failed for delegated access")
 
 // EnsureFreshAccessTokenForSubject returns the latest valid access token for
@@ -1038,7 +1042,10 @@ var ErrRotationFailed = errors.New("auth: rotation failed for delegated access")
 // delegated-access internal API so background workers (e.g. an upstream MCP
 // watcher) can pull a fresh bearer without re-authenticating the user.
 //
-// Returns ErrSubjectNotFound when no cached token exists for subject.
+// Returns ErrSubjectNotFound when no cached token exists for subject (including
+// after a permanent rotation failure: MarkRotationPermanentlyFailed removes the
+// token from the subject index so this function never reaches the lenient branch
+// for permanently-failed tokens — ErrSubjectNotFound is returned instead).
 // Returns ErrRotationFailed when all rotation preconditions were
 // satisfied (GitHubRefreshEnabled, known subject, provider refresh
 // metadata present, expiry within leeway) and a refresh request was
@@ -1046,14 +1053,10 @@ var ErrRotationFailed = errors.New("auth: rotation failed for delegated access")
 // AccessToken means a usable token was returned: a freshly rotated
 // bearer, a cached token whose expiry is comfortably outside the
 // leeway window, or — for entries that do not satisfy the rotation
-// preconditions (refresh gate disabled, classic non-expiring PATs, or
-// entries whose rotation metadata was cleared by a permanent failure) —
+// preconditions (refresh gate disabled, classic non-expiring PATs) —
 // the cached token as-is. The latter "lenient" branch deliberately
 // does not raise ErrRotationFailed: there is no rotation contract for
-// those entries to violate. Note that this also means a delegated
-// caller cannot distinguish "no rotation needed" from "rotation was
-// permanently disabled by a prior failure" — see Known limitations in
-// the spike doc.
+// those entries to violate.
 func (h *Handler) EnsureFreshAccessTokenForSubject(ctx context.Context, subject string) (DelegatedAccessResult, error) {
 	rawToken, record, ok := h.store.LatestBySubject(subject)
 	if !ok {
@@ -1118,6 +1121,14 @@ func (h *Handler) EnsureFreshAccessTokenForSubject(ctx context.Context, subject 
 	if !stillCached {
 		// Concurrent invalidation between LatestBySubject and now.
 		return DelegatedAccessResult{}, ErrSubjectNotFound
+	}
+	// Gap 2 fix: a prior permanent rotation failure (bad_refresh_token,
+	// revoked credentials) cleared the provider refresh metadata and set
+	// the permanently-failed flag. The cached bearer is at or past its
+	// useful life; do not hand it out even though no fresh rotation was
+	// attempted in this call.
+	if h.store.IsRotationPermanentlyFailed(rawToken) {
+		return DelegatedAccessResult{}, ErrRotationFailed
 	}
 	return DelegatedAccessResult{
 		AccessToken:          rawToken,

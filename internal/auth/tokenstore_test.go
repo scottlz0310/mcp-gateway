@@ -49,6 +49,26 @@ func testTokenStoreContract(t *testing.T, ts TokenStore) {
 		t.Error("Lookup: expected miss for expired entry")
 	}
 
+	// MarkRotationFailed — sets RotationPermanentlyFailed flag; Lookup returns it
+	if err := ts.Save("tok-pf", "carol", nil, time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("Save tok-pf: %v", err)
+	}
+	if err := ts.MarkRotationFailed("tok-pf"); err != nil {
+		t.Fatalf("MarkRotationFailed: %v", err)
+	}
+	rec3, ok3 := ts.Lookup("tok-pf")
+	if !ok3 {
+		t.Fatal("MarkRotationFailed: token should still be present (not evicted)")
+	}
+	if !rec3.RotationPermanentlyFailed {
+		t.Error("MarkRotationFailed: RotationPermanentlyFailed should be true after marking")
+	}
+
+	// MarkRotationFailed on absent token is a no-op (no error)
+	if err := ts.MarkRotationFailed("no-such-token"); err != nil {
+		t.Fatalf("MarkRotationFailed on absent token returned error: %v", err)
+	}
+
 	// Sweep removes expired entries
 	if err := ts.Sweep(); err != nil {
 		t.Fatalf("Sweep: %v", err)
@@ -126,6 +146,76 @@ func TestFileTokenStorePersistence(t *testing.T) {
 	}
 	if !rec.HasAudience("https://gw.example/mcp") {
 		t.Errorf("after reload: audiences got %#v", rec.Audiences)
+	}
+}
+
+// TestFileTokenStoreMarkRotationFailedPersists verifies that the
+// RotationPermanentlyFailed flag set via MarkRotationFailed survives a gateway
+// restart (reload from the file-backed store).  This is the durability
+// property that prevents a dead bearer from being re-inserted into the subject
+// index after a restart.
+func TestFileTokenStoreMarkRotationFailedPersists(t *testing.T) {
+	path := tempStorePath(t)
+
+	ts1, err := NewFileTokenStore(path)
+	if err != nil {
+		t.Fatalf("NewFileTokenStore: %v", err)
+	}
+	if err := ts1.Save("pf-tok", "alice", nil, time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := ts1.MarkRotationFailed("pf-tok"); err != nil {
+		t.Fatalf("MarkRotationFailed: %v", err)
+	}
+
+	// Reload from same path — simulates gateway restart.
+	ts2, err := NewFileTokenStore(path)
+	if err != nil {
+		t.Fatalf("reloaded NewFileTokenStore: %v", err)
+	}
+	rec, ok := ts2.Lookup("pf-tok")
+	if !ok {
+		t.Fatal("after reload: token should still be present (not evicted)")
+	}
+	if rec.Subject != "alice" {
+		t.Errorf("after reload: subject got %q, want %q", rec.Subject, "alice")
+	}
+	if !rec.RotationPermanentlyFailed {
+		t.Error("after reload: RotationPermanentlyFailed should be true")
+	}
+}
+
+// TestFileTokenStoreMarkRotationFailedFlushFailureRollsBack verifies that
+// MarkRotationFailed rolls back the in-memory mutation when the flush fails.
+func TestFileTokenStoreMarkRotationFailedFlushFailureRollsBack(t *testing.T) {
+	path := tempStorePath(t)
+	ts, err := NewFileTokenStore(path)
+	if err != nil {
+		t.Fatalf("NewFileTokenStore: %v", err)
+	}
+	if err := ts.Save("pf-rb", "bob", nil, time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	parent := filepath.Dir(path)
+	t.Cleanup(func() { _ = os.MkdirAll(parent, 0o700) })
+	if err := os.RemoveAll(parent); err != nil {
+		t.Fatalf("RemoveAll: %v", err)
+	}
+
+	err = ts.MarkRotationFailed("pf-rb")
+	if err == nil {
+		t.Fatal("expected MarkRotationFailed to surface flush failure")
+	}
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		t.Fatalf("recreate parent: %v", err)
+	}
+	rec, ok := ts.Lookup("pf-rb")
+	if !ok {
+		t.Fatal("Lookup after rollback: expected entry to still be present")
+	}
+	if rec.RotationPermanentlyFailed {
+		t.Error("rollback: RotationPermanentlyFailed should remain false after flush failure")
 	}
 }
 

@@ -79,6 +79,17 @@ type Store struct {
 	subjectIndexMu sync.RWMutex
 	subjectIndex   map[string][]subjectIndexEntry
 
+	// rotationFailed tracks raw tokens for which a permanent provider
+	// rotation failure has been observed (e.g. bad_refresh_token,
+	// revoked credentials). Keys are SHA-256 hashes (tokenKey) of raw
+	// bearers. In-memory only: on gateway restart the set is empty and
+	// the permanent failure will be re-recorded on the first attempted
+	// rotation. The map is never explicitly pruned — it grows at most
+	// as large as the number of tokens that ever hit a permanent failure,
+	// which is expected to be small.
+	rotationFailedMu sync.RWMutex
+	rotationFailed   map[string]struct{}
+
 	stopCh chan struct{}
 }
 
@@ -121,8 +132,9 @@ func NewStore(sessionTTL, tokensTTL time.Duration, ts TokenStore, opts ...StoreO
 		tokens:       ts,
 		tokensTTL:    tokensTTL,
 		refreshStore: NewMemRefreshTokenStore(),
-		subjectIndex: make(map[string][]subjectIndexEntry),
-		stopCh:       make(chan struct{}),
+		subjectIndex:   make(map[string][]subjectIndexEntry),
+		rotationFailed: make(map[string]struct{}),
+		stopCh:         make(chan struct{}),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -565,7 +577,8 @@ func (s *Store) LatestBySubject(subject string) (string, TokenRecord, bool) {
 		// hint (e.g. cleared metadata after a permanent rotation failure)
 		// cannot cause us to prefer an unrotatable token.
 		if !rec.ProviderAccessExpiry.IsZero() {
-			if !foundRotatable || rec.ProviderAccessExpiry.After(bestRec.ProviderAccessExpiry) {
+			if !foundRotatable || rec.ProviderAccessExpiry.After(bestRec.ProviderAccessExpiry) ||
+				(foundRotatable && rec.ProviderAccessExpiry.Equal(bestRec.ProviderAccessExpiry)) {
 				best = e
 				bestRec = rec
 				foundRotatable = true
@@ -659,6 +672,62 @@ func (s *Store) ClearProviderRefresh(token string) {
 	}
 }
 
+// MarkRotationPermanentlyFailed records a permanent rotation failure for
+// token. It first persists a durable RotationPermanentlyFailed flag in the
+// token store. If that flush fails, the function updates in-memory state only
+// (subject index eviction + rotationFailed map) and returns without clearing
+// provider refresh metadata — this guarantees the file store is never left in
+// the non-durable intermediate state (cleared metadata, no flag) that would
+// allow a dead bearer to be re-seeded after a gateway restart. The next
+// rotation attempt will retry the flush and eventually converge.
+//
+// When the flush succeeds, ClearProviderRefresh is called next, then the
+// token is removed from the subject index so EnsureFreshAccessTokenForSubject
+// cannot return it via the lenient branch, and an in-memory flag is set for
+// belt-and-suspenders protection within the same process.
+//
+// After a gateway restart with a file-backed store, the
+// RotationPermanentlyFailed flag is restored from disk and ValidateToken
+// skips RefreshSubjectIndex, so the dead bearer is never re-inserted into
+// the subject index.
+func (s *Store) MarkRotationPermanentlyFailed(token string) {
+	// Persist the durable flag FIRST. If the flush fails, do not proceed to
+	// ClearProviderRefresh: leaving cleared metadata on disk without the
+	// RotationPermanentlyFailed flag recreates the original restart bug
+	// (ValidateToken re-seeds the subject index → dead bearer returned).
+	// On flush failure we still update in-memory state so the dead bearer is
+	// blocked within this process; the next rotation attempt will retry the
+	// flush and eventually converge.
+	if err := s.tokens.MarkRotationFailed(token); err != nil {
+		slog.Warn("token store mark rotation failed; not clearing metadata to preserve durable-state invariant", "err", err)
+		if rec, ok := s.tokens.Lookup(token); ok && rec.Subject != "" {
+			s.removeSubjectIndexEntry(rec.Subject, token)
+		}
+		s.rotationFailedMu.Lock()
+		s.rotationFailed[tokenKey(token)] = struct{}{}
+		s.rotationFailedMu.Unlock()
+		return
+	}
+	s.ClearProviderRefresh(token)
+	// Remove from subject index so EnsureFreshAccessTokenForSubject cannot
+	// serve the dead bearer via the lenient branch (no rotation metadata).
+	if rec, ok := s.tokens.Lookup(token); ok && rec.Subject != "" {
+		s.removeSubjectIndexEntry(rec.Subject, token)
+	}
+	s.rotationFailedMu.Lock()
+	s.rotationFailed[tokenKey(token)] = struct{}{}
+	s.rotationFailedMu.Unlock()
+}
+
+// IsRotationPermanentlyFailed reports whether a permanent rotation failure
+// has been recorded for the given raw token.
+func (s *Store) IsRotationPermanentlyFailed(token string) bool {
+	s.rotationFailedMu.RLock()
+	_, failed := s.rotationFailed[tokenKey(token)]
+	s.rotationFailedMu.RUnlock()
+	return failed
+}
+
 // InvalidateCachedToken removes a token from the store immediately.
 func (s *Store) InvalidateCachedToken(token string) {
 	// Capture the subject before deletion so we can drop the matching
@@ -744,9 +813,14 @@ func (s *Store) janitor() {
 // sweepSubjectIndex drops expired entries and any subject whose token list
 // is empty after pruning. Cheap O(n) scan; the index is expected to be small
 // relative to the token store (one entry per subject per active rotation).
+// Expired entries are also removed from the rotationFailed map to keep it
+// bounded.
 func (s *Store) sweepSubjectIndex(now time.Time) {
+	// Collect expired token keys outside the subject-index lock so we
+	// can acquire the rotationFailed lock separately without nesting.
+	var expiredKeys []string
+
 	s.subjectIndexMu.Lock()
-	defer s.subjectIndexMu.Unlock()
 	for subject, entries := range s.subjectIndex {
 		// Build a fresh slice instead of reusing the backing array. These
 		// entries hold raw bearer tokens; reusing entries[:0] would keep
@@ -756,6 +830,8 @@ func (s *Store) sweepSubjectIndex(now time.Time) {
 		for _, e := range entries {
 			if now.Before(e.expiresAt) {
 				live = append(live, e)
+			} else {
+				expiredKeys = append(expiredKeys, tokenKey(e.rawToken))
 			}
 		}
 		if len(live) == 0 {
@@ -763,6 +839,15 @@ func (s *Store) sweepSubjectIndex(now time.Time) {
 			continue
 		}
 		s.subjectIndex[subject] = live
+	}
+	s.subjectIndexMu.Unlock()
+
+	if len(expiredKeys) > 0 {
+		s.rotationFailedMu.Lock()
+		for _, k := range expiredKeys {
+			delete(s.rotationFailed, k)
+		}
+		s.rotationFailedMu.Unlock()
 	}
 }
 

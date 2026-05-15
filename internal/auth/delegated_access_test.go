@@ -297,3 +297,120 @@ func TestLatestBySubject_PrunesSubjectMismatchEntries(t *testing.T) {
 	}
 }
 
+// TestEnsureFreshAccessTokenForSubject_PermanentFailureLenientBranchReturnsError
+// verifies Gap 2 fix: after a permanent rotation failure, a *subsequent* call
+// to EnsureFreshAccessTokenForSubject must never return the (now-dead) cached
+// bearer. MarkRotationPermanentlyFailed removes the token from the subject
+// index (via removeSubjectIndexEntry) and persists a RotationPermanentlyFailed
+// flag to the token store so ValidateToken cannot re-seed the subject index
+// after a restart. The second call finds no entry for the subject and returns
+// ErrSubjectNotFound — not the dead bearer.
+func TestEnsureFreshAccessTokenForSubject_PermanentFailureLenientBranchReturnsError(t *testing.T) {
+	p := &provider.Mock{
+		NameValue:   "github",
+		ScopesValue: "repo,user",
+		RefreshTokenFunc: func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{}, errors.New("bad_refresh_token")
+		},
+	}
+	h := newDelegatedTestHandler(t, p, 5*time.Minute)
+	h.store.CacheToken("tok-dead", "alice", "http://localhost:8080/mcp")
+	soon := time.Now().Add(30 * time.Second)
+	h.store.RecordProviderRefresh("tok-dead", "refresh-bad", soon)
+
+	// First call: token is inside leeway → rotation attempted → permanent
+	// failure → token evicted from store + subject index, flag set.
+	_, err := h.EnsureFreshAccessTokenForSubject(context.Background(), "alice")
+	if !errors.Is(err, ErrRotationFailed) {
+		t.Fatalf("first call: err=%v want ErrRotationFailed", err)
+	}
+
+	// Second call: MarkRotationPermanentlyFailed removed token from the subject
+	// index → LatestBySubject finds no entry for "alice" → ErrSubjectNotFound.
+	// The dead bearer is never returned (Gap 2 fix, Thread 1 durability fix).
+	_, err = h.EnsureFreshAccessTokenForSubject(context.Background(), "alice")
+	if !errors.Is(err, ErrSubjectNotFound) {
+		t.Fatalf("second call (subject index cleared): err=%v want ErrSubjectNotFound (Gap 2 + Thread 1 durability fix)", err)
+	}
+}
+
+// TestRotationPermanentlyFailedSurvivesRestart verifies the restart-durability
+// fix for Thread 1 of Issue #77: after MarkRotationPermanentlyFailed is called,
+// a simulated restart (new Handler with the same TokenStorePath) must NOT
+// re-seed the subject index for the permanently-failed token.
+//
+// Without the fix, ValidateToken would call RefreshSubjectIndex on the first
+// cache hit after restart, and EnsureFreshAccessTokenForSubject could then
+// return the dead bearer via the lenient branch.
+func TestRotationPermanentlyFailedSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	storePath := dir + "/tokens.json"
+
+	p := &provider.Mock{
+		NameValue:   "github",
+		ScopesValue: "repo,user",
+		RefreshTokenFunc: func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{}, errors.New("bad_refresh_token")
+		},
+	}
+
+	cfg := Config{
+		BaseURL:              "http://localhost:8080",
+		SessionTTL:           10 * time.Minute,
+		CacheTTL:             5 * time.Minute,
+		ExpiresIn:            90 * 24 * time.Hour,
+		TokenStorePath:       storePath,
+		GitHubRefreshEnabled: true,
+		GitHubRefreshLeeway:  5 * time.Minute,
+	}
+
+	// ── first process ────────────────────────────────────────────────────────
+	h1, err := NewHandler(cfg, p)
+	if err != nil {
+		t.Fatalf("NewHandler (first process): %v", err)
+	}
+
+	// Seed: cache token + set provider refresh metadata so rotation is attempted.
+	h1.store.CacheToken("tok-dead", "alice", "http://localhost:8080/mcp")
+	soon := time.Now().Add(30 * time.Second)
+	h1.store.RecordProviderRefresh("tok-dead", "refresh-bad", soon)
+
+	// Trigger permanent failure via EnsureFreshAccessTokenForSubject.
+	_, ferr := h1.EnsureFreshAccessTokenForSubject(context.Background(), "alice")
+	if !errors.Is(ferr, ErrRotationFailed) {
+		t.Fatalf("first process EnsureFresh: err=%v want ErrRotationFailed", ferr)
+	}
+
+	// Confirm the file store has the flag persisted before simulating restart.
+	rec, ok := h1.store.tokens.Lookup("tok-dead")
+	if !ok {
+		t.Fatal("pre-restart: token should still be in the file store (not evicted)")
+	}
+	if !rec.RotationPermanentlyFailed {
+		t.Fatal("pre-restart: RotationPermanentlyFailed flag should be persisted to file store")
+	}
+
+	// ── simulate restart: new Handler backed by the same file ─────────────────
+	h2, err := NewHandler(cfg, p)
+	if err != nil {
+		t.Fatalf("NewHandler (restart): %v", err)
+	}
+	defer h2.store.Stop()
+
+	// ValidateToken must still authenticate the user (token is still valid as
+	// a gateway bearer) but must NOT re-seed the subject index.
+	subj, _, valErr := h2.ValidateToken(context.Background(), "tok-dead", "http://localhost:8080/mcp")
+	if valErr != nil {
+		t.Fatalf("ValidateToken after restart: %v", valErr)
+	}
+	if subj != "alice" {
+		t.Errorf("ValidateToken after restart: subject got %q, want alice", subj)
+	}
+
+	// EnsureFreshAccessTokenForSubject must return ErrSubjectNotFound because
+	// the subject index was NOT re-seeded by the ValidateToken call above.
+	_, err = h2.EnsureFreshAccessTokenForSubject(context.Background(), "alice")
+	if !errors.Is(err, ErrSubjectNotFound) {
+		t.Fatalf("EnsureFresh after restart: err=%v want ErrSubjectNotFound (dead bearer must not be returned)", err)
+	}
+}
