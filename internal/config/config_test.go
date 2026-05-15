@@ -234,11 +234,8 @@ func TestMigrateSecret_NoSecretInLogs(t *testing.T) {
 // TestLoadConfig_MissingFile verifies that a missing config returns empty AppConfig.
 func TestLoadConfig_MissingFile(t *testing.T) {
 	cfg, err := LoadConfig("/nonexistent/path/config.yaml")
-	if err != nil {
-		t.Fatalf("expected nil error for missing file, got: %v", err)
-	}
-	if cfg == nil {
-		t.Fatal("expected non-nil AppConfig")
+	if err != nil || cfg == nil {
+		t.Fatalf("expected non-nil AppConfig and nil error for missing file, got cfg=%v err=%v", cfg, err)
 	}
 	if cfg.Auth.GitHubClientSecret != "" {
 		t.Errorf("expected empty secret, got: %q", cfg.Auth.GitHubClientSecret)
