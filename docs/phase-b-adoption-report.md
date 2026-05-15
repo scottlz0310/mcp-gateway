@@ -79,10 +79,21 @@ HTTP 200.
 - The lenient branch in `EnsureFreshAccessTokenForSubject` checks `IsRotationPermanentlyFailed`
   before returning the token; returns `ErrRotationFailed` instead.
 
-**Remaining caveat**: `rotationFailed` is in-memory only. After a gateway restart the flag is
-empty; the first call will attempt rotation (fail again), re-set the flag. One request after
-restart may return `ErrRotationFailed` for the wrong reason (attempted, not flag-based) — this is
-acceptable because the error is the same and the user re-authenticates.
+**Previously a caveat, now resolved**: `rotationFailed` was in-memory only. After a gateway restart the
+flag would be absent, and if the token remained in a file-backed store `ValidateToken` would call
+`RefreshSubjectIndex` on the next cache hit, re-seeding the subject index. The lenient branch would then
+return the dead bearer without re-setting the flag.
+
+**Fix (Issue #77, Thread 1 response)**: `MarkRotationPermanentlyFailed` now:
+1. Persists a `RotationPermanentlyFailed` flag in the token store entry (flushed to disk for file-backed stores).
+2. Removes the token from the subject index immediately via `removeSubjectIndexEntry`.
+3. Sets the in-memory `rotationFailed` flag for belt-and-suspenders within the same process.
+
+`ValidateToken` now skips `RefreshSubjectIndex` for records with `RotationPermanentlyFailed=true`. After
+a gateway restart:
+- `ValidateToken("at")` → record found with flag set → subject index NOT re-seeded.
+- `EnsureFreshAccessTokenForSubject` → `LatestBySubject` returns `ok=false` → `ErrSubjectNotFound`.
+  Client must re-authenticate. The dead bearer is never returned.
 
 ### Gap 3 — `LatestBySubject` tie-break on equal expiry (✅ Fixed in Issue #77)
 

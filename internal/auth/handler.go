@@ -774,12 +774,18 @@ func (h *Handler) ValidateToken(ctx context.Context, token, audience string) (su
 			return newSubject, rotated, nil
 		}
 		if record.Subject != "" {
-			// Re-seed the subject index on a cache hit. After process
-			// restart with a persistent TokenStore, subjectIndex (in-memory
-			// only) is empty even though tokens are readable from disk;
-			// otherwise the Phase B /internal/v1/whoami would keep
-			// returning subject_not_found until the cache TTL expires.
-			h.store.RefreshSubjectIndex(record.Subject, token, record.ExpiresAt)
+			if !record.RotationPermanentlyFailed {
+				// Re-seed the subject index on a cache hit. After process
+				// restart with a persistent TokenStore, subjectIndex (in-memory
+				// only) is empty even though tokens are readable from disk;
+				// otherwise the Phase B /internal/v1/whoami would keep
+				// returning subject_not_found until the cache TTL expires.
+				// Permanently-failed tokens are intentionally excluded: they
+				// must not be re-inserted into the subject index or
+				// EnsureFreshAccessTokenForSubject would serve a dead bearer
+				// via the lenient (no-metadata) branch after a restart.
+				h.store.RefreshSubjectIndex(record.Subject, token, record.ExpiresAt)
+			}
 			return record.Subject, "", nil
 		}
 	} else if err := h.validateAudience(token, TokenRecord{}, audience); err != nil {

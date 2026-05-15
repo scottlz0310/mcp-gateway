@@ -101,7 +101,7 @@
 ### 既知の限界（#77 修正後残存分）
 
 - subject index はインメモリのみ: gateway 再起動後、再認証まで delegated アクセス不可
-- `rotationFailed` フラグもインメモリのみ: 再起動後、最初の rotation 試行で再設定される（一度の dead bearer 返却リスクあり。許容範囲内）
+- `rotationFailed` フラグ永続化（Issue #77 Thread 1 対応済み）: `MarkRotationPermanentlyFailed` が token store に `RotationPermanentlyFailed` フラグを永続化（file-backed store はディスクへフラッシュ）し、subject index からも即時削除する。`ValidateToken` は再起動後も `RefreshSubjectIndex` をスキップするため、dead bearer が subject index に再挿入されることはない。`EnsureFreshAccessTokenForSubject` は `ErrSubjectNotFound` を返す
 - スコープは gateway 全体設定: トークンごとの fine-grained scope は将来課題
 - Unix socket / mTLS による multi-host 構成は未実装（同一ホスト構成限定）
 

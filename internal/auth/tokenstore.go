@@ -20,12 +20,18 @@ import (
 // OAuth provider issues short-lived (expiring) tokens. ProviderAccessExpiry is
 // zero when the provider did not advertise an expiry hint; in that case the
 // gateway does not attempt rotation for this token.
+//
+// RotationPermanentlyFailed is set when the provider has permanently rejected
+// rotation for this token (e.g., bad or revoked refresh token). Once set it
+// survives gateway restarts when using a file-backed store so that
+// ValidateToken never re-seeds the subject index with a dead bearer.
 type TokenRecord struct {
-	Subject              string
-	Audiences            []string
-	ExpiresAt            time.Time
-	ProviderRefreshToken string
-	ProviderAccessExpiry time.Time
+	Subject                  string
+	Audiences                []string
+	ExpiresAt                time.Time
+	ProviderRefreshToken     string
+	ProviderAccessExpiry     time.Time
+	RotationPermanentlyFailed bool
 }
 
 // HasAudience reports whether the token record is scoped to audience.
@@ -53,9 +59,13 @@ type TokenStore interface {
 	SaveProviderRefresh(token, providerRefreshToken string, providerAccessExpiry time.Time) error
 	// Lookup returns metadata for a non-expired token, or (zero, false).
 	Lookup(token string) (TokenRecord, bool)
+	// MarkRotationFailed marks token as having a permanent rotation failure.
+	// The entry must already exist; if it is absent or expired the call is a
+	// no-op. For file-backed stores the flag is flushed to disk immediately so
+	// it survives a gateway restart.
+	MarkRotationFailed(token string) error
 	// Delete removes a single token entry immediately.
 	Delete(token string) error
-	// Sweep removes all expired entries. Called periodically by the Store janitor.
 	Sweep() error
 }
 
@@ -69,11 +79,12 @@ func tokenKey(token string) string {
 // ── in-memory implementation ────────────────────────────────────────────────
 
 type memEntry struct {
-	subject              string
-	audiences            []string
-	expiresAt            time.Time
-	providerRefreshToken string
-	providerAccessExpiry time.Time
+	subject                  string
+	audiences                []string
+	expiresAt                time.Time
+	providerRefreshToken     string
+	providerAccessExpiry     time.Time
+	rotationPermanentlyFailed bool
 }
 
 type memTokenStore struct {
@@ -129,12 +140,26 @@ func (m *memTokenStore) Lookup(token string) (TokenRecord, bool) {
 		return TokenRecord{}, false
 	}
 	return TokenRecord{
-		Subject:              e.subject,
-		Audiences:            cloneStrings(e.audiences),
-		ExpiresAt:            e.expiresAt,
-		ProviderRefreshToken: e.providerRefreshToken,
-		ProviderAccessExpiry: e.providerAccessExpiry,
+		Subject:                   e.subject,
+		Audiences:                 cloneStrings(e.audiences),
+		ExpiresAt:                 e.expiresAt,
+		ProviderRefreshToken:      e.providerRefreshToken,
+		ProviderAccessExpiry:      e.providerAccessExpiry,
+		RotationPermanentlyFailed: e.rotationPermanentlyFailed,
 	}, true
+}
+
+func (m *memTokenStore) MarkRotationFailed(token string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := tokenKey(token)
+	entry, ok := m.entries[key]
+	if !ok || time.Now().After(entry.expiresAt) {
+		return nil
+	}
+	entry.rotationPermanentlyFailed = true
+	m.entries[key] = entry
+	return nil
 }
 
 func (m *memTokenStore) Delete(token string) error {
@@ -169,11 +194,12 @@ func (m *memTokenStore) Sweep() error {
 // window — months). Snapshot, backup, and access-control implications are
 // covered in docs/configuration.md under "Token Persistence".
 type fileEntry struct {
-	Subject              string    `json:"s"`
-	Audiences            []string  `json:"aud,omitempty"`
-	ExpiresAt            time.Time `json:"e"`
-	ProviderRefreshToken string    `json:"prt,omitempty"`
-	ProviderAccessExpiry time.Time `json:"pae,omitempty"`
+	Subject               string    `json:"s"`
+	Audiences             []string  `json:"aud,omitempty"`
+	ExpiresAt             time.Time `json:"e"`
+	ProviderRefreshToken  string    `json:"prt,omitempty"`
+	ProviderAccessExpiry  time.Time `json:"pae,omitempty"`
+	RotationFailed        bool      `json:"rf,omitempty"`
 }
 
 type fileTokenStore struct {
@@ -293,12 +319,31 @@ func (f *fileTokenStore) Lookup(token string) (TokenRecord, bool) {
 		return TokenRecord{}, false
 	}
 	return TokenRecord{
-		Subject:              e.Subject,
-		Audiences:            cloneStrings(e.Audiences),
-		ExpiresAt:            e.ExpiresAt,
-		ProviderRefreshToken: e.ProviderRefreshToken,
-		ProviderAccessExpiry: e.ProviderAccessExpiry,
+		Subject:                   e.Subject,
+		Audiences:                 cloneStrings(e.Audiences),
+		ExpiresAt:                 e.ExpiresAt,
+		ProviderRefreshToken:      e.ProviderRefreshToken,
+		ProviderAccessExpiry:      e.ProviderAccessExpiry,
+		RotationPermanentlyFailed: e.RotationFailed,
 	}, true
+}
+
+func (f *fileTokenStore) MarkRotationFailed(token string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := tokenKey(token)
+	entry, ok := f.entries[key]
+	if !ok || time.Now().After(entry.ExpiresAt) {
+		return nil
+	}
+	previous := entry
+	entry.RotationFailed = true
+	f.entries[key] = entry
+	if err := f.flush(); err != nil {
+		f.entries[key] = previous
+		return err
+	}
+	return nil
 }
 
 func (f *fileTokenStore) Delete(token string) error {

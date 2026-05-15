@@ -298,11 +298,13 @@ func TestLatestBySubject_PrunesSubjectMismatchEntries(t *testing.T) {
 }
 
 // TestEnsureFreshAccessTokenForSubject_PermanentFailureLenientBranchReturnsError
-// verifies Gap 2 fix: after a permanent rotation failure clears provider
-// refresh metadata, a *subsequent* call to EnsureFreshAccessTokenForSubject
-// must not return the (now-dead) cached bearer via the lenient branch.
-// Instead, it must surface ErrRotationFailed so callers know the credential
-// is unusable.
+// verifies Gap 2 fix: after a permanent rotation failure, a *subsequent* call
+// to EnsureFreshAccessTokenForSubject must never return the (now-dead) cached
+// bearer. MarkRotationPermanentlyFailed removes the token from the subject
+// index (via removeSubjectIndexEntry) and persists a RotationPermanentlyFailed
+// flag to the token store so ValidateToken cannot re-seed the subject index
+// after a restart. The second call finds no entry for the subject and returns
+// ErrSubjectNotFound — not the dead bearer.
 func TestEnsureFreshAccessTokenForSubject_PermanentFailureLenientBranchReturnsError(t *testing.T) {
 	p := &provider.Mock{
 		NameValue:   "github",
@@ -317,17 +319,17 @@ func TestEnsureFreshAccessTokenForSubject_PermanentFailureLenientBranchReturnsEr
 	h.store.RecordProviderRefresh("tok-dead", "refresh-bad", soon)
 
 	// First call: token is inside leeway → rotation attempted → permanent
-	// failure → metadata cleared, permanently-failed flag set.
+	// failure → token evicted from store + subject index, flag set.
 	_, err := h.EnsureFreshAccessTokenForSubject(context.Background(), "alice")
 	if !errors.Is(err, ErrRotationFailed) {
 		t.Fatalf("first call: err=%v want ErrRotationFailed", err)
 	}
 
-	// Second call: metadata is cleared, so rotation preconditions are not
-	// met → lenient branch. But the permanently-failed flag must prevent
-	// the dead bearer from being returned.
+	// Second call: MarkRotationPermanentlyFailed removed token from the subject
+	// index → LatestBySubject finds no entry for "alice" → ErrSubjectNotFound.
+	// The dead bearer is never returned (Gap 2 fix, Thread 1 durability fix).
 	_, err = h.EnsureFreshAccessTokenForSubject(context.Background(), "alice")
-	if !errors.Is(err, ErrRotationFailed) {
-		t.Fatalf("second call (lenient branch): err=%v want ErrRotationFailed (Gap 2 fix)", err)
+	if !errors.Is(err, ErrSubjectNotFound) {
+		t.Fatalf("second call (subject index cleared): err=%v want ErrSubjectNotFound (Gap 2 + Thread 1 durability fix)", err)
 	}
 }
