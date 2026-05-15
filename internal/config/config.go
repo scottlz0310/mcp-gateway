@@ -105,11 +105,14 @@ func SaveConfig(path string, cfg *AppConfig) error {
 //
 //  1. cfg.Auth.GitHubClientSecret is "ENC[age:]..." → decrypt and return plaintext
 //  2. cfg.Auth.GitHubClientSecret is non-empty plaintext → encrypt, write back, return plaintext
-//  3. field empty/absent + GITHUB_MCP_CLIENT_SECRET env var set → encrypt, save to config, return
+//  3. field empty/absent + OAUTH_CLIENT_SECRET (or legacy GITHUB_MCP_CLIENT_SECRET) env var set → encrypt, save to config, return
 //  4. field empty + env var absent → return error
 //
 // The config file at configPath is updated in cases 2 and 3.
 // The returned plaintext is never written to the log.
+//
+// When both OAUTH_CLIENT_SECRET and the legacy GITHUB_MCP_CLIENT_SECRET are set,
+// the new variable wins and a deprecation warning is logged for the legacy one.
 func MigrateSecret(configPath string, cfg *AppConfig, km *KeyMaterial) (string, error) {
 	secret := cfg.Auth.GitHubClientSecret
 
@@ -134,20 +137,20 @@ func MigrateSecret(configPath string, cfg *AppConfig, km *KeyMaterial) (string, 
 		return secret, nil
 
 	default:
-		envSecret, ok := os.LookupEnv("GITHUB_MCP_CLIENT_SECRET")
-		if ok && strings.TrimSpace(envSecret) != "" {
+		envSecret, envSource, ok := resolveOAuthEnvSourced("OAUTH_CLIENT_SECRET", "GITHUB_MCP_CLIENT_SECRET")
+		if ok {
 			envSecret = strings.TrimSpace(envSecret)
-			slog.Info("encrypting GITHUB_MCP_CLIENT_SECRET from env and saving to config")
+			slog.Info("encrypting OAuth client secret from env and saving to config", "source", envSource)
 			encrypted, err := EncryptField(km, envSecret)
 			if err != nil {
-				return "", fmt.Errorf("encrypting GITHUB_MCP_CLIENT_SECRET from env: %w", err)
+				return "", fmt.Errorf("encrypting %s from env: %w", envSource, err)
 			}
 			cfg.Auth.GitHubClientSecret = encrypted
 			if err := SaveConfig(configPath, cfg); err != nil {
-				return "", fmt.Errorf("saving config after encrypting GITHUB_MCP_CLIENT_SECRET: %w", err)
+				return "", fmt.Errorf("saving config after encrypting %s: %w", envSource, err)
 			}
 			return envSecret, nil
 		}
-		return "", fmt.Errorf("github_client_secret is required: set GITHUB_MCP_CLIENT_SECRET env var or provide an encrypted value in config.yaml")
+		return "", fmt.Errorf("github_client_secret is required: set OAUTH_CLIENT_SECRET env var or provide an encrypted value in config.yaml")
 	}
 }

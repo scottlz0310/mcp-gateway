@@ -74,6 +74,7 @@ to the mcp-gateway credentials. See `.env.example` for details.
 
 ### Shared OAuth App credentials
 
-`GITHUB_MCP_CLIENT_ID`/`GITHUB_MCP_CLIENT_SECRET` (mcp-gateway) and
+`OAUTH_CLIENT_ID`/`OAUTH_CLIENT_SECRET` (mcp-gateway; legacy
+`GITHUB_MCP_CLIENT_ID`/`GITHUB_MCP_CLIENT_SECRET` still accepted) and
 `GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET` (copilot-review-mcp, standalone mode only)
 can point to the **same** GitHub OAuth App.

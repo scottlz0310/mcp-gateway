@@ -77,7 +77,7 @@ func TestMigrateSecret_PlaintextRewritten(t *testing.T) {
 	}
 }
 
-// TestMigrateSecret_FromEnvVar verifies that GITHUB_MCP_CLIENT_SECRET is
+// TestMigrateSecret_FromEnvVar verifies that OAUTH_CLIENT_SECRET is
 // encrypted and saved when the config field is absent.
 func TestMigrateSecret_FromEnvVar(t *testing.T) {
 	dir := t.TempDir()
@@ -85,7 +85,9 @@ func TestMigrateSecret_FromEnvVar(t *testing.T) {
 
 	km := testKeyMaterial(t)
 	envSecret := "secret-from-env-var-xyz"
-	t.Setenv("GITHUB_MCP_CLIENT_SECRET", envSecret)
+	t.Setenv("OAUTH_CLIENT_SECRET", envSecret)
+	t.Setenv("GITHUB_MCP_CLIENT_SECRET", "")
+	resetLegacyEnvWarnedForTest()
 
 	cfg := &AppConfig{} // no secret in config
 	if err := SaveConfig(configPath, cfg); err != nil {
@@ -107,6 +109,72 @@ func TestMigrateSecret_FromEnvVar(t *testing.T) {
 	}
 }
 
+// TestMigrateSecret_FromLegacyEnvVar verifies that the deprecated
+// GITHUB_MCP_CLIENT_SECRET env var still seeds the config when the new
+// OAUTH_CLIENT_SECRET is unset, with a deprecation warning logged.
+func TestMigrateSecret_FromLegacyEnvVar(t *testing.T) {
+	logBuf := captureLogs(t)
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+
+	km := testKeyMaterial(t)
+	envSecret := "legacy-secret-abc"
+	t.Setenv("OAUTH_CLIENT_SECRET", "")
+	t.Setenv("GITHUB_MCP_CLIENT_SECRET", envSecret)
+	resetLegacyEnvWarnedForTest()
+
+	cfg := &AppConfig{}
+	if err := SaveConfig(configPath, cfg); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+
+	got, err := MigrateSecret(configPath, cfg, km)
+	if err != nil {
+		t.Fatalf("MigrateSecret: %v", err)
+	}
+	if got != envSecret {
+		t.Errorf("got %q, want %q", got, envSecret)
+	}
+	out := logBuf.String()
+	if !strings.Contains(out, "GITHUB_MCP_CLIENT_SECRET") {
+		t.Errorf("expected deprecation warning mentioning GITHUB_MCP_CLIENT_SECRET, got: %s", out)
+	}
+	if !strings.Contains(out, "OAUTH_CLIENT_SECRET") {
+		t.Errorf("expected deprecation warning to mention canonical OAUTH_CLIENT_SECRET, got: %s", out)
+	}
+}
+
+// TestMigrateSecret_NewWinsOverLegacy verifies that when both env vars are
+// set, OAUTH_CLIENT_SECRET wins and a warning is logged that the legacy is
+// ignored.
+func TestMigrateSecret_NewWinsOverLegacy(t *testing.T) {
+	logBuf := captureLogs(t)
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+
+	km := testKeyMaterial(t)
+	t.Setenv("OAUTH_CLIENT_SECRET", "new-secret-wins")
+	t.Setenv("GITHUB_MCP_CLIENT_SECRET", "old-secret-ignored")
+	resetLegacyEnvWarnedForTest()
+
+	cfg := &AppConfig{}
+	if err := SaveConfig(configPath, cfg); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+
+	got, err := MigrateSecret(configPath, cfg, km)
+	if err != nil {
+		t.Fatalf("MigrateSecret: %v", err)
+	}
+	if got != "new-secret-wins" {
+		t.Errorf("expected OAUTH_CLIENT_SECRET to win, got %q", got)
+	}
+	out := logBuf.String()
+	if !strings.Contains(out, "GITHUB_MCP_CLIENT_SECRET") || !strings.Contains(out, "ignored") {
+		t.Errorf("expected warning that legacy var is ignored, got: %s", out)
+	}
+}
+
 // TestMigrateSecret_NoSecretAnywhere verifies that an error is returned
 // when neither config nor env var has the secret.
 func TestMigrateSecret_NoSecretAnywhere(t *testing.T) {
@@ -114,7 +182,8 @@ func TestMigrateSecret_NoSecretAnywhere(t *testing.T) {
 	configPath := filepath.Join(dir, "config.yaml")
 
 	km := testKeyMaterial(t)
-	_ = os.Unsetenv("GITHUB_MCP_CLIENT_SECRET")
+	t.Setenv("OAUTH_CLIENT_SECRET", "")
+	t.Setenv("GITHUB_MCP_CLIENT_SECRET", "")
 
 	cfg := &AppConfig{}
 	_, err := MigrateSecret(configPath, cfg, km)
@@ -134,7 +203,9 @@ func TestMigrateSecret_NoSecretInLogs(t *testing.T) {
 
 	km := testKeyMaterial(t)
 	secretValue := "ultrasecret-do-not-log-me-abc123"
-	t.Setenv("GITHUB_MCP_CLIENT_SECRET", secretValue)
+	t.Setenv("OAUTH_CLIENT_SECRET", secretValue)
+	t.Setenv("GITHUB_MCP_CLIENT_SECRET", "")
+	resetLegacyEnvWarnedForTest()
 
 	cfg := &AppConfig{}
 	enc, err := MigrateSecret(configPath, cfg, km)

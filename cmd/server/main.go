@@ -67,8 +67,8 @@ func main() {
 	}
 
 	// First-run wizard: if any required value is missing, enter setup mode.
-	envClientID := os.Getenv("GITHUB_MCP_CLIENT_ID")
-	envSecret := os.Getenv("GITHUB_MCP_CLIENT_SECRET")
+	envClientID, _ := appconfig.ResolveOAuthEnv("OAUTH_CLIENT_ID", "GITHUB_MCP_CLIENT_ID")
+	envSecret, _ := appconfig.ResolveOAuthEnv("OAUTH_CLIENT_SECRET", "GITHUB_MCP_CLIENT_SECRET")
 
 	// Deprecation warning: MCP_GATEWAY_BASE_URL is superseded by MCP_GATEWAY_PUBLIC_URL.
 	// Warn whenever BASE_URL is set, regardless of whether PUBLIC_URL is also present.
@@ -115,7 +115,7 @@ func main() {
 			cfg.publicURL = "http://127.0.0.1:" + cfg.port
 		}
 	}
-	if strings.TrimSpace(os.Getenv("GITHUB_MCP_OAUTH_SCOPES")) == "" && strings.TrimSpace(appCfg.Gateway.OAuthScopes) != "" {
+	if _, ok := appconfig.ResolveOAuthEnv("OAUTH_SCOPES", "GITHUB_MCP_OAUTH_SCOPES"); !ok && strings.TrimSpace(appCfg.Gateway.OAuthScopes) != "" {
 		cfg.oauthScopes = appCfg.Gateway.OAuthScopes
 	}
 	if strings.TrimSpace(os.Getenv("MCP_GATEWAY_TRUSTED_PROXIES")) == "" && len(appCfg.Gateway.TrustedProxies) > 0 {
@@ -143,10 +143,13 @@ func main() {
 	// This prevents a mistyped env var from being encrypted and saved to config.yaml
 	// on a first boot that would otherwise fail (e.g. missing CLIENT_ID or routes).
 
-	// GitHub client ID: env var takes precedence over config file.
-	githubClientID := getEnv("GITHUB_MCP_CLIENT_ID", appCfg.Auth.GitHubClientID)
+	// GitHub client ID: env var (OAUTH_CLIENT_ID or legacy GITHUB_MCP_CLIENT_ID) takes precedence over config file.
+	githubClientID := envClientID
 	if strings.TrimSpace(githubClientID) == "" {
-		slog.Error("required value not set: provide GITHUB_MCP_CLIENT_ID env var or auth.github_client_id in config.yaml")
+		githubClientID = appCfg.Auth.GitHubClientID
+	}
+	if strings.TrimSpace(githubClientID) == "" {
+		slog.Error("required value not set: provide OAUTH_CLIENT_ID env var or auth.github_client_id in config.yaml")
 		os.Exit(1)
 	}
 
@@ -179,7 +182,7 @@ func main() {
 	cfg.githubClientSecret = githubClientSecret
 
 	prov, err := provider.New(provider.Config{
-		Kind:         "github",
+		Kind:         cfg.oauthProvider,
 		ClientID:     cfg.githubClientID,
 		ClientSecret: cfg.githubClientSecret,
 		RedirectURI:  strings.TrimRight(cfg.publicURL, "/") + "/callback",
@@ -346,6 +349,7 @@ type config struct {
 	publicURL string
 	// bindAddr is the TCP address the HTTP listener binds to (host:port).
 	bindAddr            string
+	oauthProvider       string
 	oauthScopes         string
 	port                string
 	logLevel            string
@@ -372,12 +376,22 @@ func loadConfig() config {
 	// bindAddr defaults to loopback; Docker deployments should set MCP_GATEWAY_BIND_ADDR=0.0.0.0:<port>.
 	bindAddr := getEnv("MCP_GATEWAY_BIND_ADDR", "127.0.0.1:"+port)
 
+	// OAuth scopes: OAUTH_SCOPES > legacy GITHUB_MCP_OAUTH_SCOPES > default.
+	oauthScopes := "repo,user"
+	if v, ok := appconfig.ResolveOAuthEnv("OAUTH_SCOPES", "GITHUB_MCP_OAUTH_SCOPES"); ok {
+		oauthScopes = v
+	}
+
+	// OAuth provider kind: defaults to "github" for backward compatibility.
+	oauthProvider := getEnv("OAUTH_PROVIDER", "github")
+
 	return config{
 		// githubClientID and githubClientSecret are resolved after key/config loading in main().
 		publicURL:           publicURL,
 		bindAddr:            bindAddr,
 		port:                port,
-		oauthScopes:         getEnv("GITHUB_MCP_OAUTH_SCOPES", "repo,user"),
+		oauthProvider:       oauthProvider,
+		oauthScopes:         oauthScopes,
 		logLevel:            getEnv("LOG_LEVEL", "info"),
 		upstreamURL:         getEnv("GITHUB_MCP_UPSTREAM_URL", ""),
 		trustedProxyCIDRs:   splitCSV(os.Getenv("MCP_GATEWAY_TRUSTED_PROXIES")),

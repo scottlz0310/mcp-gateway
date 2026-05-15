@@ -16,8 +16,8 @@ services:
     ports:
       - "127.0.0.1:${MCP_GATEWAY_PORT:-8080}:${MCP_GATEWAY_PORT:-8080}"
     environment:
-      GITHUB_MCP_CLIENT_ID: ${GITHUB_MCP_CLIENT_ID}
-      GITHUB_MCP_CLIENT_SECRET: ${GITHUB_MCP_CLIENT_SECRET}
+      OAUTH_CLIENT_ID: ${OAUTH_CLIENT_ID:-${GITHUB_MCP_CLIENT_ID:-}}
+      OAUTH_CLIENT_SECRET: ${OAUTH_CLIENT_SECRET:-${GITHUB_MCP_CLIENT_SECRET:-}}
       # Bind on all interfaces so Docker port-forwarding works (container → host).
       # Port in MCP_GATEWAY_BIND_ADDR must match MCP_GATEWAY_PORT (both default to 8080).
       MCP_GATEWAY_BIND_ADDR: ${MCP_GATEWAY_BIND_ADDR:-0.0.0.0:8080}
@@ -30,7 +30,7 @@ services:
       # Route longest-prefix-first; both routes served from a single gateway port.
       ROUTE_GITHUB: /mcp/github|http://github-mcp:8082
       ROUTE_COPILOT_REVIEW: /mcp/copilot-review|http://copilot-review-mcp:8083
-      GITHUB_MCP_OAUTH_SCOPES: ${GITHUB_MCP_OAUTH_SCOPES:-repo,user}
+      OAUTH_SCOPES: ${OAUTH_SCOPES:-${GITHUB_MCP_OAUTH_SCOPES:-repo,user}}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       SESSION_TTL_MIN: ${SESSION_TTL_MIN:-10}
       TOKEN_CACHE_TTL_MIN: ${TOKEN_CACHE_TTL_MIN:-30}
@@ -93,7 +93,7 @@ services:
       AUTH_MODE: ${COPILOT_REVIEW_AUTH_MODE:-gateway}
       BASE_URL: ${COPILOT_REVIEW_BASE_URL:-http://localhost:8083}
       MCP_PORT: ${COPILOT_REVIEW_MCP_PORT:-8083}
-      GITHUB_OAUTH_SCOPES: ${GITHUB_MCP_OAUTH_SCOPES:-repo,user}
+      GITHUB_OAUTH_SCOPES: ${OAUTH_SCOPES:-${GITHUB_MCP_OAUTH_SCOPES:-repo,user}}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       SESSION_TTL_MIN: ${SESSION_TTL_MIN:-10}
       TOKEN_CACHE_TTL_MIN: ${TOKEN_CACHE_TTL_MIN:-30}

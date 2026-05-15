@@ -7,6 +7,17 @@
 
 ### 追加
 
+- 汎用 OAuth 環境変数を追加し、設定を GitHub 固有の命名から分離（[#5](https://github.com/scottlz0310/mcp-gateway/issues/5)）
+  - 新しい canonical 変数: `OAUTH_PROVIDER`（デフォルト `github`）、`OAUTH_CLIENT_ID`、`OAUTH_CLIENT_SECRET`、`OAUTH_SCOPES`
+  - `OAUTH_PROVIDER` は provider factory に渡され、将来の非 GitHub provider (#6) に備える
+  - 移行マップ:
+
+    | 新 | 旧（deprecated） |
+    |---|---|
+    | `OAUTH_PROVIDER` | _(新規; デフォルト `github`)_ |
+    | `OAUTH_CLIENT_ID` | `GITHUB_MCP_CLIENT_ID` |
+    | `OAUTH_CLIENT_SECRET` | `GITHUB_MCP_CLIENT_SECRET` |
+    | `OAUTH_SCOPES` | `GITHUB_MCP_OAUTH_SCOPES` |
 - 期限付き GitHub OAuth user access token の透過的ローテーション（[#70](https://github.com/scottlz0310/mcp-gateway/issues/70), Phase A）
   - `MCP_GATEWAY_GITHUB_REFRESH_ENABLED` / `gateway.github_refresh_enabled` フラグで rotation を有効化（デフォルト `false`）
   - upstream provider が `refresh_token` と `expires_in` を返す場合、access token 期限の約 5 分前に refresh token を用いて自動ローテーションし、新 token を upstream MCP server に透過的に転送する
@@ -15,6 +26,7 @@
 
 ### 変更
 
+- OAuth 環境変数の読み込み優先順位を整理: `OAUTH_*` が旧 `GITHUB_MCP_*` より優先される。旧変数のみ設定されている場合は採用するが、process 内で 1 回だけ deprecation 警告を出力する。両方設定されている場合は canonical を採用し旧値は無視（警告あり）。旧名は将来のメジャーリリースで削除予定。YAML 設定キー（`auth.github_client_id`、`auth.github_client_secret`、`gateway.oauth_scopes`）は変更しない（[#5](https://github.com/scottlz0310/mcp-gateway/issues/5)）。
 - `auth.Handler.ValidateToken` がローテーション後の access token を subject と同時に返すよう拡張し、middleware が request context のトークンを差し替えられるようにした。内部 API のみで公開 surface には影響なし。
 
 ## [0.3.0] - 2026-05-07
