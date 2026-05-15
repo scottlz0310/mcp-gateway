@@ -69,7 +69,28 @@ type Store struct {
 	refreshStore RefreshTokenStore
 	refreshMu    sync.Mutex // guards atomic lookup+delete in UseRefreshToken and ReserveRefreshToken
 
+	// subjectIndex maps a subject (e.g. GitHub login) to the raw access
+	// tokens currently cached for that subject. Used by the Phase B
+	// delegated-access internal API (#72) so background upstream workers
+	// can fetch the latest valid token for a known user. The index is
+	// **in-memory only**: the file-backed token store stores only token
+	// hashes, so a persistent reverse index would require duplicating
+	// raw tokens to disk — out of scope for the PoC.
+	subjectIndexMu sync.RWMutex
+	subjectIndex   map[string][]subjectIndexEntry
+
 	stopCh chan struct{}
+}
+
+// subjectIndexEntry is one (subject, rawToken) mapping kept by Store.
+// expiresAt is the gateway cache TTL used both for pruning and as a
+// fallback ranking key when no entry has provider rotation metadata.
+// The authoritative ProviderAccessExpiry lives on the TokenRecord
+// itself; we do **not** mirror it here because the copy can drift
+// (e.g. after ClearProviderRefresh wipes the underlying metadata).
+type subjectIndexEntry struct {
+	rawToken  string
+	expiresAt time.Time
 }
 
 // StoreOption configures optional behaviour of NewStore.
@@ -100,6 +121,7 @@ func NewStore(sessionTTL, tokensTTL time.Duration, ts TokenStore, opts ...StoreO
 		tokens:       ts,
 		tokensTTL:    tokensTTL,
 		refreshStore: NewMemRefreshTokenStore(),
+		subjectIndex: make(map[string][]subjectIndexEntry),
 		stopCh:       make(chan struct{}),
 	}
 	for _, opt := range opts {
@@ -410,10 +432,197 @@ func (s *Store) saveTokenRecord(token, subject, audience string) {
 	if audience != "" {
 		audiences = []string{audience}
 	}
-	if err := s.tokens.Save(token, subject, audiences, time.Now().Add(s.tokensTTL)); err != nil {
+	expiresAt := time.Now().Add(s.tokensTTL)
+	if err := s.tokens.Save(token, subject, audiences, expiresAt); err != nil {
 		// Non-fatal: next request will re-validate against the upstream provider.
 		slog.Warn("token store save failed", "err", err)
 	}
+	if subject != "" {
+		s.indexSubjectToken(subject, token, expiresAt)
+	}
+}
+
+// indexSubjectToken records that the raw access token belongs to subject in
+// the in-memory subject index. The provider-side expiry is intentionally not
+// mirrored here; LatestBySubject reads it from the authoritative TokenRecord
+// instead, so the index stays as small as possible.
+func (s *Store) indexSubjectToken(subject, rawToken string, expiresAt time.Time) {
+	s.subjectIndexMu.Lock()
+	defer s.subjectIndexMu.Unlock()
+	entries := s.subjectIndex[subject]
+	// De-duplicate by raw token (same token can be cached multiple times
+	// on repeated client requests; keep the latest expiry).
+	for i, e := range entries {
+		if e.rawToken == rawToken {
+			entries[i].expiresAt = expiresAt
+			s.subjectIndex[subject] = entries
+			return
+		}
+	}
+	s.subjectIndex[subject] = append(entries, subjectIndexEntry{
+		rawToken:  rawToken,
+		expiresAt: expiresAt,
+	})
+}
+
+// RefreshSubjectIndex re-seeds the in-memory subject → token index for a
+// token that is already present in the authoritative TokenStore. It is
+// idempotent and uses recordExpiresAt (the authoritative TokenRecord's
+// ExpiresAt) as the index entry's expiresAt, so the index never outlives
+// the underlying record.
+//
+// The intended caller is the cache-hit branch of ValidateToken: after a
+// process restart with a persistent TokenStore the in-memory
+// subjectIndex is empty even though records exist on disk, and a normal
+// proxied request that hits the cache would otherwise never re-populate
+// the index — leaving /internal/v1/whoami returning subject_not_found
+// until a cache miss or rotation eventually triggers CacheToken.
+//
+// Callers that perform a full cache write should use CacheToken (which
+// also refreshes the index via saveTokenRecord) rather than this method.
+func (s *Store) RefreshSubjectIndex(subject, rawToken string, recordExpiresAt time.Time) {
+	if subject == "" || rawToken == "" || recordExpiresAt.IsZero() {
+		return
+	}
+	s.indexSubjectToken(subject, rawToken, recordExpiresAt)
+}
+
+// LatestBySubject returns the raw access token with the latest provider
+// access expiry for the given subject, along with its cached TokenRecord.
+// Returns ok=false when no live entry exists. Used by the Phase B internal
+// delegated-access API.
+//
+// Selection rule: prefer the entry whose **authoritative TokenRecord**
+// carries the largest non-zero ProviderAccessExpiry; fall back to the
+// largest cache expiresAt when no entry has rotation metadata (classic
+// non-expiring tokens). We rank on the authoritative record rather than
+// the subject-index hint because the latter is a copy that can drift
+// (e.g. after ClearProviderRefresh wipes provider metadata in the token
+// store but the hint is still present in RAM).
+func (s *Store) LatestBySubject(subject string) (string, TokenRecord, bool) {
+	if subject == "" {
+		return "", TokenRecord{}, false
+	}
+	s.subjectIndexMu.Lock()
+	entries := s.subjectIndex[subject]
+	now := time.Now()
+	// Prune expired entries by building a fresh slice. Reusing the original
+	// backing array (entries[:0]) would keep references to skipped raw
+	// tokens alive whenever any live entry remains, which matters here
+	// because these strings are bearer tokens.
+	live := make([]subjectIndexEntry, 0, len(entries))
+	for _, e := range entries {
+		if now.Before(e.expiresAt) {
+			live = append(live, e)
+		}
+	}
+	if len(live) == 0 {
+		delete(s.subjectIndex, subject)
+		s.subjectIndexMu.Unlock()
+		return "", TokenRecord{}, false
+	}
+	s.subjectIndex[subject] = live
+	// Snapshot under lock; copy out before releasing to avoid races.
+	candidates := make([]subjectIndexEntry, len(live))
+	copy(candidates, live)
+	s.subjectIndexMu.Unlock()
+
+	var best subjectIndexEntry
+	var bestRec TokenRecord
+	foundRotatable := false
+	// Track entries that should be pruned from the index because their
+	// authoritative record disappeared or has been re-associated with a
+	// different subject. These index entries hold raw bearer tokens, so
+	// leaving them in place would let stale credentials linger until the
+	// index TTL expires.
+	//
+	// We snapshot each stale candidate's expiresAt as well, so the prune
+	// pass can refuse to drop an entry whose expiresAt has since been
+	// bumped by a concurrent CacheToken/indexSubjectToken (i.e. another
+	// request re-validated the same raw token between our snapshot here
+	// and the prune below). Without this guard the freshly re-indexed
+	// entry would be dropped and delegated lookups would return
+	// subject_not_found until re-auth.
+	stale := make(map[string]time.Time)
+	for _, e := range candidates {
+		rec, ok := s.tokens.Lookup(e.rawToken)
+		if !ok {
+			stale[e.rawToken] = e.expiresAt
+			continue
+		}
+		// Defense-in-depth: skip records whose authoritative Subject
+		// disagrees with the requested subject. The subject index is
+		// only updated via indexSubjectToken (called from CacheToken),
+		// so a mismatch here would indicate the raw token was re-cached
+		// under a different subject after we indexed it -- in which
+		// case the index entry is stale and must not be returned, lest
+		// we hand out another subject's bearer.
+		if rec.Subject != "" && rec.Subject != subject {
+			stale[e.rawToken] = e.expiresAt
+			continue
+		}
+		// Rank against the authoritative record so a stale subject-index
+		// hint (e.g. cleared metadata after a permanent rotation failure)
+		// cannot cause us to prefer an unrotatable token.
+		if !rec.ProviderAccessExpiry.IsZero() {
+			if !foundRotatable || rec.ProviderAccessExpiry.After(bestRec.ProviderAccessExpiry) {
+				best = e
+				bestRec = rec
+				foundRotatable = true
+			}
+			continue
+		}
+		if foundRotatable {
+			continue
+		}
+		if best.rawToken == "" || e.expiresAt.After(best.expiresAt) {
+			best = e
+			bestRec = rec
+		}
+	}
+	if len(stale) > 0 {
+		s.pruneSubjectIndexEntries(subject, stale)
+	}
+	if best.rawToken == "" {
+		return "", TokenRecord{}, false
+	}
+	return best.rawToken, bestRec, true
+}
+
+// pruneSubjectIndexEntries removes the given raw tokens from subject's index
+// slice. Used by LatestBySubject to drop entries whose authoritative
+// TokenStore lookup failed or whose Subject was re-assigned, so stale bearer
+// strings do not remain reachable for the rest of the index TTL.
+//
+// snapshotExpiry maps rawToken to the expiresAt observed when the entry was
+// identified as stale. If a concurrent CacheToken/indexSubjectToken has since
+// updated the live entry's expiresAt (re-validating the same raw token), the
+// snapshot will not match the live value and we skip the drop — otherwise we
+// would delete a freshly-validated entry and cause delegated lookups to fail
+// until the user re-authenticates.
+func (s *Store) pruneSubjectIndexEntries(subject string, snapshotExpiry map[string]time.Time) {
+	if len(snapshotExpiry) == 0 {
+		return
+	}
+	s.subjectIndexMu.Lock()
+	defer s.subjectIndexMu.Unlock()
+	entries := s.subjectIndex[subject]
+	if len(entries) == 0 {
+		return
+	}
+	kept := make([]subjectIndexEntry, 0, len(entries))
+	for _, e := range entries {
+		snap, marked := snapshotExpiry[e.rawToken]
+		if marked && e.expiresAt.Equal(snap) {
+			continue
+		}
+		kept = append(kept, e)
+	}
+	if len(kept) == 0 {
+		delete(s.subjectIndex, subject)
+		return
+	}
+	s.subjectIndex[subject] = kept
 }
 
 // LookupToken returns cached metadata if token is known and not expired.
@@ -433,7 +642,10 @@ func (s *Store) RecordProviderRefresh(token, providerRefreshToken string, provid
 	}
 	if err := s.tokens.SaveProviderRefresh(token, providerRefreshToken, providerAccessExpiry); err != nil {
 		slog.Warn("token store provider refresh save failed", "err", err)
+		return
 	}
+	// LatestBySubject ranks on the authoritative TokenRecord, so there
+	// is no separate index hint to update here.
 }
 
 // ClearProviderRefresh drops the provider refresh metadata for token (sets
@@ -449,11 +661,46 @@ func (s *Store) ClearProviderRefresh(token string) {
 
 // InvalidateCachedToken removes a token from the store immediately.
 func (s *Store) InvalidateCachedToken(token string) {
+	// Capture the subject before deletion so we can drop the matching
+	// subject-index entry too. Without this, an invalidated bearer would
+	// linger in RAM (and be visible to LatestBySubject) until the cache
+	// TTL or the janitor sweep removed it.
+	var subject string
+	if rec, ok := s.tokens.Lookup(token); ok {
+		subject = rec.Subject
+	}
 	if err := s.tokens.Delete(token); err != nil {
 		// Non-fatal: the token will expire naturally, but operators should know
 		// if the store is unwritable.
 		slog.Warn("token store delete failed", "err", err)
 	}
+	if subject != "" {
+		s.removeSubjectIndexEntry(subject, token)
+	}
+}
+
+// removeSubjectIndexEntry drops the entry matching rawToken from subject's
+// in-memory index. Builds a fresh slice rather than reusing the backing
+// array so the dropped bearer string is released for GC promptly.
+func (s *Store) removeSubjectIndexEntry(subject, rawToken string) {
+	s.subjectIndexMu.Lock()
+	defer s.subjectIndexMu.Unlock()
+	entries, ok := s.subjectIndex[subject]
+	if !ok {
+		return
+	}
+	out := make([]subjectIndexEntry, 0, len(entries))
+	for _, e := range entries {
+		if e.rawToken == rawToken {
+			continue
+		}
+		out = append(out, e)
+	}
+	if len(out) == 0 {
+		delete(s.subjectIndex, subject)
+		return
+	}
+	s.subjectIndex[subject] = out
 }
 
 func (s *Store) janitor() {
@@ -489,7 +736,33 @@ func (s *Store) janitor() {
 			if err := s.refreshStore.Sweep(); err != nil {
 				slog.Warn("refresh token store sweep failed", "err", err)
 			}
+			s.sweepSubjectIndex(now)
 		}
+	}
+}
+
+// sweepSubjectIndex drops expired entries and any subject whose token list
+// is empty after pruning. Cheap O(n) scan; the index is expected to be small
+// relative to the token store (one entry per subject per active rotation).
+func (s *Store) sweepSubjectIndex(now time.Time) {
+	s.subjectIndexMu.Lock()
+	defer s.subjectIndexMu.Unlock()
+	for subject, entries := range s.subjectIndex {
+		// Build a fresh slice instead of reusing the backing array. These
+		// entries hold raw bearer tokens; reusing entries[:0] would keep
+		// the skipped (expired) tokens reachable via the array's tail for
+		// as long as any live entry remained.
+		live := make([]subjectIndexEntry, 0, len(entries))
+		for _, e := range entries {
+			if now.Before(e.expiresAt) {
+				live = append(live, e)
+			}
+		}
+		if len(live) == 0 {
+			delete(s.subjectIndex, subject)
+			continue
+		}
+		s.subjectIndex[subject] = live
 	}
 }
 

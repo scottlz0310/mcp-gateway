@@ -23,6 +23,7 @@ import (
 type TokenRecord struct {
 	Subject              string
 	Audiences            []string
+	ExpiresAt            time.Time
 	ProviderRefreshToken string
 	ProviderAccessExpiry time.Time
 }
@@ -130,6 +131,7 @@ func (m *memTokenStore) Lookup(token string) (TokenRecord, bool) {
 	return TokenRecord{
 		Subject:              e.subject,
 		Audiences:            cloneStrings(e.audiences),
+		ExpiresAt:            e.expiresAt,
 		ProviderRefreshToken: e.providerRefreshToken,
 		ProviderAccessExpiry: e.providerAccessExpiry,
 	}, true
@@ -293,6 +295,7 @@ func (f *fileTokenStore) Lookup(token string) (TokenRecord, bool) {
 	return TokenRecord{
 		Subject:              e.Subject,
 		Audiences:            cloneStrings(e.Audiences),
+		ExpiresAt:            e.ExpiresAt,
 		ProviderRefreshToken: e.ProviderRefreshToken,
 		ProviderAccessExpiry: e.ProviderAccessExpiry,
 	}, true
