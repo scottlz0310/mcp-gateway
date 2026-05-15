@@ -100,7 +100,7 @@ list (best-effort identifier for what the access token can do).
 
 ## Security model
 
-1. **Listener bind**: 127.0.0.1 / ::1 only. Binding 0.0.0.0 is a startup error.
+1. **Listener bind**: 127.0.0.1 (IPv4 loopback) only in the current PoC. Binding 0.0.0.0 / a non-loopback interface is a startup error. IPv6 loopback (`::1`) is not bound today; adding it is straightforward (`net.Listen` on `[::1]:<port>`) but out of PoC scope.
 2. **Defense in depth**: handler re-validates `r.RemoteAddr` is a loopback IP.
 3. **Shared secret**:
    - Env var `MCP_GATEWAY_INTERNAL_SECRET`. Must be ≥ 32 chars; shorter is a startup error.
@@ -136,6 +136,21 @@ the gateway returns the rotated successor. Documented for follow-up.
 
 Both must be set to enable the API. Either missing → internal listener
 is silently not started, with one `slog.Info` line documenting why.
+
+### Prerequisite for rotating GitHub tokens
+
+The internal API only triggers transparent rotation when the existing
+GitHub refresh flag is on. Set it together with the internal API env
+vars when you expect expiring GitHub OAuth tokens:
+
+| Setting | Required for rotation | Effect |
+|---|---|---|
+| `MCP_GATEWAY_GITHUB_REFRESH_ENABLED` / `gateway.github_refresh_enabled` | Yes (for rotating tokens) | Persists provider refresh metadata and lets `tryGitHubRotation` actually call the GitHub refresh endpoint. Defaults to **false**. |
+
+If the flag is off, `/internal/v1/whoami` still works but only ever
+returns the cached access token — useful for classic non-expiring PATs,
+but **not** for expiring OAuth tokens, where the gateway will keep
+handing back the same (eventually dead) bearer.
 
 ## Rotation policy
 

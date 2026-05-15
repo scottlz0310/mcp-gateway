@@ -27,7 +27,7 @@
   - loopback 専用の内部 API `POST /internal/v1/whoami` を追加。指定 subject の最新有効 access token を返し、期限間近なら gateway 側で透過的にローテーションする
   - `MCP_GATEWAY_INTERNAL_SECRET`（32 文字以上）と `MCP_GATEWAY_INTERNAL_PORT` の両方が設定されたときのみ起動する fail-closed 設計。未設定時は API を提供せず、その旨をログ出力する
   - listener は `127.0.0.1` にのみ bind し、共有 Bearer secret は定数時間比較で検証。リクエストボディ上限 4KB、未知の JSON フィールドは拒否
-  - レスポンスは `{access_token, token_type, expires_at, scopes}`（refresh token は返さない）。エラーは `404 subject_not_found`、`401 invalid_authorization`、`403 loopback_required`、`400 invalid_body`/`missing_subject`、`502 upstream_failure`
+  - レスポンスは `{access_token, token_type, expires_at, scopes}`（refresh token は返さない）。エラーは `404 subject_not_found`、`401 invalid_authorization`、`403 loopback_required`、`400 invalid_body`/`missing_subject`、`405 method_not_allowed`（`Allow: POST` ヘッダ付き）、`502 upstream_failure`、`502 rotation_failed`（キャッシュ済みトークンが GitHub refresh leeway 内だがローテーションで新しいトークンを得られなかった場合）
   - 想定利用者: upstream MCP server の長寿命バックグラウンド処理（例: `copilot-review-mcp` の watch goroutine）が、通常の MCP リクエスト経路の外で新しい access token を取得するケース。設計とセキュリティモデルは `docs/spike-72-delegated-background-access.md` 参照
 
 ### 変更

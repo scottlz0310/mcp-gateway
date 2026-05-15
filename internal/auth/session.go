@@ -83,12 +83,14 @@ type Store struct {
 }
 
 // subjectIndexEntry is one (subject, rawToken) mapping kept by Store.
-// expiresAt is the gateway cache TTL; providerAccessExpiry mirrors the
-// upstream GitHub access-token expiry when the provider advertises one.
+// expiresAt is the gateway cache TTL used both for pruning and as a
+// fallback ranking key when no entry has provider rotation metadata.
+// The authoritative ProviderAccessExpiry lives on the TokenRecord
+// itself; we do **not** mirror it here because the copy can drift
+// (e.g. after ClearProviderRefresh wipes the underlying metadata).
 type subjectIndexEntry struct {
-	rawToken             string
-	expiresAt            time.Time
-	providerAccessExpiry time.Time
+	rawToken  string
+	expiresAt time.Time
 }
 
 // StoreOption configures optional behaviour of NewStore.
@@ -441,8 +443,9 @@ func (s *Store) saveTokenRecord(token, subject, audience string) {
 }
 
 // indexSubjectToken records that the raw access token belongs to subject in
-// the in-memory subject index. The provider-access-expiry hint is filled in
-// later by RecordProviderRefresh; until then we keep only the gateway TTL.
+// the in-memory subject index. The provider-side expiry is intentionally not
+// mirrored here; LatestBySubject reads it from the authoritative TokenRecord
+// instead, so the index stays as small as possible.
 func (s *Store) indexSubjectToken(subject, rawToken string, expiresAt time.Time) {
 	s.subjectIndexMu.Lock()
 	defer s.subjectIndexMu.Unlock()
@@ -460,25 +463,6 @@ func (s *Store) indexSubjectToken(subject, rawToken string, expiresAt time.Time)
 		rawToken:  rawToken,
 		expiresAt: expiresAt,
 	})
-}
-
-// indexSubjectProviderExpiry updates the provider-access-expiry hint for an
-// entry that already exists in the subject index. No-op if the token is not
-// present (e.g. the entry was pruned).
-func (s *Store) indexSubjectProviderExpiry(subject, rawToken string, providerAccessExpiry time.Time) {
-	if subject == "" {
-		return
-	}
-	s.subjectIndexMu.Lock()
-	defer s.subjectIndexMu.Unlock()
-	entries := s.subjectIndex[subject]
-	for i, e := range entries {
-		if e.rawToken == rawToken {
-			entries[i].providerAccessExpiry = providerAccessExpiry
-			s.subjectIndex[subject] = entries
-			return
-		}
-	}
 }
 
 // LatestBySubject returns the raw access token with the latest provider
@@ -571,16 +555,10 @@ func (s *Store) RecordProviderRefresh(token, providerRefreshToken string, provid
 	}
 	if err := s.tokens.SaveProviderRefresh(token, providerRefreshToken, providerAccessExpiry); err != nil {
 		slog.Warn("token store provider refresh save failed", "err", err)
-		// Bail out: the metadata was not persisted, so propagating the
-		// expiry hint into the subject index would let LatestBySubject
-		// rank on state that does not actually back a rotation call.
 		return
 	}
-	// Also propagate the expiry hint to the subject index so the Phase B
-	// delegated-access API can pick the freshest rotatable entry.
-	if rec, ok := s.tokens.Lookup(token); ok && rec.Subject != "" {
-		s.indexSubjectProviderExpiry(rec.Subject, token, providerAccessExpiry)
-	}
+	// LatestBySubject ranks on the authoritative TokenRecord, so there
+	// is no separate index hint to update here.
 }
 
 // ClearProviderRefresh drops the provider refresh metadata for token (sets

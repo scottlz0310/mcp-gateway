@@ -29,7 +29,7 @@ and versioning follows [Semantic Versioning](https://semver.org/).
   - Optional loopback-only internal API at `POST /internal/v1/whoami` that returns the latest valid GitHub access token for a given subject, rotating transparently when the cached token is near expiry.
   - Enabled only when both `MCP_GATEWAY_INTERNAL_SECRET` (≥32 chars) and `MCP_GATEWAY_INTERNAL_PORT` are set; otherwise the API is not served and a log entry announces the disabled state (fail-closed).
   - Listener binds to `127.0.0.1` exclusively. Requests authenticate via a shared `Bearer` secret compared in constant time. Body is capped at 4KB and unknown JSON fields are rejected.
-  - Response contains `{access_token, token_type, expires_at, scopes}` (no refresh token). Errors use `404 subject_not_found`, `401 invalid_authorization`, `403 loopback_required`, `400 invalid_body`/`missing_subject`, `502 upstream_failure`.
+  - Response contains `{access_token, token_type, expires_at, scopes}` (no refresh token). Errors use `404 subject_not_found`, `401 invalid_authorization`, `403 loopback_required`, `400 invalid_body`/`missing_subject`, `405 method_not_allowed` (with `Allow: POST`), `502 upstream_failure`, `502 rotation_failed` (returned when the cached token is inside the GitHub refresh leeway window but rotation did not produce a fresh token).
   - Intended consumer: long-lived background workers in upstream MCP servers (e.g. `copilot-review-mcp` watch goroutines) that need a fresh access token outside the normal MCP request path. See `docs/spike-72-delegated-background-access.md` for the design and security model.
 
 ### Changed

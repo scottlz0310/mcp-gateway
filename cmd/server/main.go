@@ -524,17 +524,32 @@ func startInternalAPI(resolver internalapi.TokenResolver) {
 	mux := http.NewServeMux()
 	handler.RegisterRoutes(mux)
 	addr := "127.0.0.1:" + portRaw
+	// Bind synchronously so a port-in-use / permission error is surfaced
+	// before we declare the API listening. Without this, the goroutine
+	// below would fail asynchronously and operators would see no
+	// difference between a healthy startup and a silently-absent
+	// internal listener.
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		slog.Error("internal delegated access API disabled: bind failed", "addr", addr, "err", err)
+		return
+	}
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           middleware.Logger()(mux),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      10 * time.Second,
-		IdleTimeout:       60 * time.Second,
+		// The handler may synchronously call the GitHub refresh
+		// endpoint via EnsureFreshAccessTokenForSubject; the provider
+		// HTTP client allows up to 15s for that call, so the server
+		// write timeout must accommodate the worst-case rotation plus
+		// a small buffer for response encoding.
+		WriteTimeout: 20 * time.Second,
+		IdleTimeout:  60 * time.Second,
 	}
 	slog.Info("internal delegated access API listening", "addr", addr)
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			slog.Error("internal delegated access API exited", "err", err)
 		}
 	}()

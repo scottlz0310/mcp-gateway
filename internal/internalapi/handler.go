@@ -179,6 +179,7 @@ func (h *Handler) Whoami(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		// At this point the status line has already been sent (the
 		// json encoder writes 200 implicitly on its first write), so
@@ -224,6 +225,7 @@ func isLoopback(remoteAddr string) bool {
 func writeError(w http.ResponseWriter, status int, code string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": code})
 }
