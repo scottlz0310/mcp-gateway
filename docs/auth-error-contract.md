@@ -26,7 +26,9 @@ headers below.
 ### 1.2 `error=` Omission for `invalid_request` — Security Design
 
 RFC 6750 §3.1 permits omitting `error=` when the request lacked credentials entirely. The
-gateway intentionally does so for `invalid_request`:
+gateway applies the same omission when the `Authorization` header is malformed (not in
+`Bearer <token>` form) — `extractBearer()` returns `""` in both cases, and both result in
+`invalid_request`:
 
 ```
 # invalid_request — no error= attribute
@@ -70,8 +72,8 @@ information surface on this trust boundary.
 | `invalid_authorization` | 401 | `Authorization: Bearer` secret missing or does not match `MCP_GATEWAY_INTERNAL_SECRET` | Fix the shared secret configuration |
 | `invalid_body` | 400 | Malformed JSON, body exceeds 4 KiB, unknown fields, or trailing bytes after the JSON object | Fix the request body |
 | `missing_subject` | 400 | `subject` field is present but empty (or whitespace only) | Supply a non-empty subject |
-| `subject_not_found` | 404 | No cached token entry exists for the subject — the user has never authenticated through this gateway instance, or their session was purged | Trigger the user to re-authenticate via the public gateway OAuth flow |
-| `rotation_failed` | 502 | Token is near expiry, rotation was attempted, but GitHub's token endpoint rejected the refresh | Trigger the user to re-authenticate; the refresh token is no longer valid |
+| `subject_not_found` | 404 | No entry in the in-memory subject index for the requested subject — the user has never authenticated on this instance, the session was purged, or the process was recently restarted (the in-memory index starts empty after restart and re-seeds as bearer tokens are validated on protected routes) | Trigger the user to re-authenticate; after a process restart the error may be transient — the index rebuilds as users access protected routes |
+| `rotation_failed` | 502 | Token is near expiry, rotation was attempted but did not yield a fresh token (covers both transient provider/network errors and explicit rejection by GitHub's token endpoint) | Retry after a brief delay; if the error persists, trigger the user to re-authenticate — the refresh token may have been revoked |
 | `upstream_failure` | 502 | Any other resolver error, or the resolver returned an empty access token | Retry after a brief delay; if persistent, treat as `subject_not_found` and prompt re-auth |
 
 ### 2.2 Naming Note: `upstream_error` vs `upstream_failure`
@@ -271,11 +273,12 @@ log entries below are emitted with `slog.Error` or `slog.Warn`.
 
 A user must complete a fresh OAuth flow when either of the following is observed:
 
-1. The public API returns `invalid_token` with `error_description` containing "expired or invalid"
-   — the gateway Bearer token has expired or been revoked.
+1. The public API returns `invalid_token` — the gateway Bearer token is expired, invalid, or
+   not valid for the requested resource (e.g., audience mismatch). Any `invalid_token` response
+   requires re-authentication regardless of the specific `error_description`.
 2. The internal API returns `subject_not_found` — the user has no cached session on this gateway
    instance (new deployment, cache purge, or the user never authenticated here).
-3. The internal API returns `rotation_failed` — the GitHub refresh token was rejected.
+3. The internal API returns `rotation_failed` — token rotation did not yield a fresh access token (may be transient; retry before triggering re-authentication).
 
 Operators can surface the re-authentication URL from the `resource_metadata` parameter in the
 `WWW-Authenticate` header of any `401` response.
@@ -286,5 +289,6 @@ Operators can surface the re-authentication URL from the `resource_metadata` par
 |---|---|---|
 | `loopback_required` (403) on internal API | Caller is not connecting via loopback | Ensure upstream MCP server calls `127.0.0.1:${MCP_GATEWAY_INTERNAL_PORT}`; the listener always binds to `127.0.0.1` only (IPv6 loopback `[::1]` is not supported) |
 | `invalid_authorization` (401) on internal API | Mismatched shared secret | `MCP_GATEWAY_INTERNAL_SECRET` in both gateway and upstream server env |
-| Persistent `upstream_failure` (502) | GitHub token store not persisted across restarts | Set `MCP_GATEWAY_TOKEN_STORE_PATH` to a writable, durable path |
+| Persistent `upstream_failure` (502) | Transient resolver or GitHub API failure; or the resolver returned an empty access token | Check GitHub status and retry; inspect gateway logs for resolver errors (`"err"` field) |
+| `subject_not_found` (404) after process restart | In-memory subject index starts empty after restart and re-seeds as bearer tokens are validated | Set `MCP_GATEWAY_TOKEN_STORE_PATH` for durable storage so sessions survive restart; the index rebuilds on the first bearer token validation per subject |
 | `upstream_error` (503) on every request | GitHub OAuth provider unreachable | Check GitHub status and outbound network access to the OAuth provider (configured via `OAUTH_PROVIDER`, default `github`) |
