@@ -125,6 +125,7 @@ error taxonomy. It is primarily useful for maintainers of both services.
 | `/whoami` HTTP status | Gateway error code | Sentinel error |
 |---|---|---|
 | 200 | *(success)* | — |
+| 200 (malformed body) | `expires_at` missing or unparseable | `ErrGatewayInvalidExpiry` |
 | 401 | `invalid_authorization` | `ErrGatewayUnauthorized` |
 | 403 | `loopback_required` | `ErrGatewayLoopbackRequired` |
 | 404 | `subject_not_found` | `ErrGatewaySubjectGone` |
@@ -191,7 +192,7 @@ carry more precise semantics.
 
 | Sentinel | `AuthErrorType` | Rationale |
 |---|---|---|
-| `ErrGatewayRotationFailed` | `TOKEN_REFRESH_FAILED` | Refresh token rejected; re-auth required |
+| `ErrGatewayRotationFailed` | `TOKEN_REFRESH_FAILED` | Gateway reported `rotation_failed` (may indicate token rejection, transient provider failure, or malformed provider response); re-auth recommended if persistent |
 | `ErrGatewaySubjectGone` | `REAUTH_REQUIRED` | Subject removed or revoked; re-auth required |
 | `ErrGatewayUpstreamFailure` | `TRANSIENT_UPSTREAM_ERROR` | Transient resolver failure; retry may succeed |
 | `ErrGatewayUnauthorized` | `AUTH_REQUIRED` | Shared-secret misconfiguration; no usable token |
