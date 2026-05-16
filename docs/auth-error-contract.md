@@ -193,9 +193,10 @@ re-authentication is required.
 **Impact:** Users may see a stale "GitHub error" status instead of a prompt to re-authenticate.
 The watch will keep retrying unnecessarily until it times out.
 
-**Recommended fix (separate issue):** Extend `IsAuthError` (or add a new predicate) in
-copilot-review-mcp to recognise `ErrGatewaySubjectGone` and `ErrGatewayUpstreamFailure`
-(when the underlying gateway code is `rotation_failed`) and return `true`.
+**Recommended fix:** Extend `IsAuthError` (or add a new predicate) in copilot-review-mcp to
+recognise `ErrGatewaySubjectGone` and `ErrGatewayUpstreamFailure` (when the underlying gateway
+code is `rotation_failed`) and return `true`.
+Tracked in [scottlz0310/copilot-review-mcp#31](https://github.com/scottlz0310/copilot-review-mcp/issues/31).
 
 ### Gap 2 — Gateway sentinel errors have no `AuthErrorType` mapping
 
@@ -205,8 +206,8 @@ When a tool call fails due to a gateway sentinel error, `ClassifyGitHubError` do
 an `AuthErrorType`, so `tryAuthResult` cannot build a correctly typed error result. The tool
 call response may contain no actionable guidance for the MCP client.
 
-**Recommended fix (separate issue):** Add explicit handling for gateway sentinel errors in
-`ClassifyGitHubError`:
+**Recommended fix:** Add explicit handling for gateway sentinel errors in `ClassifyGitHubError`.
+Tracked in [scottlz0310/copilot-review-mcp#32](https://github.com/scottlz0310/copilot-review-mcp/issues/32).
 
 | Sentinel | Suggested `AuthErrorType` |
 |---|---|
