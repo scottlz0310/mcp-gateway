@@ -66,7 +66,7 @@ information surface on this trust boundary.
 | Error code | HTTP status | Trigger | Caller action |
 |---|---|---|---|
 | `method_not_allowed` | 405 | Non-`POST` method | Fix the HTTP method; this is a caller bug |
-| `loopback_required` | 403 | Request originated from a non-loopback address | Check gateway bind config (`gateway.internal_addr`) |
+| `loopback_required` | 403 | Request originated from a non-loopback address | Ensure the caller connects to the internal API on loopback — the listener always binds to `127.0.0.1:${MCP_GATEWAY_INTERNAL_PORT}` |
 | `invalid_authorization` | 401 | `Authorization: Bearer` secret missing or does not match `MCP_GATEWAY_INTERNAL_SECRET` | Fix the shared secret configuration |
 | `invalid_body` | 400 | Malformed JSON, body exceeds 4 KiB, unknown fields, or trailing bytes after the JSON object | Fix the request body |
 | `missing_subject` | 400 | `subject` field is present but empty (or whitespace only) | Supply a non-empty subject |
@@ -90,7 +90,7 @@ different audiences, and have different retry semantics. They should not be merg
 
 Issue #72 (Phase B) considered introducing a single error code `auth_context_unavailable` to
 cover the condition "the gateway has no usable auth context for this subject." After the Phase B
-GO verdict this was **decided against** — no new error code was added to the codebase.
+go/no-go verdict this was **decided against** — no new error code was added to the codebase.
 
 Instead, the two existing codes cover the concept:
 
@@ -284,7 +284,7 @@ Operators can surface the re-authentication URL from the `resource_metadata` par
 
 | Symptom | Likely cause | Check |
 |---|---|---|
-| `loopback_required` (403) on internal API | Gateway internal listener accidentally exposed outside loopback | `gateway.internal_addr` (must be `127.0.0.1:<port>` or `[::1]:<port>`) |
+| `loopback_required` (403) on internal API | Caller is not connecting via loopback | Ensure upstream MCP server calls `127.0.0.1:${MCP_GATEWAY_INTERNAL_PORT}`; the listener always binds to `127.0.0.1` only (IPv6 loopback `[::1]` is not supported) |
 | `invalid_authorization` (401) on internal API | Mismatched shared secret | `MCP_GATEWAY_INTERNAL_SECRET` in both gateway and upstream server env |
-| Persistent `upstream_failure` (502) | GitHub token store not persisted across restarts | `gateway.token_store_path` points to a writable, durable path |
-| `upstream_error` (503) on every request | GitHub OAuth provider unreachable | Check GitHub status and `gateway.provider` network access |
+| Persistent `upstream_failure` (502) | GitHub token store not persisted across restarts | Set `MCP_GATEWAY_TOKEN_STORE_PATH` to a writable, durable path |
+| `upstream_error` (503) on every request | GitHub OAuth provider unreachable | Check GitHub status and outbound network access to the OAuth provider (configured via `OAUTH_PROVIDER`, default `github`) |
