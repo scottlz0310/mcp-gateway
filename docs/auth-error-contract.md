@@ -128,16 +128,16 @@ error taxonomy. It is primarily useful for maintainers of both services.
 | 401 | `invalid_authorization` | `ErrGatewayUnauthorized` |
 | 403 | `loopback_required` | `ErrGatewayLoopbackRequired` |
 | 404 | `subject_not_found` | `ErrGatewaySubjectGone` |
-| 502 | `rotation_failed` / `upstream_failure` | `ErrGatewayUpstreamFailure` |
+| 502 | `rotation_failed` | `ErrGatewayRotationFailed` |
+| 502 | `upstream_failure` (or unrecognised body) | `ErrGatewayUpstreamFailure` |
 | other 4xx | `method_not_allowed` / `invalid_body` / `missing_subject` | `ErrGatewayBadRequest` |
 
 `ErrGatewayUnauthorized`, `ErrGatewayLoopbackRequired`, and `ErrGatewayBadRequest` always
 indicate configuration errors; they should never occur in a correctly configured deployment.
 
-> **⚠ Implementation note — HTTP 502 body is not parsed:** `gatewayTokenSource.Token()` maps
-> all HTTP 502 responses to `ErrGatewayUpstreamFailure` without reading the JSON `error` field.
-> The gateway distinction between `rotation_failed` and `upstream_failure` is therefore
-> **invisible to copilot-review-mcp at runtime**. See Gap 3 below.
+`ErrGatewayRotationFailed` and `ErrGatewayUpstreamFailure` are distinct sentinels since
+copilot-review-mcp PR #34 (Issue #33): `gatewayTokenSource.Token()` now parses the JSON `error`
+body of HTTP 502 responses to emit the appropriate sentinel.
 
 ### 3.2 Watch Manager: Sentinel Errors → `FailureReason`
 
@@ -150,17 +150,21 @@ indicate configuration errors; they should never occur in a correctly configured
 | `GITHUB_ERROR` | A GitHub API error that is not an auth expiry (may be transient) |
 | `INTERNAL_ERROR` | Watch setup or database failure |
 
-The manager uses `ghclient.IsAuthError(err)` to distinguish `AUTH_EXPIRED` from `GITHUB_ERROR`.
-`IsAuthError` detects HTTP 401 errors from the **GitHub API** — it does **not** recognise gateway
-sentinel errors.
+The manager uses `ghclient.IsAuthError(err)` and `ghclient.IsGatewayAuthError(err)` to
+distinguish `AUTH_EXPIRED` from `GITHUB_ERROR`. `IsAuthError` detects HTTP 401 errors from
+the **GitHub API**. `IsGatewayAuthError` recognises the gateway sentinels that require
+re-authentication. `ErrGatewayUpstreamFailure` is handled separately by a consecutive-failure
+budget: after `N` consecutive failures the watch escalates to `AUTH_EXPIRED`.
 
 **Current (actual) mapping:**
 
-| Sentinel error | `IsAuthError(err)` | `FailureReason` (current) | Semantically correct? |
+| Sentinel error | `IsGatewayAuthError(err)` | `FailureReason` (current) | Semantically correct? |
 |---|---|---|---|
-| `ErrGatewaySubjectGone` | `false` | `GITHUB_ERROR` | ❌ Should be `AUTH_EXPIRED` — user must re-auth |
-| `ErrGatewayUpstreamFailure` *(any 502; body not parsed — see Gap 3)* | `false` | `GITHUB_ERROR` | ⚠️ Indistinguishable at runtime: may need `AUTH_EXPIRED` (rotation_failed) or `GITHUB_ERROR` (upstream_failure) |
-| GitHub API 401 | `true` | `AUTH_EXPIRED` | ✅ |
+| `ErrGatewaySubjectGone` | `true` | `AUTH_EXPIRED` | ✅ Fixed by PR #31/#36 |
+| `ErrGatewayRotationFailed` | `true` | `AUTH_EXPIRED` | ✅ Fixed by PR #31/#36 |
+| `ErrGatewayUpstreamFailure` (transient, below threshold) | `false` | `GITHUB_ERROR` (continues watch) | ✅ Fixed by PR #37 |
+| `ErrGatewayUpstreamFailure` (persistent, above threshold) | `false` → escalated | `AUTH_EXPIRED` | ✅ Fixed by PR #37 |
+| GitHub API 401 | *(IsAuthError)* `true` | `AUTH_EXPIRED` | ✅ |
 | GitHub API 5xx / other | `false` | `GITHUB_ERROR` | ✅ |
 
 ### 3.3 Tool Call Path: `AuthErrorType`
@@ -179,79 +183,75 @@ When a copilot-review-mcp **tool call** fails (not a background watch), errors a
 | `VALIDATION_ERROR` | GitHub 400 / 422 |
 | `TRANSIENT_UPSTREAM_ERROR` | GitHub 5xx (retryable) |
 
-`ClassifyGitHubError` is built around GitHub API HTTP status codes. Gateway sentinel errors
-(`ErrGatewaySubjectGone`, etc.) do **not** pass through it and therefore have **no defined
-`AuthErrorType` mapping** today.
+`ClassifyGitHubError` is built around both GitHub API HTTP status codes and gateway sentinel
+errors. Gateway sentinels are checked first (before generic HTTP-status checks) because they
+carry more precise semantics.
+
+**Gateway sentinel → `AuthErrorType` mapping (as of PR #32):**
+
+| Sentinel | `AuthErrorType` | Rationale |
+|---|---|---|
+| `ErrGatewayRotationFailed` | `TOKEN_REFRESH_FAILED` | Refresh token rejected; re-auth required |
+| `ErrGatewaySubjectGone` | `REAUTH_REQUIRED` | Subject removed or revoked; re-auth required |
+| `ErrGatewayUpstreamFailure` | `TRANSIENT_UPSTREAM_ERROR` | Transient resolver failure; retry may succeed |
+| `ErrGatewayUnauthorized` | `AUTH_REQUIRED` | Shared-secret misconfiguration; no usable token |
+| `ErrGatewayLoopbackRequired` | `AUTH_REQUIRED` | Endpoint not on loopback; configuration error |
+| `ErrGatewayBadRequest` | `VALIDATION_ERROR` | Request arguments rejected; do not retry |
+| `ErrGatewayInvalidExpiry` | `TRANSIENT_UPSTREAM_ERROR` | Malformed whoami response (missing/invalid `expires_at`); retry may succeed |
 
 ---
 
-## 4. Known Gaps
+## 4. Known Gaps — All Resolved
 
-### Gap 1 — `ErrGatewaySubjectGone` classified as `GITHUB_ERROR` not `AUTH_EXPIRED`
+All three gaps identified at Phase C document creation have been resolved in
+copilot-review-mcp. The sections below are preserved for historical reference and
+cross-linked to the relevant PRs.
+
+### Gap 1 — ✅ Resolved (PR #31/#36)
+
+**`ErrGatewaySubjectGone` was classified as `GITHUB_ERROR` not `AUTH_EXPIRED`**
 
 **Location:** `copilot-review-mcp/internal/watch/manager.go`
 
-When a watch's `gatewayTokenSource.Token()` call returns `ErrGatewaySubjectGone` (HTTP 404 from
-gateway), `IsAuthError` returns `false` because it only recognises GitHub API 401 patterns.
-The watch therefore sets `FailureReason = GITHUB_ERROR`, which gives the user no signal that
-re-authentication is required.
+When a watch's `gatewayTokenSource.Token()` call returned `ErrGatewaySubjectGone` (HTTP 404
+from gateway), `IsAuthError` returned `false` because it only recognised GitHub API 401
+patterns. The watch therefore set `FailureReason = GITHUB_ERROR`.
 
-**Impact:** Users may see a stale "GitHub error" status instead of a prompt to re-authenticate.
-The watch will keep retrying unnecessarily until it times out.
+**Resolution:** `ghclient.IsGatewayAuthError` was introduced and wired into the watch manager.
+It returns `true` for `ErrGatewaySubjectGone` and `ErrGatewayRotationFailed`, causing the watch
+to set `FailureReason = AUTH_EXPIRED` for both.
+Fixed by [scottlz0310/copilot-review-mcp#31](https://github.com/scottlz0310/copilot-review-mcp/issues/31),
+landed in PR #36.
 
-**Recommended fix:** Extend `IsAuthError` (or add a new predicate) in copilot-review-mcp to
-recognise `ErrGatewaySubjectGone` and a future `ErrGatewayRotationFailed` sentinel and return
-`true`. **This fix depends on Gap 3 being resolved first** — `ErrGatewayUpstreamFailure` must be
-split into distinct sentinels before the rotation_failed case can be handled correctly.
-Tracked in [scottlz0310/copilot-review-mcp#31](https://github.com/scottlz0310/copilot-review-mcp/issues/31).
+### Gap 2 — ✅ Resolved (PR #32)
 
-### Gap 2 — Gateway sentinel errors have no `AuthErrorType` mapping
+**Gateway sentinel errors had no `AuthErrorType` mapping**
 
 **Location:** `copilot-review-mcp/internal/github/classify.go`
 
-When a tool call fails due to a gateway sentinel error, `ClassifyGitHubError` does not produce
-an `AuthErrorType`, so `tryAuthResult` cannot build a correctly typed error result. The tool
-call response may contain no actionable guidance for the MCP client.
+When a tool call failed due to a gateway sentinel error, `ClassifyGitHubError` did not produce
+an `AuthErrorType`.
 
-**Recommended fix:** Add explicit handling for gateway sentinel errors in `ClassifyGitHubError`.
-Tracked in [scottlz0310/copilot-review-mcp#32](https://github.com/scottlz0310/copilot-review-mcp/issues/32).
+**Resolution:** Explicit cases for all gateway sentinel errors were added to
+`ClassifyGitHubError`. See §3.3 for the current mapping table.
+Fixed by [scottlz0310/copilot-review-mcp#32](https://github.com/scottlz0310/copilot-review-mcp/issues/32).
 
-| Sentinel | Suggested `AuthErrorType` |
-|---|---|
-| `ErrGatewaySubjectGone` | `REAUTH_REQUIRED` |
-| `ErrGatewayUpstreamFailure` | `TOKEN_REFRESH_FAILED` / `TRANSIENT_UPSTREAM_ERROR` depending on recoverable vs not |
-| `ErrGatewayUnauthorized` | `AUTH_REQUIRED` (config error; treat as no-credential state) |
+### Gap 3 — ✅ Resolved (PR #34, Issue #33)
 
-Note: the `ErrGatewayUpstreamFailure` row above reflects the *intended* mapping after Gap 3 is
-resolved. Until `rotation_failed` and `upstream_failure` produce distinct sentinels, this
-classification cannot be implemented.
-
-### Gap 3 — `ErrGatewayUpstreamFailure` conflates `rotation_failed` and `upstream_failure`
+**`ErrGatewayUpstreamFailure` conflated `rotation_failed` and `upstream_failure`**
 
 **Location:** `copilot-review-mcp/internal/github/gateway_token_source.go`
 
-`gatewayTokenSource.Token()` maps **all** HTTP 502 responses from the gateway to the same
-sentinel `ErrGatewayUpstreamFailure`, without reading the JSON `error` body. The gateway
-distinguishes two semantically different 502 conditions:
+`gatewayTokenSource.Token()` mapped **all** HTTP 502 responses from the gateway to the same
+sentinel `ErrGatewayUpstreamFailure`, without reading the JSON `error` body.
 
-| Gateway JSON body | Meaning | Required downstream action |
-|---|---|---|
-| `{"error": "rotation_failed"}` | Refresh token rejected or transient rotation failure | Retry first; if persistent, user must re-authenticate |
-| `{"error": "upstream_failure"}` | Transient resolver / upstream failure | Retry may succeed |
-
-Because the sentinel collapses both, neither `watch/manager.go` nor `ClassifyGitHubError` can
-tell "re-auth required" from "retry will probably help." This ambiguity is the root cause that
-blocks a clean fix for Gap 1 and Gap 2.
-
-**Recommended fix:** Parse the JSON `error` field of HTTP 502 responses in
-`gatewayTokenSource.Token()` and return distinct sentinel errors, for example:
-
-- `ErrGatewayRotationFailed` — for `{"error": "rotation_failed"}`
-- `ErrGatewayResolverFailure` — for `{"error": "upstream_failure"}`
-
-Alternatively, define a typed error that carries the gateway error code as a string field so
-callers can switch on it without additional sentinels. Once this split exists, Gap 1 and Gap 2
-fixes can correctly map `ErrGatewayRotationFailed` → `AUTH_EXPIRED` / `TOKEN_REFRESH_FAILED`.
+**Resolution:** `gatewayTokenSource.Token()` now parses the JSON `error` field of HTTP 502
+responses and emits `ErrGatewayRotationFailed` for `{"error":"rotation_failed"}` and
+`ErrGatewayUpstreamFailure` for `{"error":"upstream_failure"}` (or any unrecognised body).
+The persistent `ErrGatewayUpstreamFailure` escalation to `AUTH_EXPIRED` after `N` consecutive
+failures was also added (PR #37/#38).
+Fixed by [scottlz0310/copilot-review-mcp#33](https://github.com/scottlz0310/copilot-review-mcp/issues/33),
+landed in PR #34.
 
 ---
 
