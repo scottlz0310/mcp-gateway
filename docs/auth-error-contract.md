@@ -161,10 +161,10 @@ budget: after `N` consecutive failures the watch escalates to `AUTH_EXPIRED`.
 
 | Sentinel error | `IsGatewayAuthError(err)` | `FailureReason` (current) | Semantically correct? |
 |---|---|---|---|
-| `ErrGatewaySubjectGone` | `true` | `AUTH_EXPIRED` | ✅ Fixed by PR #31/#36 |
-| `ErrGatewayRotationFailed` | `true` | `AUTH_EXPIRED` | ✅ Fixed by PR #31/#36 |
-| `ErrGatewayUpstreamFailure` (transient, below threshold) | `false` | `GITHUB_ERROR` (continues watch) | ✅ Fixed by PR #37 |
-| `ErrGatewayUpstreamFailure` (persistent, above threshold) | `false` → escalated | `AUTH_EXPIRED` | ✅ Fixed by PR #37 |
+| `ErrGatewaySubjectGone` | `true` | `AUTH_EXPIRED` | ✅ Fixed ([scottlz0310/copilot-review-mcp PR #36](https://github.com/scottlz0310/copilot-review-mcp/pull/36)) |
+| `ErrGatewayRotationFailed` | `true` | `AUTH_EXPIRED` | ✅ Fixed ([scottlz0310/copilot-review-mcp PR #36](https://github.com/scottlz0310/copilot-review-mcp/pull/36)) |
+| `ErrGatewayUpstreamFailure` (transient, below threshold) | `false` | `GITHUB_ERROR` (continues watch) | ✅ Fixed ([scottlz0310/copilot-review-mcp PR #38](https://github.com/scottlz0310/copilot-review-mcp/pull/38)) |
+| `ErrGatewayUpstreamFailure` (persistent, above threshold) | `false` → escalated | `AUTH_EXPIRED` | ✅ Fixed ([scottlz0310/copilot-review-mcp PR #38](https://github.com/scottlz0310/copilot-review-mcp/pull/38)) |
 | GitHub API 401 | *(IsAuthError)* `true` | `AUTH_EXPIRED` | ✅ |
 | GitHub API 5xx / other | `false` | `GITHUB_ERROR` | ✅ |
 
@@ -208,7 +208,7 @@ All three gaps identified at Phase C document creation have been resolved in
 copilot-review-mcp. The sections below are preserved for historical reference and
 cross-linked to the relevant PRs.
 
-### Gap 1 — ✅ Resolved (PR #31/#36)
+### Gap 1 — ✅ Resolved (scottlz0310/copilot-review-mcp PR #36)
 
 **`ErrGatewaySubjectGone` was classified as `GITHUB_ERROR` not `AUTH_EXPIRED`**
 
@@ -222,9 +222,9 @@ patterns. The watch therefore set `FailureReason = GITHUB_ERROR`.
 It returns `true` for `ErrGatewaySubjectGone` and `ErrGatewayRotationFailed`, causing the watch
 to set `FailureReason = AUTH_EXPIRED` for both.
 Fixed by [scottlz0310/copilot-review-mcp#31](https://github.com/scottlz0310/copilot-review-mcp/issues/31),
-landed in PR #36.
+landed in [scottlz0310/copilot-review-mcp PR #36](https://github.com/scottlz0310/copilot-review-mcp/pull/36).
 
-### Gap 2 — ✅ Resolved (PR #32)
+### Gap 2 — ✅ Resolved (scottlz0310/copilot-review-mcp PR #32)
 
 **Gateway sentinel errors had no `AuthErrorType` mapping**
 
@@ -237,7 +237,7 @@ an `AuthErrorType`.
 `ClassifyGitHubError`. See §3.3 for the current mapping table.
 Fixed by [scottlz0310/copilot-review-mcp#32](https://github.com/scottlz0310/copilot-review-mcp/issues/32).
 
-### Gap 3 — ✅ Resolved (PR #34, Issue #33)
+### Gap 3 — ✅ Resolved (scottlz0310/copilot-review-mcp PR #34, Issue #33)
 
 **`ErrGatewayUpstreamFailure` conflated `rotation_failed` and `upstream_failure`**
 
@@ -250,9 +250,9 @@ sentinel `ErrGatewayUpstreamFailure`, without reading the JSON `error` body.
 responses and emits `ErrGatewayRotationFailed` for `{"error":"rotation_failed"}` and
 `ErrGatewayUpstreamFailure` for `{"error":"upstream_failure"}` (or any unrecognised body).
 The persistent `ErrGatewayUpstreamFailure` escalation to `AUTH_EXPIRED` after `N` consecutive
-failures was also added (PR #37/#38).
+failures was also added ([scottlz0310/copilot-review-mcp PR #38](https://github.com/scottlz0310/copilot-review-mcp/pull/38)).
 Fixed by [scottlz0310/copilot-review-mcp#33](https://github.com/scottlz0310/copilot-review-mcp/issues/33),
-landed in PR #34.
+landed in [scottlz0310/copilot-review-mcp PR #34](https://github.com/scottlz0310/copilot-review-mcp/pull/34).
 
 ---
 
