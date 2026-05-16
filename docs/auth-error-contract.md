@@ -71,7 +71,7 @@ information surface on this trust boundary.
 | `loopback_required` | 403 | Request originated from a non-loopback address | Ensure the caller connects to the internal API on loopback — the listener always binds to `127.0.0.1:${MCP_GATEWAY_INTERNAL_PORT}` |
 | `invalid_authorization` | 401 | `Authorization: Bearer` secret missing or does not match `MCP_GATEWAY_INTERNAL_SECRET` | Fix the shared secret configuration |
 | `invalid_body` | 400 | Malformed JSON, body exceeds 4 KiB, unknown fields, or trailing bytes after the JSON object | Fix the request body |
-| `missing_subject` | 400 | `subject` field is present but empty (or whitespace only) | Supply a non-empty subject |
+| `missing_subject` | 400 | `subject` field is omitted or empty (including whitespace-only) | Supply a non-empty subject |
 | `subject_not_found` | 404 | No entry in the in-memory subject index for the requested subject — the user has never authenticated on this instance, the session was purged, or the process was recently restarted (the in-memory index starts empty after restart and re-seeds as bearer tokens are validated on protected routes) | Trigger the user to re-authenticate; after a process restart the error may be transient — the index rebuilds as users access protected routes |
 | `rotation_failed` | 502 | Token is near expiry, rotation was attempted but did not yield a fresh token (covers both transient provider/network errors and explicit rejection by GitHub's token endpoint) | Retry after a brief delay; if the error persists, trigger the user to re-authenticate — the refresh token may have been revoked |
 | `upstream_failure` | 502 | Any other resolver error, or the resolver returned an empty access token | Retry after a brief delay; if persistent, treat as `subject_not_found` and prompt re-auth |
@@ -99,11 +99,12 @@ Instead, the two existing codes cover the concept:
 | Code | Why the context is unavailable |
 |---|---|
 | `subject_not_found` | No token has ever been cached for this subject (user never authenticated on this gateway instance, or cache was purged) |
-| `rotation_failed` | A token exists but its refresh token has been revoked or rejected by GitHub |
+| `rotation_failed` | A token exists but rotation did not yield a fresh token — may be a transient provider/network error or permanent refresh-token rejection |
 
-Both cases require the same corrective action from the caller: trigger the end-user to
-re-authenticate via the gateway's public OAuth flow. Callers **SHOULD** treat either code as
-"prompt re-authentication."
+`subject_not_found` always requires re-authentication. `rotation_failed` should be retried first;
+if the error persists, trigger the end-user to re-authenticate via the gateway's public OAuth flow.
+Callers **SHOULD** treat persistent `rotation_failed` as "prompt re-authentication," but a single
+transient occurrence warrants a retry before escalating.
 
 Implementation reference: `internal/auth/handler.go:EnsureFreshAccessTokenForSubject()` —
 returns `auth.ErrSubjectNotFound` and `auth.ErrRotationFailed` as distinct typed errors;
@@ -235,7 +236,7 @@ distinguishes two semantically different 502 conditions:
 
 | Gateway JSON body | Meaning | Required downstream action |
 |---|---|---|
-| `{"error": "rotation_failed"}` | Refresh token rejected by GitHub | User **must** re-authenticate |
+| `{"error": "rotation_failed"}` | Refresh token rejected or transient rotation failure | Retry first; if persistent, user must re-authenticate |
 | `{"error": "upstream_failure"}` | Transient resolver / upstream failure | Retry may succeed |
 
 Because the sentinel collapses both, neither `watch/manager.go` nor `ClassifyGitHubError` can
