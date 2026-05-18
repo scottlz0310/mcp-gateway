@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"strings"
 
 	"github.com/scottlz0310/mcp-gateway/internal/middleware"
@@ -22,7 +23,14 @@ type TokenInvalidator interface {
 // injects the verified user identifier as X-Authenticated-User (and the
 // legacy X-GitHub-Login during the migration window), and invalidates the
 // token cache when the upstream returns HTTP 401.
-func NewHandler(upstream *url.URL, inv TokenInvalidator) http.Handler {
+//
+// When upstreamBearerTokenEnv is non-empty, the named environment variable
+// is read on each request and its value is injected as the upstream
+// Authorization Bearer token instead of the client OAuth context token.
+// In this mode, upstream 401 responses are NOT treated as client token
+// invalidation events — the failure belongs to the upstream credential,
+// not the client session.
+func NewHandler(upstream *url.URL, inv TokenInvalidator, upstreamBearerTokenEnv string) http.Handler {
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(upstream)
@@ -35,9 +43,22 @@ func NewHandler(upstream *url.URL, inv TokenInvalidator) http.Handler {
 			pr.Out.Header.Del("X-Forwarded-Host")
 			pr.Out.Header.Del("X-Forwarded-Proto")
 
-			// Normalize Authorization from context to prevent client spoofing.
+			// Always strip client-supplied Authorization first to prevent spoofing,
+			// then inject the appropriate upstream credential.
 			pr.Out.Header.Del("Authorization")
-			if token := middleware.TokenFromContext(pr.In.Context()); token != "" {
+			if upstreamBearerTokenEnv != "" {
+				// Upstream credential injection: read the named env var at request time.
+				// A warning is emitted when the env var is unset or empty so that
+				// rotated or missing credentials are visible in logs.
+				if token := strings.TrimSpace(os.Getenv(upstreamBearerTokenEnv)); token != "" {
+					pr.Out.Header.Set("Authorization", "Bearer "+token)
+				} else {
+					slog.Warn("upstream credential env var is unset or empty; request forwarded without Authorization",
+						"env_var", upstreamBearerTokenEnv,
+						"path", pr.Out.URL.Path,
+					)
+				}
+			} else if token := middleware.TokenFromContext(pr.In.Context()); token != "" {
 				pr.Out.Header.Set("Authorization", "Bearer "+token)
 			}
 
@@ -58,13 +79,23 @@ func NewHandler(upstream *url.URL, inv TokenInvalidator) http.Handler {
 		},
 
 		ModifyResponse: func(resp *http.Response) error {
-			if resp.StatusCode == http.StatusUnauthorized && inv != nil {
-				if token := extractBearer(resp.Request); token != "" {
-					inv.InvalidateCachedToken(token)
-					slog.Warn("upstream rejected token; cache invalidated",
+			if resp.StatusCode == http.StatusUnauthorized {
+				if upstreamBearerTokenEnv != "" {
+					// The 401 came from an upstream-credential route.
+					// This is a problem with the upstream API token, not the
+					// client OAuth session — do NOT invalidate the client cache.
+					slog.Warn("upstream rejected upstream credential; check env var token",
 						"path", resp.Request.URL.Path,
-						"token_hash", tokenHash(token),
+						"env_var", upstreamBearerTokenEnv,
 					)
+				} else if inv != nil {
+					if token := extractBearer(resp.Request); token != "" {
+						inv.InvalidateCachedToken(token)
+						slog.Warn("upstream rejected token; cache invalidated",
+							"path", resp.Request.URL.Path,
+							"token_hash", tokenHash(token),
+						)
+					}
 				}
 			}
 			slog.Info("proxy response",

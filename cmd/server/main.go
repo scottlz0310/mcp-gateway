@@ -236,7 +236,7 @@ func main() {
 	// /.well-known/oauth-protected-resource{prefix}, and 401 responses point
 	// resource_metadata at that route-scoped URL.
 	for _, route := range routes {
-		h := proxy.NewHandler(route.Upstream, oauthHandler)
+		h := proxy.NewHandler(route.Upstream, oauthHandler, route.UpstreamBearerTokenEnv)
 		var wrapped http.Handler
 		if route.NoAuth {
 			wrapped = h
@@ -270,6 +270,7 @@ func main() {
 			"prefix", route.Prefix,
 			"upstream", route.Upstream.String(),
 			"auth_required", !route.NoAuth,
+			"upstream_bearer_token_env", route.UpstreamBearerTokenEnv != "",
 		)
 	}
 
@@ -355,16 +356,16 @@ type config struct {
 	// Replaces the deprecated baseURL / MCP_GATEWAY_BASE_URL.
 	publicURL string
 	// bindAddr is the TCP address the HTTP listener binds to (host:port).
-	bindAddr            string
-	oauthProvider       string
-	oauthScopes         string
-	port                string
-	logLevel            string
-	upstreamURL         string // deprecated; prefer ROUTE_* env vars
-	trustedProxyCIDRs   []string
-	sessionTTLMin       int
-	tokenCacheTTLMin    int
-	tokenExpiresInSec   int
+	bindAddr             string
+	oauthProvider        string
+	oauthScopes          string
+	port                 string
+	logLevel             string
+	upstreamURL          string // deprecated; prefer ROUTE_* env vars
+	trustedProxyCIDRs    []string
+	sessionTTLMin        int
+	tokenCacheTTLMin     int
+	tokenExpiresInSec    int
 	tokenAudienceStrict  bool
 	githubRefreshEnabled bool
 	tokenStorePath       string
@@ -394,17 +395,17 @@ func loadConfig() config {
 
 	return config{
 		// githubClientID and githubClientSecret are resolved after key/config loading in main().
-		publicURL:           publicURL,
-		bindAddr:            bindAddr,
-		port:                port,
-		oauthProvider:       oauthProvider,
-		oauthScopes:         oauthScopes,
-		logLevel:            getEnv("LOG_LEVEL", "info"),
-		upstreamURL:         getEnv("GITHUB_MCP_UPSTREAM_URL", ""),
-		trustedProxyCIDRs:   splitCSV(os.Getenv("MCP_GATEWAY_TRUSTED_PROXIES")),
-		sessionTTLMin:       getEnvInt("SESSION_TTL_MIN", 10),
-		tokenCacheTTLMin:    getEnvInt("TOKEN_CACHE_TTL_MIN", 30),
-		tokenExpiresInSec:   getEnvInt("TOKEN_EXPIRES_IN_SEC", 7776000), // 90 days
+		publicURL:            publicURL,
+		bindAddr:             bindAddr,
+		port:                 port,
+		oauthProvider:        oauthProvider,
+		oauthScopes:          oauthScopes,
+		logLevel:             getEnv("LOG_LEVEL", "info"),
+		upstreamURL:          getEnv("GITHUB_MCP_UPSTREAM_URL", ""),
+		trustedProxyCIDRs:    splitCSV(os.Getenv("MCP_GATEWAY_TRUSTED_PROXIES")),
+		sessionTTLMin:        getEnvInt("SESSION_TTL_MIN", 10),
+		tokenCacheTTLMin:     getEnvInt("TOKEN_CACHE_TTL_MIN", 30),
+		tokenExpiresInSec:    getEnvInt("TOKEN_EXPIRES_IN_SEC", 7776000), // 90 days
 		tokenAudienceStrict:  getEnvBool("MCP_GATEWAY_TOKEN_AUDIENCE_STRICT", false),
 		githubRefreshEnabled: getEnvBool("MCP_GATEWAY_GITHUB_REFRESH_ENABLED", false),
 		tokenStorePath:       lookupEnv("MCP_GATEWAY_TOKEN_STORE_PATH", "/data/tokens.json"),

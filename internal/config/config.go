@@ -16,6 +16,9 @@ type RouteConfig struct {
 	Prefix   string `yaml:"prefix"           json:"prefix"`
 	Upstream string `yaml:"upstream"         json:"upstream"`
 	NoAuth   bool   `yaml:"no_auth,omitempty" json:"no_auth,omitempty"`
+	// UpstreamBearerTokenEnv names the env var whose value is injected as the
+	// upstream Authorization Bearer token. When empty, the client OAuth token is used.
+	UpstreamBearerTokenEnv string `yaml:"upstream_bearer_token_env,omitempty" json:"upstream_bearer_token_env,omitempty"`
 }
 
 // SetupConfig holds first-run wizard state.

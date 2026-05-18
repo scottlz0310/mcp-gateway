@@ -52,7 +52,7 @@ func TestProxyInjectsIdentityHeaders(t *testing.T) {
 	defer upstream.Close()
 
 	u, _ := url.Parse(upstream.URL)
-	h := NewHandler(u, &mockInvalidator{})
+	h := NewHandler(u, &mockInvalidator{}, "")
 
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, requestWithContext("alice", "tok"))
@@ -88,7 +88,7 @@ func TestProxyStripsClientSpoofableHeaders(t *testing.T) {
 	defer upstream.Close()
 
 	u, _ := url.Parse(upstream.URL)
-	h := NewHandler(u, &mockInvalidator{})
+	h := NewHandler(u, &mockInvalidator{}, "")
 
 	r := requestWithContext("bob", "tok")
 	r.Header.Set("X-Forwarded-For", "1.2.3.4")
@@ -134,7 +134,7 @@ func TestProxyNormalizesAuthorization(t *testing.T) {
 	defer upstream.Close()
 
 	u, _ := url.Parse(upstream.URL)
-	h := NewHandler(u, &mockInvalidator{})
+	h := NewHandler(u, &mockInvalidator{}, "")
 
 	r := requestWithContext("carol", "ctx-token")
 	r.Header.Set("Authorization", "Bearer client-supplied-token")
@@ -153,7 +153,7 @@ func TestProxyInvalidatesCacheOn401(t *testing.T) {
 
 	u, _ := url.Parse(upstream.URL)
 	inv := &mockInvalidator{}
-	h := NewHandler(u, inv)
+	h := NewHandler(u, inv, "")
 
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, requestWithContext("dave", "secret-token"))
@@ -172,7 +172,7 @@ func TestProxySanitizesHeaderInjectionCharacters(t *testing.T) {
 	defer upstream.Close()
 
 	u, _ := url.Parse(upstream.URL)
-	h := NewHandler(u, &mockInvalidator{})
+	h := NewHandler(u, &mockInvalidator{}, "")
 
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, requestWithContext("alice\r\nevil: injected", "tok"))
@@ -187,7 +187,7 @@ func TestProxyNilInvalidatorDoesNotPanicOn401(t *testing.T) {
 	defer upstream.Close()
 
 	u, _ := url.Parse(upstream.URL)
-	h := NewHandler(u, nil)
+	h := NewHandler(u, nil, "")
 
 	w := httptest.NewRecorder()
 	// Must not panic.
@@ -214,7 +214,7 @@ func TestMiddlewareToProxyInjectsIdentityHeaders(t *testing.T) {
 
 	u, _ := url.Parse(upstream.URL)
 	validator := &testValidator{login: "octocat"}
-	chain := middleware.Auth(validator)(NewHandler(u, &mockInvalidator{}))
+	chain := middleware.Auth(validator)(NewHandler(u, &mockInvalidator{}, ""))
 
 	r := httptest.NewRequest(http.MethodGet, "/mcp/test", nil)
 	r.Header.Set("Authorization", "Bearer real-github-token")
@@ -232,5 +232,64 @@ func TestMiddlewareToProxyInjectsIdentityHeaders(t *testing.T) {
 	}
 	if gotAuth != "Bearer real-github-token" {
 		t.Errorf("Authorization: got %q, want %q", gotAuth, "Bearer real-github-token")
+	}
+}
+
+func TestProxyUpstreamBearerEnvInjectsToken(t *testing.T) {
+	var gotAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	t.Setenv("UPSTREAM_TEST_TOKEN", "env-api-token")
+	u, _ := url.Parse(upstream.URL)
+	h := NewHandler(u, &mockInvalidator{}, "UPSTREAM_TEST_TOKEN")
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, requestWithContext("alice", "client-oauth-token"))
+
+	if gotAuth != "Bearer env-api-token" {
+		t.Errorf("Authorization: got %q, want %q", gotAuth, "Bearer env-api-token")
+	}
+}
+
+func TestProxyUpstreamBearerEnvStripsClientAuth(t *testing.T) {
+	var gotAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	t.Setenv("UPSTREAM_TEST_TOKEN2", "real-env-token")
+	u, _ := url.Parse(upstream.URL)
+	h := NewHandler(u, &mockInvalidator{}, "UPSTREAM_TEST_TOKEN2")
+
+	req := requestWithContext("bob", "client-token")
+	req.Header.Set("Authorization", "Bearer client-supplied-auth")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if gotAuth != "Bearer real-env-token" {
+		t.Errorf("Authorization: got %q, want %q (client token must not leak through)", gotAuth, "Bearer real-env-token")
+	}
+}
+
+func TestProxyUpstreamBearerEnvDoesNotInvalidateOn401(t *testing.T) {
+	upstream := upstreamWithStatus(http.StatusUnauthorized)
+	defer upstream.Close()
+
+	t.Setenv("UPSTREAM_TEST_TOKEN3", "some-api-token")
+	u, _ := url.Parse(upstream.URL)
+	inv := &mockInvalidator{}
+	h := NewHandler(u, inv, "UPSTREAM_TEST_TOKEN3")
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, requestWithContext("carol", "client-oauth-token"))
+
+	if len(inv.tokens) != 0 {
+		t.Errorf("expected no invalidated tokens for upstream-credential route, got %v", inv.tokens)
 	}
 }

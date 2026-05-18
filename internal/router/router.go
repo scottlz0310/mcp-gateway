@@ -15,11 +15,21 @@ type Route struct {
 	Name     string
 	Prefix   string
 	Upstream *url.URL
-	NoAuth   bool // true when auth=none is specified; skips OAuth middleware
+	NoAuth   bool // true when auth=none; skips OAuth middleware
+	// UpstreamBearerTokenEnv names an env var whose trimmed value is injected as
+	// the upstream Authorization Bearer token on every proxied request.
+	// When empty (default), the client OAuth context token is used instead.
+	// The env var must be set and non-blank at startup (fail-closed).
+	// Note: the fail-closed guarantee is startup-only. If the env var is
+	// cleared or rotated to empty after the gateway starts, the proxy logs a
+	// warning and forwards requests without an Authorization header rather
+	// than terminating. Operators must restart the gateway after rotating
+	// this credential to restore fail-closed protection.
+	UpstreamBearerTokenEnv string
 }
 
-// ParseEnv reads ROUTE_<NAME>=<prefix>|<upstream_url> environment variables
-// and returns routes sorted by prefix length (longest first) for correct matching.
+// ParseEnv reads ROUTE_<NAME>=<prefix>|<upstream_url>[|opt=val...] environment
+// variables and returns routes sorted by prefix length (longest first).
 func ParseEnv() ([]Route, error) {
 	return parseRoutes(os.Environ())
 }
@@ -40,18 +50,65 @@ func parseRoutes(env []string) ([]Route, error) {
 		if !found {
 			return nil, fmt.Errorf("%s: expected <prefix>|<upstream_url>, got %q", key, val)
 		}
-		upstreamRaw, authOpt, hasAuthOpt := strings.Cut(rest, "|")
+		// Split rest into [upstreamURL, option1, option2, ...].
+		parts := strings.Split(rest, "|")
+		upstreamRaw := parts[0]
+		optionParts := parts[1:]
+
+		// Parse key=value options; unknown or duplicate keys are fatal (fail-closed).
+		options := make(map[string]string, len(optionParts))
+		for _, opt := range optionParts {
+			k, v, hasVal := strings.Cut(opt, "=")
+			if !hasVal {
+				return nil, fmt.Errorf("%s: option %q must be in key=value format", key, opt)
+			}
+			if _, dup := options[k]; dup {
+				return nil, fmt.Errorf("%s: duplicate option key %q", key, k)
+			}
+			options[k] = v
+		}
+
+		// auth option: controls client → gateway authentication.
 		var noAuth bool
-		if hasAuthOpt {
-			switch authOpt {
-			case "auth=none":
+		if authVal, ok := options["auth"]; ok {
+			switch authVal {
+			case "none":
 				noAuth = true
-			case "auth=oauth":
+			case "oauth":
 				noAuth = false
 			default:
-				return nil, fmt.Errorf("%s: unknown auth option %q (use auth=none or auth=oauth)", key, authOpt)
+				return nil, fmt.Errorf("%s: unknown auth value %q (use auth=none or auth=oauth)", key, authVal)
 			}
+			delete(options, "auth")
 		}
+
+		// upstream_bearer_token_env: gateway → upstream Bearer token sourced from env.
+		// The named env var must be set and non-blank at startup; fail-closed otherwise.
+		// After startup, if the env var is cleared or emptied, the proxy logs a
+		// warning per request and forwards without Authorization (see proxy.NewHandler).
+		var upstreamBearerTokenEnv string
+		if envName, ok := options["upstream_bearer_token_env"]; ok {
+			envName = strings.TrimSpace(envName)
+			if envName == "" {
+				return nil, fmt.Errorf("%s: upstream_bearer_token_env value must not be empty", key)
+			}
+			if strings.TrimSpace(os.Getenv(envName)) == "" {
+				return nil, fmt.Errorf("%s: upstream_bearer_token_env=%s is not set or empty (fail-closed)", key, envName)
+			}
+			upstreamBearerTokenEnv = envName
+			delete(options, "upstream_bearer_token_env")
+		}
+
+		// Reject any unrecognised option keys.
+		if len(options) > 0 {
+			unknown := make([]string, 0, len(options))
+			for k := range options {
+				unknown = append(unknown, k)
+			}
+			sort.Strings(unknown)
+			return nil, fmt.Errorf("%s: unknown route option(s): %s", key, strings.Join(unknown, ", "))
+		}
+
 		// Strip trailing slash(es) only when it won't erase the root prefix.
 		if prefix != "/" {
 			prefix = strings.TrimRight(prefix, "/")
@@ -79,7 +136,13 @@ func parseRoutes(env []string) ([]Route, error) {
 			return nil, fmt.Errorf("%s: duplicate prefix %q", key, prefix)
 		}
 		seen[prefix] = struct{}{}
-		routes = append(routes, Route{Name: name, Prefix: prefix, Upstream: u, NoAuth: noAuth})
+		routes = append(routes, Route{
+			Name:                   name,
+			Prefix:                 prefix,
+			Upstream:               u,
+			NoAuth:                 noAuth,
+			UpstreamBearerTokenEnv: upstreamBearerTokenEnv,
+		})
 	}
 	// Longest prefix first for correct matching order.
 	sort.Slice(routes, func(i, j int) bool {
@@ -126,8 +189,24 @@ func ParseFromConfig(cfgRoutes []appconfig.RouteConfig) ([]Route, error) {
 		if _, dup := seen[prefix]; dup {
 			return nil, fmt.Errorf("route %q: duplicate prefix %q", name, prefix)
 		}
+		// upstream_bearer_token_env: apply same fail-closed validation as parseRoutes.
+		upstreamBearerTokenEnv := strings.TrimSpace(r.UpstreamBearerTokenEnv)
+		if r.UpstreamBearerTokenEnv != "" {
+			if upstreamBearerTokenEnv == "" {
+				return nil, fmt.Errorf("route %q: upstream_bearer_token_env value must not be empty", name)
+			}
+			if strings.TrimSpace(os.Getenv(upstreamBearerTokenEnv)) == "" {
+				return nil, fmt.Errorf("route %q: upstream_bearer_token_env=%s is not set or empty (fail-closed)", name, upstreamBearerTokenEnv)
+			}
+		}
 		seen[prefix] = struct{}{}
-		routes = append(routes, Route{Name: name, Prefix: prefix, Upstream: u, NoAuth: r.NoAuth})
+		routes = append(routes, Route{
+			Name:                   name,
+			Prefix:                 prefix,
+			Upstream:               u,
+			NoAuth:                 r.NoAuth,
+			UpstreamBearerTokenEnv: upstreamBearerTokenEnv,
+		})
 	}
 	sort.Slice(routes, func(i, j int) bool {
 		return len(routes[i].Prefix) > len(routes[j].Prefix)
