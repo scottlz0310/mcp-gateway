@@ -7,6 +7,8 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-05-18
+
 ### Added
 
 - Generic OAuth environment variables to decouple configuration from GitHub-specific naming ([#5](https://github.com/scottlz0310/mcp-gateway/issues/5)).
@@ -179,7 +181,8 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 - Removed GitHub-specific HTTP calls from `auth.Handler`; delegated to `provider.Provider`.
 - Renamed middleware context key `github_login` → `authenticated_user` (internal only; external compatibility maintained).
 
-[Unreleased]: https://github.com/scottlz0310/mcp-gateway/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/scottlz0310/mcp-gateway/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/scottlz0310/mcp-gateway/releases/tag/v0.1.0
