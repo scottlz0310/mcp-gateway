@@ -1,4 +1,4 @@
-package main
+﻿package main
 
 import (
 	"fmt"
@@ -555,5 +555,3 @@ func startInternalAPI(resolver internalapi.TokenResolver) {
 		}
 	}()
 }
-
-

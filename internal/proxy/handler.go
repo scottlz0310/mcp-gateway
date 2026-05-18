@@ -1,4 +1,4 @@
-package proxy
+﻿package proxy
 
 import (
 "crypto/sha256"
@@ -48,9 +48,15 @@ pr.Out.Header.Del("X-Forwarded-Proto")
 pr.Out.Header.Del("Authorization")
 if upstreamBearerTokenEnv != "" {
 // Upstream credential injection: read the named env var at request time.
-// The token value is never logged; only its absence triggers a warning.
-if token := os.Getenv(upstreamBearerTokenEnv); token != "" {
+// A warning is emitted when the env var is unset or empty so that
+// rotated or missing credentials are visible in logs.
+if token := strings.TrimSpace(os.Getenv(upstreamBearerTokenEnv)); token != "" {
 pr.Out.Header.Set("Authorization", "Bearer "+token)
+} else {
+slog.Warn("upstream credential env var is unset or empty; request forwarded without Authorization",
+"env_var", upstreamBearerTokenEnv,
+"path", pr.Out.URL.Path,
+)
 }
 } else if token := middleware.TokenFromContext(pr.In.Context()); token != "" {
 pr.Out.Header.Set("Authorization", "Bearer "+token)

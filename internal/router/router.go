@@ -1,4 +1,4 @@
-package router
+﻿package router
 
 import (
 "fmt"
@@ -182,13 +182,23 @@ return nil, fmt.Errorf("route %q: upstream URL scheme must be http or https (got
 if _, dup := seen[prefix]; dup {
 return nil, fmt.Errorf("route %q: duplicate prefix %q", name, prefix)
 }
+// upstream_bearer_token_env: apply same fail-closed validation as parseRoutes.
+upstreamBearerTokenEnv := strings.TrimSpace(r.UpstreamBearerTokenEnv)
+if r.UpstreamBearerTokenEnv != "" {
+if upstreamBearerTokenEnv == "" {
+return nil, fmt.Errorf("route %q: upstream_bearer_token_env value must not be empty", name)
+}
+if strings.TrimSpace(os.Getenv(upstreamBearerTokenEnv)) == "" {
+return nil, fmt.Errorf("route %q: upstream_bearer_token_env=%s is not set or empty (fail-closed)", name, upstreamBearerTokenEnv)
+}
+}
 seen[prefix] = struct{}{}
 routes = append(routes, Route{
 Name:                   name,
 Prefix:                 prefix,
 Upstream:               u,
 NoAuth:                 r.NoAuth,
-UpstreamBearerTokenEnv: r.UpstreamBearerTokenEnv,
+UpstreamBearerTokenEnv: upstreamBearerTokenEnv,
 })
 }
 sort.Slice(routes, func(i, j int) bool {

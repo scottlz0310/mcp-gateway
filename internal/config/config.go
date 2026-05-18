@@ -1,4 +1,4 @@
-package config
+﻿package config
 
 import (
 	"fmt"
@@ -157,4 +157,3 @@ func MigrateSecret(configPath string, cfg *AppConfig, km *KeyMaterial) (string, 
 		return "", fmt.Errorf("github_client_secret is required: set OAUTH_CLIENT_SECRET env var or provide an encrypted value in config.yaml")
 	}
 }
-
