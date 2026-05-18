@@ -310,3 +310,79 @@ func TestParseFromConfig_SortedLongestFirst(t *testing.T) {
 		t.Errorf("first route should be longest prefix, got %q", routes[0].Prefix)
 	}
 }
+
+// Tests for multi-option ROUTE_* parser (upstream_bearer_token_env, duplicates, unknowns)
+
+func TestParseRoutesUpstreamBearerTokenEnv(t *testing.T) {
+	t.Setenv("CLOUDFLARE_API_TOKEN", "test-cf-token")
+	env := []string{"ROUTE_CF=/mcp/cloudflare|https://mcp.cloudflare.com/mcp|upstream_bearer_token_env=CLOUDFLARE_API_TOKEN"}
+	routes, err := parseRoutes(env)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(routes))
+	}
+	if routes[0].UpstreamBearerTokenEnv != "CLOUDFLARE_API_TOKEN" {
+		t.Errorf("UpstreamBearerTokenEnv: got %q, want %q", routes[0].UpstreamBearerTokenEnv, "CLOUDFLARE_API_TOKEN")
+	}
+}
+
+func TestParseRoutesUpstreamBearerTokenEnvNotSet(t *testing.T) {
+	t.Setenv("CF_TOKEN_EMPTY", "")
+	env := []string{"ROUTE_CF=/mcp/cloudflare|https://mcp.cloudflare.com/mcp|upstream_bearer_token_env=CF_TOKEN_EMPTY"}
+	_, err := parseRoutes(env)
+	if err == nil {
+		t.Fatal("expected error for empty env var (fail-closed)")
+	}
+}
+
+func TestParseRoutesUpstreamBearerTokenEnvNameEmpty(t *testing.T) {
+	env := []string{"ROUTE_CF=/mcp/cloudflare|https://mcp.cloudflare.com/mcp|upstream_bearer_token_env="}
+	_, err := parseRoutes(env)
+	if err == nil {
+		t.Fatal("expected error for empty upstream_bearer_token_env value")
+	}
+}
+
+func TestParseRoutesUnknownOption(t *testing.T) {
+	env := []string{"ROUTE_BAD=/mcp/bad|http://bad:9000|foo=bar"}
+	_, err := parseRoutes(env)
+	if err == nil {
+		t.Fatal("expected error for unknown route option")
+	}
+}
+
+func TestParseRoutesDuplicateOptionKey(t *testing.T) {
+	env := []string{"ROUTE_BAD=/mcp/bad|http://bad:9000|auth=oauth|auth=none"}
+	_, err := parseRoutes(env)
+	if err == nil {
+		t.Fatal("expected error for duplicate option key")
+	}
+}
+
+func TestParseRoutesOptionWithoutEquals(t *testing.T) {
+	env := []string{"ROUTE_BAD=/mcp/bad|http://bad:9000|auth"}
+	_, err := parseRoutes(env)
+	if err == nil {
+		t.Fatal("expected error for option without key=value format")
+	}
+}
+
+func TestParseRoutesAuthOAuthWithUpstreamBearerTokenEnv(t *testing.T) {
+	t.Setenv("MY_API_TOKEN", "my-secret-token")
+	env := []string{"ROUTE_EXT=/mcp/ext|https://ext.example.com/mcp|auth=oauth|upstream_bearer_token_env=MY_API_TOKEN"}
+	routes, err := parseRoutes(env)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(routes))
+	}
+	if routes[0].NoAuth {
+		t.Error("expected NoAuth=false for auth=oauth")
+	}
+	if routes[0].UpstreamBearerTokenEnv != "MY_API_TOKEN" {
+		t.Errorf("UpstreamBearerTokenEnv: got %q, want %q", routes[0].UpstreamBearerTokenEnv, "MY_API_TOKEN")
+	}
+}

@@ -236,7 +236,7 @@ func main() {
 	// /.well-known/oauth-protected-resource{prefix}, and 401 responses point
 	// resource_metadata at that route-scoped URL.
 	for _, route := range routes {
-		h := proxy.NewHandler(route.Upstream, oauthHandler)
+		h := proxy.NewHandler(route.Upstream, oauthHandler, route.UpstreamBearerTokenEnv)
 		var wrapped http.Handler
 		if route.NoAuth {
 			wrapped = h
@@ -270,6 +270,7 @@ func main() {
 			"prefix", route.Prefix,
 			"upstream", route.Upstream.String(),
 			"auth_required", !route.NoAuth,
+"upstream_bearer_token_env", route.UpstreamBearerTokenEnv != "",
 		)
 	}
 
@@ -554,3 +555,5 @@ func startInternalAPI(resolver internalapi.TokenResolver) {
 		}
 	}()
 }
+
+
