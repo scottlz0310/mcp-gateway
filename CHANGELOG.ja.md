@@ -5,6 +5,39 @@
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-06-01
+
+### 修正
+
+- `parseRoutes` が値が空またはホワイトスペースのみの `ROUTE_*` 環境変数を
+  エラーではなくスキップするよう修正（[#86](https://github.com/scottlz0310/mcp-gateway/pull/86)）。
+  これにより docker-compose の条件付きパターン
+  `ROUTE_FOO=${TOKEN:+/prefix|upstream|opts}` が機能するようになる。
+  `TOKEN` が未設定の場合は空文字列に展開され、ルートは登録されずエラーにもならない。
+  Mcp-Docker v2.12.0 と対になる修正。
+
+### セキュリティ
+
+- `golang.org/x/crypto` を v0.52.0 へ更新（[#85](https://github.com/scottlz0310/mcp-gateway/pull/85)）。
+
+## [0.5.0] - 2026-05-18
+
+### 追加
+
+- `ROUTE_*` 環境変数に `upstream_bearer_token_env` オプションを追加
+  （[#82](https://github.com/scottlz0310/mcp-gateway/pull/82)）。
+  mcp-gateway が upstream MCP サーバへ送る `Authorization: Bearer` ヘッダを
+  環境変数から読み込んだ固定 API トークンに切り替えられるようになった。
+  - 設定時、upstream はクライアントの OAuth context token の代わりに env-var トークンを受け取る。
+  - Fail-closed: 起動時に指定した env var が未設定・空の場合はエラー終了。
+  - 401 分離: `upstream_bearer_token_env` 設定済みルートで upstream が 401 を返しても
+    クライアントの OAuth キャッシュを無効化しない。
+  - シークレット保護: Bearer token の値はログに書き込まれない。
+  - リクエスト毎再読み込み: `os.Getenv` を毎回実行するため、コンテナ再起動なしで
+    シークレットローテーション可能。
+
+## [0.4.0] - 2026-05-18
+
 ### 追加
 
 - 汎用 OAuth 環境変数を追加し、設定を GitHub 固有の命名から分離（[#5](https://github.com/scottlz0310/mcp-gateway/issues/5)）
@@ -34,7 +67,6 @@
 
 - OAuth 環境変数の読み込み優先順位を整理: `OAUTH_*` が旧 `GITHUB_MCP_*` より優先される。旧変数のみ設定されている場合は採用するが、process 内で 1 回だけ deprecation 警告を出力する。両方設定されている場合は canonical を採用し旧値は無視（警告あり）。旧名は将来のメジャーリリースで削除予定。YAML 設定キー（`auth.github_client_id`、`auth.github_client_secret`、`gateway.oauth_scopes`）は変更しない（[#5](https://github.com/scottlz0310/mcp-gateway/issues/5)）。
 - `auth.Handler.ValidateToken` がローテーション後の access token を subject と同時に返すよう拡張し、middleware が request context のトークンを差し替えられるようにした。内部 API のみで公開 surface には影響なし。
-
 ## [0.3.0] - 2026-05-07
 
 ### 追加
@@ -173,7 +205,10 @@
 - `auth.Handler` から GitHub 固有の HTTP 通信を排除し、`provider.Provider` への委譲に変更。
 - `middleware` のコンテキストキーを `github_login` → `authenticated_user` に rename（内部実装のみ、外部互換維持）。
 
-[Unreleased]: https://github.com/scottlz0310/mcp-gateway/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/scottlz0310/mcp-gateway/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/scottlz0310/mcp-gateway/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/scottlz0310/mcp-gateway/releases/tag/v0.1.0
