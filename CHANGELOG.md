@@ -7,6 +7,37 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-06-01
+
+### Fixed
+
+- `parseRoutes` now silently skips `ROUTE_*` environment variables whose value is
+  empty or whitespace-only ([#86](https://github.com/scottlz0310/mcp-gateway/pull/86)).
+  This enables docker-compose conditional patterns such as
+  `ROUTE_FOO=${TOKEN:+/prefix|upstream|opts}` — when `TOKEN` is absent the expansion
+  yields an empty string, and the route is simply not registered instead of causing a
+  startup error. Pairs with Mcp-Docker v2.12.0.
+
+### Security
+
+- Updated `golang.org/x/crypto` to v0.52.0 ([#85](https://github.com/scottlz0310/mcp-gateway/pull/85)).
+
+## [0.5.0] - 2026-05-18
+
+### Added
+
+- `upstream_bearer_token_env` option for `ROUTE_*` environment variables
+  ([#82](https://github.com/scottlz0310/mcp-gateway/pull/82)).
+  Allows the gateway to inject a fixed API token from an environment variable as the
+  `Authorization: Bearer` header sent to upstream MCP servers.
+  - When set, the upstream receives the env-var token instead of the client OAuth token.
+  - Fail-closed: gateway refuses to start if the named env var is unset or empty at startup.
+  - 401 isolation: upstream 401 on `upstream_bearer_token_env` routes does not invalidate
+    the client OAuth cache.
+  - Secret protection: the Bearer token value is never written to logs.
+  - Per-request re-read: `os.Getenv` is called per request, enabling secret rotation
+    without a container restart.
+
 ## [0.4.0] - 2026-05-18
 
 ### Added
@@ -181,7 +212,9 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 - Removed GitHub-specific HTTP calls from `auth.Handler`; delegated to `provider.Provider`.
 - Renamed middleware context key `github_login` → `authenticated_user` (internal only; external compatibility maintained).
 
-[Unreleased]: https://github.com/scottlz0310/mcp-gateway/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/scottlz0310/mcp-gateway/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/scottlz0310/mcp-gateway/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.1.0...v0.2.0
