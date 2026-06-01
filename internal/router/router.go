@@ -46,6 +46,11 @@ func parseRoutes(env []string) ([]Route, error) {
 		if name == "" {
 			return nil, fmt.Errorf("%s: route name must not be empty (use ROUTE_<NAME>=...)", key)
 		}
+		// Skip empty values: supports docker-compose conditional patterns like
+		// ${TOKEN:+route_definition} where an absent token yields an empty string.
+		if strings.TrimSpace(val) == "" {
+			continue
+		}
 		prefix, rest, found := strings.Cut(val, "|")
 		if !found {
 			return nil, fmt.Errorf("%s: expected <prefix>|<upstream_url>, got %q", key, val)

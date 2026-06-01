@@ -386,3 +386,24 @@ func TestParseRoutesAuthOAuthWithUpstreamBearerTokenEnv(t *testing.T) {
 		t.Errorf("UpstreamBearerTokenEnv: got %q, want %q", routes[0].UpstreamBearerTokenEnv, "MY_API_TOKEN")
 	}
 }
+
+func TestParseRoutesEmptyValueSkipped(t *testing.T) {
+	// Empty ROUTE_* values must be silently skipped.
+	// This supports docker-compose conditional patterns like
+	// ${TOKEN:+route_definition} where an absent token yields an empty string.
+	env := []string{
+		"ROUTE_CLOUDFLARE=",
+		"ROUTE_GITHUB=/mcp/github|http://github-mcp:8082",
+		"ROUTE_EMPTY=   ",
+	}
+	routes, err := parseRoutes(env)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(routes) != 1 {
+		t.Fatalf("expected 1 route (non-empty only), got %d", len(routes))
+	}
+	if routes[0].Name != "github" {
+		t.Errorf("expected route name %q, got %q", "github", routes[0].Name)
+	}
+}
