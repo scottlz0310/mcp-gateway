@@ -126,7 +126,7 @@ mcp-gateway is the successor to `github-oauth-proxy`
 | [thread-owl](https://github.com/scottlz0310/thread-owl) | Reviewer-side MCP server: webhook handling, review candidate judgment, and queue management. |
 | [mcp-resource-subscriber](https://github.com/scottlz0310/mcp-resource-subscriber) | Subscription client and agent workflow bridge for MCP resource notifications. |
 | [review-raven](https://github.com/scottlz0310/review-raven) | Reviewed-side MCP: fetch Copilot review threads, reply, resolve, and re-request review. |
-| [Mcp-Docker](https://github.com/scottlz0310/Mcp-Docker) | Container orchestration, gateway config generation, and CLI agent config automation. |
+| [mcp-docker](https://github.com/scottlz0310/Mcp-Docker) | Container orchestration, gateway config generation, and CLI agent config automation. |
 
 ## Documentation
 
