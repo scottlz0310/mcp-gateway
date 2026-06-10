@@ -7,6 +7,17 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-06-10
+
+### Fixed
+
+- `ci.yml`: main push で `:latest` が更新されないよう `type=raw,value=latest,enable={{is_default_branch}}` を削除（`:main` + `:sha-*` のみ発行）([#93](https://github.com/scottlz0310/mcp-gateway/issues/93))
+- `release.yml`: prerelease タグでも `:latest` が付く問題を修正。`type=raw,value=latest` を削除し `latest=auto`（デフォルト）に委ねることで非 prerelease semver タグにのみ `:latest` を付与 ([#93](https://github.com/scottlz0310/mcp-gateway/issues/93))
+
+### Documentation
+
+- `CONTRIBUTING.md` を新規作成し、prerelease タグは semver pre-release 形式（`-` 含む）必須である旨を明記 ([#94](https://github.com/scottlz0310/mcp-gateway/pull/94))
+
 ## [0.5.1] - 2026-06-01
 
 ### Fixed
@@ -212,7 +223,8 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 - Removed GitHub-specific HTTP calls from `auth.Handler`; delegated to `provider.Provider`.
 - Renamed middleware context key `github_login` → `authenticated_user` (internal only; external compatibility maintained).
 
-[Unreleased]: https://github.com/scottlz0310/mcp-gateway/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/scottlz0310/mcp-gateway/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/scottlz0310/mcp-gateway/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/scottlz0310/mcp-gateway/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.3.0...v0.4.0
