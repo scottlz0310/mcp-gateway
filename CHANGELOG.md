@@ -7,6 +7,11 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `ci.yml`: main push で `:latest` が更新されないよう `type=raw,value=latest,enable={{is_default_branch}}` を削除（`:main` + `:sha-*` のみ発行）([#93](https://github.com/scottlz0310/mcp-gateway/issues/93))
+- `release.yml`: prerelease タグでも `:latest` が付く問題を修正。`type=raw,value=latest` を削除し `latest=auto`（デフォルト）に委ねることで非 prerelease semver タグにのみ `:latest` を付与 ([#93](https://github.com/scottlz0310/mcp-gateway/issues/93))
+
 ## [0.5.1] - 2026-06-01
 
 ### Fixed
