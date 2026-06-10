@@ -7,6 +7,11 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Documentation
+
+- `docs/architecture.md`: define mcp-gateway's role as MCP reverse proxy / routing gateway / auth boundary within the review platform; document responsibility boundaries with thread-owl, mcp-resource-subscriber, review-raven, and Mcp-Docker ([#92](https://github.com/scottlz0310/mcp-gateway/issues/92))
+- `README.md`: expand Repository Stack table to the full five-repo review infrastructure ([#92](https://github.com/scottlz0310/mcp-gateway/issues/92))
+
 ## [0.5.2] - 2026-06-10
 
 ### Fixed

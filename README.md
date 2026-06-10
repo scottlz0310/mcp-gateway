@@ -123,14 +123,17 @@ mcp-gateway is the successor to `github-oauth-proxy`
 | Repo | Role |
 |------|------|
 | **mcp-gateway** | OAuth 2.0 auth, MCP authorization metadata, token persistence, and routing gateway. |
-| [mcp-docker](https://github.com/scottlz0310/Mcp-Docker) | Docker Compose orchestration for the full MCP stack. |
-| [copilot-review-mcp](https://github.com/scottlz0310/copilot-review-mcp) | Copilot code-review MCP server. |
+| [thread-owl](https://github.com/scottlz0310/thread-owl) | Reviewer-side MCP server: webhook handling, review candidate judgment, and queue management. |
+| [mcp-resource-subscriber](https://github.com/scottlz0310/mcp-resource-subscriber) | Subscription client and agent workflow bridge for MCP resource notifications. |
+| [review-raven](https://github.com/scottlz0310/review-raven) | Reviewed-side MCP: fetch Copilot review threads, reply, resolve, and re-request review. |
+| [Mcp-Docker](https://github.com/scottlz0310/Mcp-Docker) | Container orchestration, gateway config generation, and CLI agent config automation. |
 
 ## Documentation
 
 | Document | Purpose |
 |----------|---------|
 | [docs/README.md](docs/README.md) | Documentation index. |
+| [docs/architecture.md](docs/architecture.md) | Review platform overview, responsibility boundaries, and design principles. |
 | [docs/configuration.md](docs/configuration.md) | Full environment variable, `config.yaml`, route, token store, reverse proxy, and endpoint reference. |
 | [docs/operations.md](docs/operations.md) | Start/stop procedures, health checks, structured logs, troubleshooting, and migration notes. |
 | [docs/runbook-e2e-v0.1.0.md](docs/runbook-e2e-v0.1.0.md) | End-to-end acceptance runbook. |

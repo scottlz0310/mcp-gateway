@@ -7,6 +7,7 @@ mcp-gateway.
 
 | Document | Purpose |
 |----------|---------|
+| [Architecture](architecture.md) | Review platform overview, responsibility boundaries, route examples, and design principles. |
 | [Operations Guide](operations.md) | Start/stop procedures, health checks, structured logs, troubleshooting, and deployment migration notes. |
 | [Configuration Reference](configuration.md) | Environment variables, `config.yaml`, route syntax, token persistence, reverse proxy settings, and endpoint reference. |
 | [v0.1.0 E2E Runbook](runbook-e2e-v0.1.0.md) | End-to-end acceptance runbook for setup wizard, encryption, routing, token persistence, and device flow. |
