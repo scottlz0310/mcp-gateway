@@ -5,6 +5,17 @@
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-06-10
+
+### 修正
+
+- `ci.yml`: main push で `:latest` が更新されないよう `type=raw,value=latest,enable={{is_default_branch}}` を削除（`:main` + `:sha-*` のみ発行）（[#93](https://github.com/scottlz0310/mcp-gateway/issues/93)）
+- `release.yml`: prerelease タグでも `:latest` が付く問題を修正。`type=raw,value=latest` を削除し `latest=auto`（デフォルト）に委ねることで非 prerelease semver タグにのみ `:latest` を付与（[#93](https://github.com/scottlz0310/mcp-gateway/issues/93)）
+
+### ドキュメント
+
+- `CONTRIBUTING.md` を新規作成し、prerelease タグは semver pre-release 形式（`-` 含む）必須である旨を明記（[#94](https://github.com/scottlz0310/mcp-gateway/pull/94)）
+
 ## [0.5.1] - 2026-06-01
 
 ### 修正
@@ -205,7 +216,8 @@
 - `auth.Handler` から GitHub 固有の HTTP 通信を排除し、`provider.Provider` への委譲に変更。
 - `middleware` のコンテキストキーを `github_login` → `authenticated_user` に rename（内部実装のみ、外部互換維持）。
 
-[Unreleased]: https://github.com/scottlz0310/mcp-gateway/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/scottlz0310/mcp-gateway/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/scottlz0310/mcp-gateway/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/scottlz0310/mcp-gateway/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.3.0...v0.4.0
