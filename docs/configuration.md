@@ -142,7 +142,7 @@ Examples:
 
 ```bash
 ROUTE_GITHUB=/mcp/github|http://github-mcp:8082
-ROUTE_COPILOT_REVIEW=/mcp/copilot-review|http://copilot-review-mcp:8083
+ROUTE_REVIEW_RAVEN=/mcp/review-raven|http://review-raven:8083
 ```
 
 Rules:
@@ -322,7 +322,7 @@ metadata for the bearer token:
 
 The rotation is bound to whichever request happens to trigger it; in-flight
 upstream operations on the old token are not interrupted. The
-`copilot-review-mcp` watch goroutines (issue #70) still see only the token they
+`review-raven` watch goroutines (issue #70) still see only the token they
 captured at watch start — Phase A makes follow-on requests use the rotated
 token, but does not retroactively patch background workers.
 
@@ -344,7 +344,7 @@ token, but does not retroactively patch background workers.
 |---------|--------------|
 | Log entry `rotation_failed err=bad_refresh_token` | The OAuth App revoked the refresh token (manually or because the user reset it). Clients must re-authenticate. |
 | Rotation never fires for any token | The OAuth App is not configured for expiring tokens, or `expires_in` is missing from the token response. Verify the app setting in GitHub Developer Settings. |
-| Rotation fires but the upstream still sees 401 | The upstream cached the old bearer in its own state (e.g. a `copilot-review-mcp` watch goroutine). Phase A intentionally does not patch upstream state — this is the Phase B scope. |
+| Rotation fires but the upstream still sees 401 | The upstream cached the old bearer in its own state (e.g. a `review-raven` watch goroutine). Phase A intentionally does not patch upstream state — this is the Phase B scope. |
 
 ## OAuth Resource Parameters
 

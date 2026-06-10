@@ -5,6 +5,11 @@
 
 ## [Unreleased]
 
+### ドキュメント
+
+- `docs/architecture.md` 新規作成: review platform における mcp-gateway の役割（MCP reverse proxy / routing gateway / auth boundary）を明文化し、thread-owl / mcp-resource-subscriber / review-raven / Mcp-Docker との責務境界を記載（[#92](https://github.com/scottlz0310/mcp-gateway/issues/92)）
+- `README.md`: Repository Stack 表を5本立てレビュー基盤の全コンポーネントに拡張（[#92](https://github.com/scottlz0310/mcp-gateway/issues/92)）
+
 ## [0.5.2] - 2026-06-10
 
 ### 修正
