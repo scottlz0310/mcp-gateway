@@ -121,7 +121,7 @@ func NewHandler(cfg Config, p provider.Provider) (*Handler, error) {
 	cfg.BaseURL = strings.TrimRight(cfg.BaseURL, "/")
 	cfg.AllowedAudiences = normalizeAllowedAudiences(cfg.BaseURL, cfg.AllowedAudiences)
 	if len(cfg.AllowedRedirectHosts) == 0 {
-		cfg.AllowedRedirectHosts = []string{"localhost", "127.0.0.1", "vscode.dev"}
+		cfg.AllowedRedirectHosts = []string{"localhost", "127.0.0.1", "vscode.dev", "antigravity.google"}
 	}
 	if cfg.ExpiresIn <= 0 {
 		cfg.ExpiresIn = 90 * 24 * time.Hour

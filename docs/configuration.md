@@ -32,6 +32,7 @@ Configuration is resolved in this order:
 | Trusted proxies | `MCP_GATEWAY_TRUSTED_PROXIES` > `gateway.trusted_proxies` > none |
 | Token audience strict mode | `MCP_GATEWAY_TOKEN_AUDIENCE_STRICT` > `gateway.token_audience_strict` > `false` |
 | GitHub refresh token rotation | `MCP_GATEWAY_GITHUB_REFRESH_ENABLED` > `gateway.github_refresh_enabled` > `false` |
+| Allowed redirect hosts | `MCP_GATEWAY_ALLOWED_REDIRECT_HOSTS` > `gateway.allowed_redirect_hosts` > `localhost, 127.0.0.1, vscode.dev, antigravity.google` (default) |
 
 The OAuth client secret is intentionally special: once `config.yaml` contains a
 secret, `OAUTH_CLIENT_SECRET` / `GITHUB_MCP_CLIENT_SECRET` are ignored except
@@ -68,6 +69,7 @@ is logged that the legacy is ignored.
 | `MCP_GATEWAY_TOKEN_STORE_PATH` | `/data/tokens.json` | Persistent token store path. Set to an empty value to disable persistence. |
 | `MCP_GATEWAY_TOKEN_AUDIENCE_STRICT` | `false` | Reject legacy tokens that have no recorded audience metadata. Leave disabled during migration. |
 | `MCP_GATEWAY_GITHUB_REFRESH_ENABLED` | `false` | Enable transparent rotation of expiring GitHub OAuth user access tokens. Safe to leave on with non-expiring OAuth Apps; the rotation path stays dormant unless GitHub returns `refresh_token` + `expires_in`. See [GitHub OAuth Refresh Token Rotation](#github-oauth-refresh-token-rotation). |
+| `MCP_GATEWAY_ALLOWED_REDIRECT_HOSTS` | none | Comma-separated list of hostnames permitted in OAuth redirect_uris. When set, replaces the built-in default list entirely. |
 | `LOG_LEVEL` | `info` | JSON log level: `debug`, `info`, `warn`, or `error`. |
 | `SESSION_TTL_MIN` | `10` | OAuth authorization session lifetime in minutes. |
 | `TOKEN_CACHE_TTL_MIN` | `30` | In-memory validation cache TTL in minutes. Used when token persistence is disabled. |
@@ -95,6 +97,8 @@ gateway:
   trusted_proxies:
     - "127.0.0.1/32"
   token_audience_strict: false
+  allowed_redirect_hosts:
+    - "antigravity.google"
 
 routes:
   - name: github
@@ -128,6 +132,7 @@ setup:
 | `gateway.trusted_proxies` | CIDR list for trusted reverse proxy peers. |
 | `gateway.token_audience_strict` | Strict legacy-token audience enforcement. |
 | `gateway.github_refresh_enabled` | Enable transparent GitHub OAuth access token rotation; see [GitHub OAuth Refresh Token Rotation](#github-oauth-refresh-token-rotation). |
+| `gateway.allowed_redirect_hosts` | YAML list of hostnames permitted in OAuth redirect_uris. When set, replaces the built-in default list entirely. |
 | `routes[].name` | Route name. Must be non-empty. |
 | `routes[].prefix` | URL path prefix. Must start with `/`; trailing slashes are trimmed except for `/`. |
 | `routes[].upstream` | Absolute `http` or `https` upstream URL. |

@@ -13,6 +13,21 @@
 
 ---
 
+## Issue #100 — redirect_uri 許可ホストに設定経路がなく agy 認証が失敗する
+
+**目的**: agy（Antigravity）からの OAuth 認証が許可リスト制限で失敗する問題を解消するため、ホスト許可リストの設定手段（環境変数および config.yaml）を追加し、デフォルト許可ホストに `antigravity.google` を加える。
+
+### サブタスク
+
+- [x] `internal/config/config.go` の `GatewayConfig` に `AllowedRedirectHosts` フィールドを追加し、`config.yaml` から設定可能にする
+- [x] `cmd/server/main.go` にて環境変数 `MCP_GATEWAY_ALLOWED_REDIRECT_HOSTS`（カンマ区切り）の読み込み経路と、`config.yaml` からのフォールバックを設定
+- [x] `internal/auth/handler.go` のデフォルト `AllowedRedirectHosts` に `antigravity.google` を追加
+- [x] ユニットテストを追加し、デフォルト動作とカスタム設定時の挙動を検証
+- [x] `docs/configuration.md` に設定項目について追記
+- [x] `CHANGELOG.md` / `CHANGELOG.ja.md` の `Unreleased` セクションに変更内容を追記
+
+---
+
 ## アクティブフェーズ: Issue #70 — Auth Lifecycle Mismatch 対応
 
 ### 背景
