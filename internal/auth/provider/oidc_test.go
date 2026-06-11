@@ -36,7 +36,8 @@ func TestOIDCProvider_Success(t *testing.T) {
 		_ = r.ParseForm()
 
 		grantType := r.FormValue("grant_type")
-		if grantType == "authorization_code" {
+		switch grantType {
+		case "authorization_code":
 			if r.FormValue("code") != "valid-code" || r.FormValue("client_id") != "test-client" || r.FormValue("client_secret") != "test-secret" {
 				w.WriteHeader(http.StatusBadRequest)
 				_, _ = w.Write([]byte(`{"error":"invalid_grant"}`))
@@ -44,7 +45,7 @@ func TestOIDCProvider_Success(t *testing.T) {
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"access_token":"token-abc","refresh_token":"refresh-123","expires_in":3600,"scope":"openid profile"}`))
-		} else if grantType == "refresh_token" {
+		case "refresh_token":
 			if r.FormValue("refresh_token") != "refresh-123" {
 				w.WriteHeader(http.StatusBadRequest)
 				_, _ = w.Write([]byte(`{"error":"invalid_grant"}`))
@@ -52,7 +53,7 @@ func TestOIDCProvider_Success(t *testing.T) {
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"access_token":"token-def","refresh_token":"refresh-456","expires_in":3600}`))
-		} else {
+		default:
 			t.Errorf("unexpected grant_type: %s", grantType)
 		}
 	})
@@ -60,13 +61,14 @@ func TestOIDCProvider_Success(t *testing.T) {
 	// Mock UserInfo Endpoint
 	mux.HandleFunc("/userinfo", func(w http.ResponseWriter, r *http.Request) {
 		auth := r.Header.Get("Authorization")
-		if auth == "Bearer token-abc" {
+		switch auth {
+		case "Bearer token-abc":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"sub":"user-123","name":"Jane Doe","preferred_username":"janedoe","email":"jane@example.com"}`))
-		} else if auth == "Bearer token-def" {
+		case "Bearer token-def":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"sub":"user-123","preferred_username":"janedoe"}`))
-		} else {
+		default:
 			w.WriteHeader(http.StatusUnauthorized)
 		}
 	})

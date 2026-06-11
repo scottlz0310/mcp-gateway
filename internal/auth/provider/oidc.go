@@ -68,7 +68,7 @@ func NewOIDC(cfg OIDCConfig) (Provider, error) {
 			time.Sleep(500 * time.Millisecond)
 			continue
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		if resp.StatusCode != http.StatusOK {
 			snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
@@ -165,7 +165,7 @@ func (p *oidcProvider) postToken(ctx context.Context, form url.Values, op string
 	if err != nil {
 		return TokenResponse{}, &UpstreamError{Err: fmt.Errorf("OIDC token endpoint unreachable: %w", err)}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
@@ -221,7 +221,7 @@ func (p *oidcProvider) ValidateToken(ctx context.Context, token string) (Identit
 	if err != nil {
 		return Identity{}, &UpstreamError{Err: fmt.Errorf("OIDC userinfo endpoint unreachable: %w", err)}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		switch resp.StatusCode {
