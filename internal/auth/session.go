@@ -30,6 +30,7 @@ type Session struct {
 	ExpiresAt             time.Time
 	ProviderRefreshToken  string    // optional GitHub refresh token (expiring tokens)
 	ProviderAccessExpiry  time.Time // optional GitHub access-token expiry (zero = no expiry hint)
+	Subject               string    // resolved subject
 }
 
 type deviceStatus int
@@ -173,7 +174,7 @@ func (s *Store) HasSession(state string) bool {
 // providerRefreshToken and providerAccessExpiry are zero-valued when the
 // upstream provider did not advertise them (e.g. classic non-expiring GitHub
 // OAuth tokens).
-func (s *Store) CompleteCallback(state, accessToken, scope, providerRefreshToken string, providerAccessExpiry time.Time) (string, error) {
+func (s *Store) CompleteCallback(state, accessToken, scope, providerRefreshToken string, providerAccessExpiry time.Time, subject string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -192,6 +193,7 @@ func (s *Store) CompleteCallback(state, accessToken, scope, providerRefreshToken
 	sess.Scope = scope
 	sess.ProviderRefreshToken = providerRefreshToken
 	sess.ProviderAccessExpiry = providerAccessExpiry
+	sess.Subject = subject
 	s.codes[code] = sess
 	return code, nil
 }
@@ -205,6 +207,7 @@ type ExchangeCodeResult struct {
 	Audience             string
 	ProviderRefreshToken string
 	ProviderAccessExpiry time.Time
+	Subject              string    // resolved subject
 }
 
 // ExchangeCode validates PKCE and returns the access token, granted scope, and
@@ -234,6 +237,7 @@ func (s *Store) ExchangeCode(code, redirectURI, codeVerifier string) (ExchangeCo
 		Audience:             sess.Audience,
 		ProviderRefreshToken: sess.ProviderRefreshToken,
 		ProviderAccessExpiry: sess.ProviderAccessExpiry,
+		Subject:              sess.Subject,
 	}
 	delete(s.codes, code)
 	delete(s.sessions, sess.State)

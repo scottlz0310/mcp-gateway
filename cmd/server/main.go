@@ -239,6 +239,9 @@ func main() {
 	// inside the route loop below per MCP Authorization Spec 2025-06-18.
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource", oauthHandler.ProtectedResourceMetadata)
 	mux.HandleFunc("GET /.well-known/oauth-authorization-server", oauthHandler.Discovery)
+	mux.HandleFunc("GET /.well-known/openid-configuration", oauthHandler.OIDCDiscovery)
+	mux.HandleFunc("GET /jwks", oauthHandler.JWKS)
+	mux.HandleFunc("GET /userinfo", oauthHandler.UserInfo)
 	mux.HandleFunc("GET /authorize", oauthHandler.Authorize)
 	mux.HandleFunc("GET /callback", oauthHandler.Callback)
 	mux.HandleFunc("POST /token", oauthHandler.Token)

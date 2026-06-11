@@ -51,7 +51,7 @@ is logged that the legacy is ignored.
 | `OAUTH_CLIENT_SECRET` | none | OAuth client secret. Used to seed encrypted `config.yaml` when no config secret exists. Supersedes `GITHUB_MCP_CLIENT_SECRET`. |
 | `OAUTH_SCOPES` | `repo,user` | OAuth scopes requested by the gateway. Supersedes `GITHUB_MCP_OAUTH_SCOPES`. |
 | `OAUTH_ISSUER_URL` | none | OIDC issuer URL (required when `OAUTH_PROVIDER=oidc`). |
-| `OAUTH_AUDIENCE` | none | OIDC audience (optional when `OAUTH_PROVIDER=oidc`). |
+| `OAUTH_AUDIENCE` | none | OIDC audience (optional when `OAUTH_PROVIDER=oidc`). Reserved for future local JWT validation; currently unused/no-op in UserInfo validation. |
 | `GITHUB_MCP_CLIENT_ID` | none | **Deprecated** — use `OAUTH_CLIENT_ID`. Still accepted with a startup warning. |
 | `GITHUB_MCP_CLIENT_SECRET` | none | **Deprecated** — use `OAUTH_CLIENT_SECRET`. Still accepted with a startup warning. |
 | `GITHUB_MCP_OAUTH_SCOPES` | none | **Deprecated** — use `OAUTH_SCOPES`. Still accepted with a startup warning. |
@@ -119,7 +119,7 @@ setup:
 | `auth.github_client_id` | GitHub OAuth App client ID. |
 | `auth.github_client_secret` | GitHub OAuth App client secret. May be encrypted as `ENC[age:]...`. |
 | `auth.oidc_issuer_url` | OIDC issuer URL. |
-| `auth.oidc_audience` | OIDC audience. |
+| `auth.oidc_audience` | OIDC audience. Reserved for future local JWT validation; currently unused/no-op in UserInfo validation. |
 | `gateway.public_url` | Canonical public URL visible to OAuth and MCP clients. |
 | `gateway.bind_addr` | TCP listener address. |
 | `gateway.base_url` | Deprecated alias for `gateway.public_url`. |

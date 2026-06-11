@@ -18,7 +18,7 @@ type OIDCConfig struct {
 	RedirectURI  string
 	Scopes       string
 	IssuerURL    string
-	Audience     string // Optional: used if additional audience verification is needed
+	Audience     string // Optional: Reserved for future JWT local verification. Currently unused/no-op in UserInfo-based validation.
 
 	// HTTPClient overrides the default 15s-timeout client. For tests.
 	HTTPClient *http.Client

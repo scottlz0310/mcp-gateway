@@ -2,6 +2,12 @@ package auth
 
 import (
 	"context"
+	"crypto"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -88,6 +94,7 @@ type Handler struct {
 	provider         provider.Provider
 	store            *Store
 	allowedAudiences map[string]struct{}
+	privateKey       *rsa.PrivateKey
 	// rotationGroup serializes concurrent GitHub refresh-token rotations
 	// targeting the same access token. Without this, a burst of requests
 	// arriving inside the leeway window would race to call the provider's
@@ -143,11 +150,17 @@ func NewHandler(cfg Config, p provider.Provider) (*Handler, error) {
 		}
 	}
 
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return nil, fmt.Errorf("auth.NewHandler: generating signing key: %w", err)
+	}
+
 	return &Handler{
 		cfg:              cfg,
 		provider:         p,
 		store:            NewStore(cfg.SessionTTL, tokensTTL, ts, storeOpts...),
 		allowedAudiences: audienceSet(cfg.AllowedAudiences),
+		privateKey:       privateKey,
 	}, nil
 }
 
@@ -337,7 +350,15 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	internalCode, err := h.store.CompleteCallback(state, tokens.AccessToken, joinScopes(tokens.Scopes), tokens.RefreshToken, providerAccessExpiry(tokens.AccessTokenExpiresIn))
+	// Resolve provider identity early to get the Subject claim
+	id, err := h.provider.ValidateToken(r.Context(), tokens.AccessToken)
+	if err != nil {
+		slog.Error("OAuth identity resolution failed during callback", "provider", h.provider.Name(), "err", err)
+		http.Error(w, "identity resolution failed", http.StatusBadGateway)
+		return
+	}
+
+	internalCode, err := h.store.CompleteCallback(state, tokens.AccessToken, joinScopes(tokens.Scopes), tokens.RefreshToken, providerAccessExpiry(tokens.AccessTokenExpiresIn), id.Subject)
 	if err != nil {
 		slog.Error("session completion failed", "err", err)
 		http.Error(w, "invalid state", http.StatusBadRequest)
@@ -379,24 +400,24 @@ func (h *Handler) Token(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) tokenAuthCode(w http.ResponseWriter, r *http.Request) {
-	result, err := h.store.ExchangeCode(
-		r.FormValue("code"),
-		r.FormValue("redirect_uri"),
-		r.FormValue("code_verifier"),
-	)
-	if err != nil {
-		slog.Warn("token exchange rejected", "err", err)
-		oauthError(w, "invalid_grant", err.Error(), http.StatusBadRequest)
-		return
+		result, err := h.store.ExchangeCode(
+			r.FormValue("code"),
+			r.FormValue("redirect_uri"),
+			r.FormValue("code_verifier"),
+		)
+		if err != nil {
+			slog.Warn("token exchange rejected", "err", err)
+			oauthError(w, "invalid_grant", err.Error(), http.StatusBadRequest)
+			return
+		}
+		h.store.CacheToken(result.AccessToken, result.Subject, result.Audience)
+		h.persistProviderRefresh(result.AccessToken, result.ProviderRefreshToken, result.ProviderAccessExpiry)
+		refreshToken, rtErr := h.store.CreateRefreshToken(result.AccessToken, result.Audience, h.refreshTokenTTL())
+		if rtErr != nil {
+			slog.Warn("failed to create refresh token", "err", rtErr)
+		}
+		h.writeTokenResponse(w, result.AccessToken, result.Scope, refreshToken, result.Subject)
 	}
-	h.store.RegisterTokenAudience(result.AccessToken, result.Audience)
-	h.persistProviderRefresh(result.AccessToken, result.ProviderRefreshToken, result.ProviderAccessExpiry)
-	refreshToken, rtErr := h.store.CreateRefreshToken(result.AccessToken, result.Audience, h.refreshTokenTTL())
-	if rtErr != nil {
-		slog.Warn("failed to create refresh token", "err", rtErr)
-	}
-	h.writeTokenResponse(w, result.AccessToken, result.Scope, refreshToken)
-}
 
 // persistProviderRefresh writes upstream provider refresh metadata to the
 // token store only when rotation is enabled. The flag is the load-bearing
@@ -468,18 +489,25 @@ func (h *Handler) tokenDeviceGrant(w http.ResponseWriter, r *http.Request) {
 
 	switch result.Error {
 	case "":
+		// Resolve provider identity early to get the Subject claim
+		id, valErr := h.provider.ValidateToken(r.Context(), result.AccessToken)
+		if valErr != nil {
+			slog.Error("Identity resolution failed during device grant callback", "err", valErr)
+			oauthError(w, "server_error", "failed to resolve identity", http.StatusBadGateway)
+			return
+		}
 		completed, ok := h.store.AuthorizeAndConsumeDevice(deviceCode, result.AccessToken, result.Scope)
 		if !ok {
 			oauthError(w, "invalid_grant", "device code already consumed", http.StatusBadRequest)
 			return
 		}
-		h.store.RegisterTokenAudience(result.AccessToken, completed.Audience)
+		h.store.CacheToken(result.AccessToken, id.Subject, completed.Audience)
 		h.persistProviderRefresh(result.AccessToken, result.RefreshToken, providerAccessExpiry(result.AccessExpiresIn))
 		refreshToken, rtErr := h.store.CreateRefreshToken(result.AccessToken, completed.Audience, h.refreshTokenTTL())
 		if rtErr != nil {
 			slog.Warn("failed to create refresh token", "err", rtErr)
 		}
-		h.writeTokenResponse(w, result.AccessToken, result.Scope, refreshToken)
+		h.writeTokenResponse(w, result.AccessToken, result.Scope, refreshToken, id.Subject)
 	case "authorization_pending":
 		oauthError(w, "authorization_pending", "user has not yet authorized the device", http.StatusBadRequest)
 	case "slow_down":
@@ -496,7 +524,7 @@ func (h *Handler) tokenDeviceGrant(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *Handler) writeTokenResponse(w http.ResponseWriter, token, scope, refreshToken string) {
+func (h *Handler) writeTokenResponse(w http.ResponseWriter, token, scope, refreshToken string, subject string) {
 	expiresIn := max(int64(h.cfg.ExpiresIn/time.Second), 1)
 	resp := map[string]any{
 		"access_token": token,
@@ -508,6 +536,14 @@ func (h *Handler) writeTokenResponse(w http.ResponseWriter, token, scope, refres
 	}
 	if refreshToken != "" {
 		resp["refresh_token"] = refreshToken
+	}
+	if subject != "" && (strings.Contains(scope, "openid") || h.provider.Name() == "oidc") {
+		idToken, err := h.generateIDToken(h.cfg.BaseURL, subject, h.provider.ClientID())
+		if err == nil {
+			resp["id_token"] = idToken
+		} else {
+			slog.Error("failed to generate id_token", "err", err)
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
@@ -598,7 +634,7 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.writeTokenResponse(w, accessToken, "", newRT)
+	h.writeTokenResponse(w, accessToken, "", newRT, id.Subject)
 }
 
 // DeviceAuthorize handles POST /device_authorization (RFC 8628).
@@ -1299,4 +1335,138 @@ func jsonError(w http.ResponseWriter, code, description string, status int) {
 		"error":             code,
 		"error_description": description,
 	})
+}
+
+// OIDCDiscovery returns OpenID Connect Discovery metadata.
+func (h *Handler) OIDCDiscovery(w http.ResponseWriter, r *http.Request) {
+	doc := map[string]any{
+		"issuer":                                h.cfg.BaseURL,
+		"authorization_endpoint":                h.cfg.BaseURL + "/authorize",
+		"token_endpoint":                        h.cfg.BaseURL + "/token",
+		"userinfo_endpoint":                     h.cfg.BaseURL + "/userinfo",
+		"jwks_uri":                              h.cfg.BaseURL + "/jwks",
+		"response_types_supported":              []string{"code"},
+		"subject_types_supported":               []string{"public"},
+		"id_token_signing_alg_values_supported": []string{"RS256"},
+		"scopes_supported":                      []string{"openid", "profile", "email"},
+		"token_endpoint_auth_methods_supported": []string{"client_secret_post", "client_secret_basic", "none"},
+		"claims_supported":                      []string{"iss", "sub", "aud", "exp", "iat", "name", "preferred_username", "email"},
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(doc)
+}
+
+// JWKS returns the JSON Web Key Set containing the gateway's public key for signature verification.
+func (h *Handler) JWKS(w http.ResponseWriter, r *http.Request) {
+	if h.privateKey == nil {
+		http.Error(w, "JWKS not configured", http.StatusInternalServerError)
+		return
+	}
+	pub := h.privateKey.Public().(*rsa.PublicKey)
+	
+	// Encode N and E
+	nStr := base64.RawURLEncoding.EncodeToString(pub.N.Bytes())
+	
+	eBytes := make([]byte, 4)
+	binary.BigEndian.PutUint32(eBytes, uint32(pub.E))
+	start := 0
+	for start < len(eBytes) && eBytes[start] == 0 {
+		start++
+	}
+	eStr := base64.RawURLEncoding.EncodeToString(eBytes[start:])
+
+	jwk := map[string]any{
+		"kty": "RSA",
+		"use": "sig",
+		"alg": "RS256",
+		"kid": "gateway-key-1",
+		"n":   nStr,
+		"e":   eStr,
+	}
+
+	doc := map[string]any{
+		"keys": []any{jwk},
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(doc)
+}
+
+// UserInfo returns OIDC UserInfo claims for the authenticated user.
+func (h *Handler) UserInfo(w http.ResponseWriter, r *http.Request) {
+	authHeader := r.Header.Get("Authorization")
+	const prefix = "Bearer "
+	if len(authHeader) <= len(prefix) || !strings.HasPrefix(authHeader, prefix) {
+		w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token", error_description="Missing or malformed Bearer token"`)
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"invalid_token","error_description":"Missing or malformed Bearer token"}`))
+		return
+	}
+	token := authHeader[len(prefix):]
+
+	// Validate the gateway token. Audience is empty for userinfo endpoint.
+	subject, _, err := h.ValidateToken(r.Context(), token, "")
+	if err != nil {
+		w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer error="invalid_token", error_description=%q`, err.Error()))
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"error":"invalid_token","error_description":%q}`, err.Error())))
+		return
+	}
+
+	doc := map[string]any{
+		"sub":                subject,
+		"name":               subject,
+		"preferred_username": subject,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(doc)
+}
+
+// generateIDToken creates a signed RS256 JWT for the given subject.
+func (h *Handler) generateIDToken(issuer, subject, clientID string) (string, error) {
+	if h.privateKey == nil {
+		return "", fmt.Errorf("private key is nil")
+	}
+
+	// 1. Header
+	header := map[string]string{
+		"alg": "RS256",
+		"typ": "JWT",
+		"kid": "gateway-key-1",
+	}
+	headerBytes, err := json.Marshal(header)
+	if err != nil {
+		return "", err
+	}
+	headerB64 := base64.RawURLEncoding.EncodeToString(headerBytes)
+
+	// 2. Payload
+	now := time.Now().Unix()
+	payload := map[string]any{
+		"iss": issuer,
+		"sub": subject,
+		"aud": clientID,
+		"iat": now,
+		"exp": now + 3600, // 1 hour
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	payloadB64 := base64.RawURLEncoding.EncodeToString(payloadBytes)
+
+	// 3. Sign
+	signingInput := headerB64 + "." + payloadB64
+	hasher := sha256.New()
+	hasher.Write([]byte(signingInput))
+	hashed := hasher.Sum(nil)
+
+	sigBytes, err := rsa.SignPKCS1v15(rand.Reader, h.privateKey, crypto.SHA256, hashed)
+	if err != nil {
+		return "", fmt.Errorf("signing failed: %w", err)
+	}
+	sigB64 := base64.RawURLEncoding.EncodeToString(sigBytes)
+
+	return signingInput + "." + sigB64, nil
 }

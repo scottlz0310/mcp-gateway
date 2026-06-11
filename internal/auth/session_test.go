@@ -23,7 +23,7 @@ func TestStoreCompleteCallback(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	s.SaveSession("state2", "http://localhost/cb", "", "https://gw.example/mcp")
 
-	code, err := s.CompleteCallback("state2", "token123", "repo,user", "", time.Time{})
+	code, err := s.CompleteCallback("state2", "token123", "repo,user", "", time.Time{}, "user123")
 	if err != nil {
 		t.Fatalf("CompleteCallback: %v", err)
 	}
@@ -45,11 +45,14 @@ func TestStoreCompleteCallback(t *testing.T) {
 	if sess.Audience != "https://gw.example/mcp" {
 		t.Errorf("audience: got %q", sess.Audience)
 	}
+	if sess.Subject != "user123" {
+		t.Errorf("subject: got %q, want %q", sess.Subject, "user123")
+	}
 }
 
 func TestStoreCompleteCallbackUnknownState(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
-	_, err := s.CompleteCallback("nosuchstate", "tok", "", "", time.Time{})
+	_, err := s.CompleteCallback("nosuchstate", "tok", "", "", time.Time{}, "user123")
 	if err == nil {
 		t.Fatal("expected error for unknown state")
 	}
@@ -59,7 +62,7 @@ func TestStoreExchangeCodeOneTimeUse(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	s.SaveSession("state3", "http://localhost/cb", "", "https://gw.example/mcp")
 
-	code, _ := s.CompleteCallback("state3", "tok", "", "", time.Time{})
+	code, _ := s.CompleteCallback("state3", "tok", "", "", time.Time{}, "user123")
 	result, err := s.ExchangeCode(code, "http://localhost/cb", "")
 	if err != nil {
 		t.Fatalf("ExchangeCode: %v", err)
@@ -69,6 +72,9 @@ func TestStoreExchangeCodeOneTimeUse(t *testing.T) {
 	}
 	if result.Audience != "https://gw.example/mcp" {
 		t.Errorf("audience: got %q", result.Audience)
+	}
+	if result.Subject != "user123" {
+		t.Errorf("subject: got %q, want %q", result.Subject, "user123")
 	}
 
 	if _, err := s.ExchangeCode(code, "http://localhost/cb", ""); err == nil {
@@ -80,7 +86,7 @@ func TestStoreExchangeCodeRedirectURIMismatch(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	s.SaveSession("state4", "http://localhost/cb", "", "https://gw.example/mcp")
 
-	code, _ := s.CompleteCallback("state4", "tok", "", "", time.Time{})
+	code, _ := s.CompleteCallback("state4", "tok", "", "", time.Time{}, "user123")
 	if _, err := s.ExchangeCode(code, "http://localhost/other", ""); err == nil {
 		t.Fatal("expected error for redirect_uri mismatch")
 	}
@@ -93,7 +99,7 @@ func TestStorePKCE(t *testing.T) {
 
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	s.SaveSession("state5", "http://localhost/cb", challenge, "https://gw.example/mcp")
-	code, _ := s.CompleteCallback("state5", "tok", "", "", time.Time{})
+	code, _ := s.CompleteCallback("state5", "tok", "", "", time.Time{}, "user123")
 
 	// Wrong verifier: code is NOT consumed on PKCE failure so we can retry.
 	wrongVerifier := "wrongverifier_wrongverifier_wrongverifier_wrong"
@@ -112,7 +118,7 @@ func TestStorePKCEInvalidVerifierLength(t *testing.T) {
 
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	s.SaveSession("state6", "http://localhost/cb", challenge, "https://gw.example/mcp")
-	code, _ := s.CompleteCallback("state6", "tok", "", "", time.Time{})
+	code, _ := s.CompleteCallback("state6", "tok", "", "", time.Time{}, "user123")
 
 	if _, err := s.ExchangeCode(code, "http://localhost/cb", "tooshort"); err == nil {
 		t.Fatal("expected error for verifier that is too short")
