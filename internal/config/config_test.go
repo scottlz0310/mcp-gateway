@@ -30,7 +30,7 @@ func TestMigrateSecret_EncryptedValue(t *testing.T) {
 		t.Fatalf("LoadConfig: %v", err)
 	}
 
-	got, err := MigrateSecret(configPath, cfg2, km)
+	got, err := MigrateSecret(configPath, cfg2, km, "github")
 	if err != nil {
 		t.Fatalf("MigrateSecret: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestMigrateSecret_PlaintextRewritten(t *testing.T) {
 		t.Fatalf("SaveConfig: %v", err)
 	}
 
-	got, err := MigrateSecret(configPath, cfg, km)
+	got, err := MigrateSecret(configPath, cfg, km, "github")
 	if err != nil {
 		t.Fatalf("MigrateSecret: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestMigrateSecret_FromEnvVar(t *testing.T) {
 		t.Fatalf("SaveConfig: %v", err)
 	}
 
-	got, err := MigrateSecret(configPath, cfg, km)
+	got, err := MigrateSecret(configPath, cfg, km, "github")
 	if err != nil {
 		t.Fatalf("MigrateSecret: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestMigrateSecret_FromLegacyEnvVar(t *testing.T) {
 		t.Fatalf("SaveConfig: %v", err)
 	}
 
-	got, err := MigrateSecret(configPath, cfg, km)
+	got, err := MigrateSecret(configPath, cfg, km, "github")
 	if err != nil {
 		t.Fatalf("MigrateSecret: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestMigrateSecret_NewWinsOverLegacy(t *testing.T) {
 		t.Fatalf("SaveConfig: %v", err)
 	}
 
-	got, err := MigrateSecret(configPath, cfg, km)
+	got, err := MigrateSecret(configPath, cfg, km, "github")
 	if err != nil {
 		t.Fatalf("MigrateSecret: %v", err)
 	}
@@ -186,7 +186,7 @@ func TestMigrateSecret_NoSecretAnywhere(t *testing.T) {
 	t.Setenv("GITHUB_MCP_CLIENT_SECRET", "")
 
 	cfg := &AppConfig{}
-	_, err := MigrateSecret(configPath, cfg, km)
+	_, err := MigrateSecret(configPath, cfg, km, "github")
 	if err == nil {
 		t.Fatal("expected error when no secret is available")
 	}
@@ -208,7 +208,7 @@ func TestMigrateSecret_NoSecretInLogs(t *testing.T) {
 	resetLegacyEnvWarnedForTest()
 
 	cfg := &AppConfig{}
-	enc, err := MigrateSecret(configPath, cfg, km)
+	enc, err := MigrateSecret(configPath, cfg, km, "github")
 	if err != nil {
 		t.Fatalf("MigrateSecret: %v", err)
 	}
@@ -264,5 +264,37 @@ gateway:
 	}
 	if cfg.Gateway.TrustedProxies[0] != "127.0.0.1/32" || cfg.Gateway.TrustedProxies[1] != "10.0.0.0/8" {
 		t.Errorf("trusted_proxies: got %#v", cfg.Gateway.TrustedProxies)
+	}
+}
+
+// TestMigrateSecret_GenericOIDC verifies that when provider is "oidc",
+// client_secret is used and migrated instead of github_client_secret.
+func TestMigrateSecret_GenericOIDC(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+
+	km := testKeyMaterial(t)
+	plaintext := "my-generic-oidc-client-secret"
+
+	cfg := &AppConfig{Auth: AuthConfig{ClientSecret: plaintext}}
+	if err := SaveConfig(configPath, cfg); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+
+	got, err := MigrateSecret(configPath, cfg, km, "oidc")
+	if err != nil {
+		t.Fatalf("MigrateSecret (oidc): %v", err)
+	}
+	if got != plaintext {
+		t.Errorf("got %q, want %q", got, plaintext)
+	}
+
+	// Config file should now hold an encrypted value for client_secret.
+	reloaded, _ := LoadConfig(configPath)
+	if !IsEncrypted(reloaded.Auth.ClientSecret) {
+		t.Error("config file should have been rewritten with encrypted value")
+	}
+	if strings.Contains(reloaded.Auth.ClientSecret, plaintext) {
+		t.Error("plaintext must not remain in config file after migration")
 	}
 }

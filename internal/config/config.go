@@ -38,6 +38,12 @@ type AppConfig struct {
 type AuthConfig struct {
 	GitHubClientID     string `yaml:"github_client_id,omitempty"`
 	GitHubClientSecret string `yaml:"github_client_secret,omitempty"`
+
+	Provider      string `yaml:"provider,omitempty"`
+	ClientID      string `yaml:"client_id,omitempty"`
+	ClientSecret  string `yaml:"client_secret,omitempty"`
+	OIDCIssuerURL string `yaml:"oidc_issuer_url,omitempty"`
+	OIDCAudience  string `yaml:"oidc_audience,omitempty"`
 }
 
 // GatewayConfig holds gateway-level settings that can be persisted in config.yaml.
@@ -116,28 +122,45 @@ func SaveConfig(path string, cfg *AppConfig) error {
 //
 // When both OAUTH_CLIENT_SECRET and the legacy GITHUB_MCP_CLIENT_SECRET are set,
 // the new variable wins and a deprecation warning is logged for the legacy one.
-func MigrateSecret(configPath string, cfg *AppConfig, km *KeyMaterial) (string, error) {
-	secret := cfg.Auth.GitHubClientSecret
+func MigrateSecret(configPath string, cfg *AppConfig, km *KeyMaterial, providerKind string) (string, error) {
+	// Determine which secret to migrate based on providerKind and presence of fields
+	useGeneric := providerKind == "oidc"
+	if useGeneric && strings.TrimSpace(cfg.Auth.ClientSecret) == "" && strings.TrimSpace(cfg.Auth.GitHubClientSecret) != "" {
+		useGeneric = false
+	} else if !useGeneric && strings.TrimSpace(cfg.Auth.GitHubClientSecret) == "" && strings.TrimSpace(cfg.Auth.ClientSecret) != "" {
+		useGeneric = true
+	}
+
+	var secret *string
+	var fieldName string
+	if useGeneric {
+		secret = &cfg.Auth.ClientSecret
+		fieldName = "client_secret"
+	} else {
+		secret = &cfg.Auth.GitHubClientSecret
+		fieldName = "github_client_secret"
+	}
 
 	switch {
-	case IsEncrypted(secret):
-		plaintext, err := DecryptField(km, secret)
+	case IsEncrypted(*secret):
+		plaintext, err := DecryptField(km, *secret)
 		if err != nil {
-			return "", fmt.Errorf("decrypting github_client_secret: %w", err)
+			return "", fmt.Errorf("decrypting %s: %w", fieldName, err)
 		}
 		return plaintext, nil
 
-	case strings.TrimSpace(secret) != "":
-		slog.Info("plaintext github_client_secret found in config; encrypting and rewriting")
-		encrypted, err := EncryptField(km, secret)
+	case strings.TrimSpace(*secret) != "":
+		plain := *secret
+		slog.Info(fmt.Sprintf("plaintext %s found in config; encrypting and rewriting", fieldName))
+		encrypted, err := EncryptField(km, plain)
 		if err != nil {
-			return "", fmt.Errorf("encrypting github_client_secret from config: %w", err)
+			return "", fmt.Errorf("encrypting %s from config: %w", fieldName, err)
 		}
-		cfg.Auth.GitHubClientSecret = encrypted
+		*secret = encrypted
 		if err := SaveConfig(configPath, cfg); err != nil {
-			return "", fmt.Errorf("saving config after encrypting github_client_secret: %w", err)
+			return "", fmt.Errorf("saving config after encrypting %s: %w", fieldName, err)
 		}
-		return secret, nil
+		return plain, nil
 
 	default:
 		envSecret, envSource, ok := resolveOAuthEnvSourced("OAUTH_CLIENT_SECRET", "GITHUB_MCP_CLIENT_SECRET")
@@ -148,12 +171,12 @@ func MigrateSecret(configPath string, cfg *AppConfig, km *KeyMaterial) (string, 
 			if err != nil {
 				return "", fmt.Errorf("encrypting %s from env: %w", envSource, err)
 			}
-			cfg.Auth.GitHubClientSecret = encrypted
+			*secret = encrypted
 			if err := SaveConfig(configPath, cfg); err != nil {
 				return "", fmt.Errorf("saving config after encrypting %s: %w", envSource, err)
 			}
 			return envSecret, nil
 		}
-		return "", fmt.Errorf("github_client_secret is required: set OAUTH_CLIENT_SECRET env var or provide an encrypted value in config.yaml")
+		return "", fmt.Errorf("%s is required: set OAUTH_CLIENT_SECRET env var or provide an encrypted value in config.yaml", fieldName)
 	}
 }

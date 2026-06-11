@@ -15,8 +15,8 @@ import (
 // flag is true, missing effective config still triggers the wizard to
 // guard against inconsistent state.
 func IsSetupRequired(appCfg *appconfig.AppConfig, envClientID, envSecret string, envRoutes []router.Route) bool {
-	hasClientID := strings.TrimSpace(envClientID) != "" || strings.TrimSpace(appCfg.Auth.GitHubClientID) != ""
-	hasSecret := strings.TrimSpace(appCfg.Auth.GitHubClientSecret) != "" || strings.TrimSpace(envSecret) != ""
+	hasClientID := strings.TrimSpace(envClientID) != "" || strings.TrimSpace(appCfg.Auth.GitHubClientID) != "" || strings.TrimSpace(appCfg.Auth.ClientID) != ""
+	hasSecret := strings.TrimSpace(appCfg.Auth.GitHubClientSecret) != "" || strings.TrimSpace(appCfg.Auth.ClientSecret) != "" || strings.TrimSpace(envSecret) != ""
 	hasRoutes := len(envRoutes) > 0 || len(appCfg.Routes) > 0
 	return !hasClientID || !hasSecret || !hasRoutes
 }
