@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"crypto"
+	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/base64"
@@ -2184,3 +2185,41 @@ func TestOIDCProviderEndpoints(t *testing.T) {
 		t.Errorf("signature verification failed: %v", err)
 	}
 }
+
+func TestNewHandler_OIDCPrivateKey(t *testing.T) {
+	// Generate a key to pass into Config
+	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generating key: %v", err)
+	}
+
+	cfg := Config{
+		BaseURL:        "http://localhost:8080",
+		OIDCPrivateKey: privKey,
+	}
+
+	p := provider.NewGitHub(provider.GitHubConfig{
+		ClientID: "test-client-id",
+	})
+	h, err := NewHandler(cfg, p)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	if h.privateKey != privKey {
+		t.Error("expected Handler to use the provided OIDCPrivateKey")
+	}
+
+	// Now check if it works without providing a key (should generate one)
+	cfgNoKey := Config{
+		BaseURL: "http://localhost:8080",
+	}
+	hNoKey, err := NewHandler(cfgNoKey, p)
+	if err != nil {
+		t.Fatalf("NewHandler (no key): %v", err)
+	}
+	if hNoKey.privateKey == nil {
+		t.Error("expected Handler to generate a random key when OIDCPrivateKey is nil")
+	}
+}
+

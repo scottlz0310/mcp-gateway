@@ -1,6 +1,10 @@
 package config
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"log/slog"
 	"os"
@@ -39,11 +43,12 @@ type AuthConfig struct {
 	GitHubClientID     string `yaml:"github_client_id,omitempty"`
 	GitHubClientSecret string `yaml:"github_client_secret,omitempty"`
 
-	Provider      string `yaml:"provider,omitempty"`
-	ClientID      string `yaml:"client_id,omitempty"`
-	ClientSecret  string `yaml:"client_secret,omitempty"`
-	OIDCIssuerURL string `yaml:"oidc_issuer_url,omitempty"`
-	OIDCAudience  string `yaml:"oidc_audience,omitempty"`
+	Provider       string `yaml:"provider,omitempty"`
+	ClientID       string `yaml:"client_id,omitempty"`
+	ClientSecret   string `yaml:"client_secret,omitempty"`
+	OIDCIssuerURL  string `yaml:"oidc_issuer_url,omitempty"`
+	OIDCAudience   string `yaml:"oidc_audience,omitempty"`
+	OIDCPrivateKey string `yaml:"oidc_private_key,omitempty"`
 }
 
 // GatewayConfig holds gateway-level settings that can be persisted in config.yaml.
@@ -180,3 +185,55 @@ func MigrateSecret(configPath string, cfg *AppConfig, km *KeyMaterial, providerK
 		return "", fmt.Errorf("%s is required: set OAUTH_CLIENT_SECRET env var or provide an encrypted value in config.yaml", fieldName)
 	}
 }
+
+// MigrateOIDCPrivateKey resolves the OIDC RSA private key, following this priority:
+//
+//  1. cfg.Auth.OIDCPrivateKey is "ENC[age:]..." → decrypt, parse PEM, and return *rsa.PrivateKey
+//  2. field empty/absent → generate a new RSA 2048-bit key, PEM encode, encrypt, save to config, and return
+func MigrateOIDCPrivateKey(configPath string, cfg *AppConfig, km *KeyMaterial) (*rsa.PrivateKey, error) {
+	keyField := &cfg.Auth.OIDCPrivateKey
+	if IsEncrypted(*keyField) {
+		plaintext, err := DecryptField(km, *keyField)
+		if err != nil {
+			return nil, fmt.Errorf("decrypting oidc_private_key: %w", err)
+		}
+		block, _ := pem.Decode([]byte(plaintext))
+		if block == nil || block.Type != "RSA PRIVATE KEY" {
+			return nil, fmt.Errorf("invalid PEM block type for RSA private key")
+		}
+		privKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("parsing RSA private key: %w", err)
+		}
+		return privKey, nil
+	}
+
+	// Generate a new RSA 2048-bit key
+	slog.Info("no OIDC private key found; generating a new RSA key")
+	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return nil, fmt.Errorf("generating RSA private key: %w", err)
+	}
+
+	privBytes := x509.MarshalPKCS1PrivateKey(privKey)
+	pemBlock := &pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: privBytes,
+	}
+	pemBytes := pem.EncodeToMemory(pemBlock)
+
+	encrypted, err := EncryptField(km, string(pemBytes))
+	if err != nil {
+		return nil, fmt.Errorf("encrypting generated RSA private key: %w", err)
+	}
+
+	*keyField = encrypted
+	if err := SaveConfig(configPath, cfg); err != nil {
+		slog.Warn("failed to save generated OIDC private key to config; using in-memory key (will not persist across restarts)", "err", err)
+	} else {
+		slog.Info("saved generated OIDC private key to config")
+	}
+
+	return privKey, nil
+}
+

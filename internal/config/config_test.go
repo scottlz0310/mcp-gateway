@@ -298,3 +298,46 @@ func TestMigrateSecret_GenericOIDC(t *testing.T) {
 		t.Error("plaintext must not remain in config file after migration")
 	}
 }
+
+// TestMigrateOIDCPrivateKey verifies that OIDCPrivateKey is generated, encrypted,
+// saved to config, and decrypted correctly on subsequent loads.
+func TestMigrateOIDCPrivateKey(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	km := testKeyMaterial(t)
+
+	cfg := &AppConfig{}
+	if err := SaveConfig(configPath, cfg); err != nil {
+		t.Fatalf("SaveConfig: %v", err)
+	}
+
+	// 1. Initial generation
+	privKey1, err := MigrateOIDCPrivateKey(configPath, cfg, km)
+	if err != nil {
+		t.Fatalf("MigrateOIDCPrivateKey (generate): %v", err)
+	}
+	if privKey1 == nil {
+		t.Fatal("expected non-nil private key")
+	}
+
+	// Config should now hold the encrypted value
+	reloaded, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if !IsEncrypted(reloaded.Auth.OIDCPrivateKey) {
+		t.Error("config should hold encrypted OIDC private key")
+	}
+
+	// 2. Load existing key from config
+	privKey2, err := MigrateOIDCPrivateKey(configPath, reloaded, km)
+	if err != nil {
+		t.Fatalf("MigrateOIDCPrivateKey (load): %v", err)
+	}
+
+	// Keys should be identical (same N and D for RSA key)
+	if privKey1.N.Cmp(privKey2.N) != 0 || privKey1.D.Cmp(privKey2.D) != 0 {
+		t.Error("expected loaded private key to match generated private key")
+	}
+}
+

@@ -79,6 +79,9 @@ type Config struct {
 	// GitHubRefreshLeeway is the lead time before access-token expiry at which
 	// rotation is attempted on the next ValidateToken call. Defaults to 5 min.
 	GitHubRefreshLeeway time.Duration
+	// OIDCPrivateKey is the RSA private key used to sign ID tokens.
+	// When nil, a transient in-memory key is generated and a warning is logged.
+	OIDCPrivateKey *rsa.PrivateKey
 }
 
 // defaultGitHubRefreshLeeway is the head-start used when GitHubRefreshLeeway
@@ -150,9 +153,14 @@ func NewHandler(cfg Config, p provider.Provider) (*Handler, error) {
 		}
 	}
 
-	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		return nil, fmt.Errorf("auth.NewHandler: generating signing key: %w", err)
+	privateKey := cfg.OIDCPrivateKey
+	if privateKey == nil {
+		slog.Warn("OIDC signing key is not persisted; generating a random key. Sessions will become invalid across restarts.")
+		var err error
+		privateKey, err = rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			return nil, fmt.Errorf("auth.NewHandler: generating signing key: %w", err)
+		}
 	}
 
 	return &Handler{
@@ -400,24 +408,24 @@ func (h *Handler) Token(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) tokenAuthCode(w http.ResponseWriter, r *http.Request) {
-		result, err := h.store.ExchangeCode(
-			r.FormValue("code"),
-			r.FormValue("redirect_uri"),
-			r.FormValue("code_verifier"),
-		)
-		if err != nil {
-			slog.Warn("token exchange rejected", "err", err)
-			oauthError(w, "invalid_grant", err.Error(), http.StatusBadRequest)
-			return
-		}
-		h.store.CacheToken(result.AccessToken, result.Subject, result.Audience)
-		h.persistProviderRefresh(result.AccessToken, result.ProviderRefreshToken, result.ProviderAccessExpiry)
-		refreshToken, rtErr := h.store.CreateRefreshToken(result.AccessToken, result.Audience, h.refreshTokenTTL())
-		if rtErr != nil {
-			slog.Warn("failed to create refresh token", "err", rtErr)
-		}
-		h.writeTokenResponse(w, result.AccessToken, result.Scope, refreshToken, result.Subject)
+	result, err := h.store.ExchangeCode(
+		r.FormValue("code"),
+		r.FormValue("redirect_uri"),
+		r.FormValue("code_verifier"),
+	)
+	if err != nil {
+		slog.Warn("token exchange rejected", "err", err)
+		oauthError(w, "invalid_grant", err.Error(), http.StatusBadRequest)
+		return
 	}
+	h.store.CacheToken(result.AccessToken, result.Subject, result.Audience)
+	h.persistProviderRefresh(result.AccessToken, result.ProviderRefreshToken, result.ProviderAccessExpiry)
+	refreshToken, rtErr := h.store.CreateRefreshToken(result.AccessToken, result.Audience, h.refreshTokenTTL())
+	if rtErr != nil {
+		slog.Warn("failed to create refresh token", "err", rtErr)
+	}
+	h.writeTokenResponse(w, result.AccessToken, result.Scope, refreshToken, result.Subject)
+}
 
 // persistProviderRefresh writes upstream provider refresh metadata to the
 // token store only when rotation is enabled. The flag is the load-bearing

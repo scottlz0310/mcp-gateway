@@ -214,6 +214,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	oidcPrivateKey, err := appconfig.MigrateOIDCPrivateKey(cfg.configPath, appCfg, km)
+	if err != nil {
+		slog.Error("OIDC private key migration failed", "err", err)
+		os.Exit(1)
+	}
+
 	oauthHandler, err := auth.NewHandler(auth.Config{
 		BaseURL:              cfg.publicURL,
 		SessionTTL:           time.Duration(cfg.sessionTTLMin) * time.Minute,
@@ -223,6 +229,7 @@ func main() {
 		AllowedAudiences:     routeAudiences(strings.TrimRight(cfg.publicURL, "/"), routes),
 		TokenAudienceStrict:  cfg.tokenAudienceStrict,
 		GitHubRefreshEnabled: cfg.githubRefreshEnabled,
+		OIDCPrivateKey:       oidcPrivateKey,
 	}, prov)
 	if err != nil {
 		slog.Error("auth handler init failed", "err", err)
