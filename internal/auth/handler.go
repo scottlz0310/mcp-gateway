@@ -1409,7 +1409,7 @@ func (h *Handler) UserInfo(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer error="invalid_token", error_description=%q`, err.Error()))
 		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte(fmt.Sprintf(`{"error":"invalid_token","error_description":%q}`, err.Error())))
+		_, _ = fmt.Fprintf(w, `{"error":"invalid_token","error_description":%q}`, err.Error())
 		return
 	}
 
