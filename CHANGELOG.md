@@ -7,6 +7,18 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Add OIDC provider support ([#98](https://github.com/scottlz0310/mcp-gateway/pull/98))
+  - Support mcp-gateway as an OIDC Identity Provider to support agy CLI
+  - Support OIDC RSA private key persistence
+
+### Fixed
+
+- Fix redirect_uri host verification configuration ([#100](https://github.com/scottlz0310/mcp-gateway/issues/100))
+  - Add `MCP_GATEWAY_ALLOWED_REDIRECT_HOSTS` environment variable (comma-separated) and `gateway.allowed_redirect_hosts` (config.yaml) configuration path to allow registering external redirect hostnames
+  - Add `antigravity.google` to the default allowed redirect hosts list
+
 ### Documentation
 
 - `docs/architecture.md`: define mcp-gateway's role as MCP reverse proxy / routing gateway / auth boundary within the review platform; document responsibility boundaries with thread-owl, mcp-resource-subscriber, review-raven, and Mcp-Docker ([#92](https://github.com/scottlz0310/mcp-gateway/issues/92))

@@ -217,6 +217,57 @@ func TestAuthorizeDisallowedRedirectHost(t *testing.T) {
 	}
 }
 
+func TestAuthorizeDefaultAllowedRedirectHosts(t *testing.T) {
+	h := newTestHandler(t)
+	// antigravity.google should be allowed by default
+	r := httptest.NewRequest(http.MethodGet,
+		"/authorize?response_type=code&state=s&redirect_uri=https://antigravity.google/cb", nil)
+	w := httptest.NewRecorder()
+
+	h.Authorize(w, r)
+
+	if w.Code != http.StatusFound {
+		t.Errorf("antigravity.google should be allowed by default: got %d, want %d", w.Code, http.StatusFound)
+	}
+}
+
+func TestAuthorizeCustomAllowedRedirectHosts(t *testing.T) {
+	p := provider.NewGitHub(provider.GitHubConfig{
+		ClientID:     "test-client-id",
+		ClientSecret: "test-client-secret",
+		RedirectURI:  "http://localhost:8080/callback",
+		Scopes:       "repo,user",
+	})
+	h, err := NewHandler(Config{
+		BaseURL:              "http://localhost:8080",
+		SessionTTL:           10 * time.Minute,
+		CacheTTL:             5 * time.Minute,
+		ExpiresIn:            90 * 24 * time.Hour,
+		AllowedRedirectHosts: []string{"custom-allowed.com"},
+	}, p)
+	if err != nil {
+		t.Fatalf("failed to create handler: %v", err)
+	}
+
+	// custom-allowed.com should be allowed
+	r := httptest.NewRequest(http.MethodGet,
+		"/authorize?response_type=code&state=s&redirect_uri=https://custom-allowed.com/cb", nil)
+	w := httptest.NewRecorder()
+	h.Authorize(w, r)
+	if w.Code != http.StatusFound {
+		t.Errorf("custom-allowed.com should be allowed: got %d, want %d", w.Code, http.StatusFound)
+	}
+
+	// localhost should be disallowed since it was overridden
+	r2 := httptest.NewRequest(http.MethodGet,
+		"/authorize?response_type=code&state=s&redirect_uri=https://localhost/cb", nil)
+	w2 := httptest.NewRecorder()
+	h.Authorize(w2, r2)
+	if w2.Code != http.StatusBadRequest {
+		t.Errorf("localhost should be disallowed when overridden: got %d, want %d", w2.Code, http.StatusBadRequest)
+	}
+}
+
 func TestNewHandlerErrorsOnNilProvider(t *testing.T) {
 	_, err := NewHandler(Config{}, nil)
 	if err == nil {

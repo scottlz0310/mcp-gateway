@@ -128,6 +128,9 @@ func main() {
 	if _, set := os.LookupEnv("MCP_GATEWAY_GITHUB_REFRESH_ENABLED"); !set {
 		cfg.githubRefreshEnabled = appCfg.Gateway.GitHubRefreshEnabled
 	}
+	if strings.TrimSpace(os.Getenv("MCP_GATEWAY_ALLOWED_REDIRECT_HOSTS")) == "" && len(appCfg.Gateway.AllowedRedirectHosts) > 0 {
+		cfg.allowedRedirectHosts = appCfg.Gateway.AllowedRedirectHosts
+	}
 	// Apply config.yaml OAuth provider overrides
 	if strings.TrimSpace(os.Getenv("OAUTH_PROVIDER")) == "" && strings.TrimSpace(appCfg.Auth.Provider) != "" {
 		cfg.oauthProvider = appCfg.Auth.Provider
@@ -230,6 +233,7 @@ func main() {
 		TokenAudienceStrict:  cfg.tokenAudienceStrict,
 		GitHubRefreshEnabled: cfg.githubRefreshEnabled,
 		OIDCPrivateKey:       oidcPrivateKey,
+		AllowedRedirectHosts: cfg.allowedRedirectHosts,
 	}, prov)
 	if err != nil {
 		slog.Error("auth handler init failed", "err", err)
@@ -403,6 +407,7 @@ type config struct {
 	tokenStorePath       string
 	keyPath              string
 	configPath           string
+	allowedRedirectHosts []string
 }
 
 func loadConfig() config {
@@ -445,6 +450,7 @@ func loadConfig() config {
 		tokenStorePath:       lookupEnv("MCP_GATEWAY_TOKEN_STORE_PATH", "/data/tokens.json"),
 		keyPath:              getEnv("MCP_GATEWAY_KEY_PATH", "./gateway.key"),
 		configPath:           getEnv("MCP_CONFIG_FILE", "./config.yaml"),
+		allowedRedirectHosts: splitCSV(os.Getenv("MCP_GATEWAY_ALLOWED_REDIRECT_HOSTS")),
 	}
 }
 

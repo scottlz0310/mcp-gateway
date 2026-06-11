@@ -5,6 +5,18 @@
 
 ## [Unreleased]
 
+### 追加
+
+- OIDC プロバイダーのサポートを追加（[#98](https://github.com/scottlz0310/mcp-gateway/pull/98)）
+  - agy CLI をサポートするため、mcp-gateway を OIDC Identity Provider として動作可能に
+  - OIDC 用の RSA 秘密鍵の永続化をサポート
+
+### 修正
+
+- redirect_uri 許可ホストの設定経路を追加（[#100](https://github.com/scottlz0310/mcp-gateway/issues/100)）
+  - `MCP_GATEWAY_ALLOWED_REDIRECT_HOSTS` 環境変数（カンマ区切り）および `gateway.allowed_redirect_hosts` 設定（config.yaml）による許可ホストの設定を可能に
+  - デフォルトの許可リストに `antigravity.google` を追加
+
 ### ドキュメント
 
 - `docs/architecture.md` 新規作成: review platform における mcp-gateway の役割（MCP reverse proxy / routing gateway / auth boundary）を明文化し、thread-owl / mcp-resource-subscriber / review-raven / Mcp-Docker との責務境界を記載（[#92](https://github.com/scottlz0310/mcp-gateway/issues/92)）
