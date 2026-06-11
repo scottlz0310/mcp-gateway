@@ -128,6 +128,18 @@ func main() {
 	if _, set := os.LookupEnv("MCP_GATEWAY_GITHUB_REFRESH_ENABLED"); !set {
 		cfg.githubRefreshEnabled = appCfg.Gateway.GitHubRefreshEnabled
 	}
+	// Apply config.yaml OAuth provider overrides
+	if strings.TrimSpace(os.Getenv("OAUTH_PROVIDER")) == "" && strings.TrimSpace(appCfg.Auth.Provider) != "" {
+		cfg.oauthProvider = appCfg.Auth.Provider
+	}
+	// Apply config.yaml OIDC overrides
+	if strings.TrimSpace(os.Getenv("OAUTH_ISSUER_URL")) == "" && strings.TrimSpace(appCfg.Auth.OIDCIssuerURL) != "" {
+		cfg.oidcIssuerURL = appCfg.Auth.OIDCIssuerURL
+	}
+	if strings.TrimSpace(os.Getenv("OAUTH_AUDIENCE")) == "" && strings.TrimSpace(appCfg.Auth.OIDCAudience) != "" {
+		cfg.oidcAudience = appCfg.Auth.OIDCAudience
+	}
+
 	trustedProxies, err := middleware.ParseTrustedProxyCIDRs(cfg.trustedProxyCIDRs)
 	if err != nil {
 		slog.Error("invalid trusted proxy configuration", "err", err)
@@ -144,13 +156,19 @@ func main() {
 	// This prevents a mistyped env var from being encrypted and saved to config.yaml
 	// on a first boot that would otherwise fail (e.g. missing CLIENT_ID or routes).
 
-	// GitHub client ID: env var (OAUTH_CLIENT_ID or legacy GITHUB_MCP_CLIENT_ID) takes precedence over config file.
-	githubClientID := envClientID
-	if strings.TrimSpace(githubClientID) == "" {
-		githubClientID = appCfg.Auth.GitHubClientID
+	// Client ID: env var (OAUTH_CLIENT_ID or legacy GITHUB_MCP_CLIENT_ID) takes precedence over config file.
+	clientID := envClientID
+	if strings.TrimSpace(clientID) == "" {
+		if cfg.oauthProvider == "oidc" && strings.TrimSpace(appCfg.Auth.ClientID) != "" {
+			clientID = appCfg.Auth.ClientID
+		} else if strings.TrimSpace(appCfg.Auth.GitHubClientID) != "" {
+			clientID = appCfg.Auth.GitHubClientID
+		} else {
+			clientID = appCfg.Auth.ClientID
+		}
 	}
-	if strings.TrimSpace(githubClientID) == "" {
-		slog.Error("required value not set: provide OAUTH_CLIENT_ID env var or auth.github_client_id in config.yaml")
+	if strings.TrimSpace(clientID) == "" {
+		slog.Error("required value not set: provide OAUTH_CLIENT_ID env var or auth.client_id/auth.github_client_id in config.yaml")
 		os.Exit(1)
 	}
 
@@ -171,26 +189,34 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Resolve the GitHub client secret (and persist it encrypted if sourced from env).
+	// Resolve the client secret (and persist it encrypted if sourced from env).
 	// Only runs after the above validations pass to avoid making a wrong value sticky.
-	githubClientSecret, err := appconfig.MigrateSecret(cfg.configPath, appCfg, km)
+	clientSecret, err := appconfig.MigrateSecret(cfg.configPath, appCfg, km, cfg.oauthProvider)
 	if err != nil {
-		slog.Error("github_client_secret is unavailable", "err", err)
+		slog.Error("client secret is unavailable", "err", err)
 		os.Exit(1)
 	}
 
-	cfg.githubClientID = githubClientID
-	cfg.githubClientSecret = githubClientSecret
+	cfg.githubClientID = clientID
+	cfg.githubClientSecret = clientSecret
 
 	prov, err := provider.New(provider.Config{
-		Kind:         cfg.oauthProvider,
-		ClientID:     cfg.githubClientID,
-		ClientSecret: cfg.githubClientSecret,
-		RedirectURI:  strings.TrimRight(cfg.publicURL, "/") + "/callback",
-		Scopes:       cfg.oauthScopes,
+		Kind:          cfg.oauthProvider,
+		ClientID:      cfg.githubClientID,
+		ClientSecret:  cfg.githubClientSecret,
+		RedirectURI:   strings.TrimRight(cfg.publicURL, "/") + "/callback",
+		Scopes:        cfg.oauthScopes,
+		OIDCIssuerURL: cfg.oidcIssuerURL,
+		OIDCAudience:  cfg.oidcAudience,
 	})
 	if err != nil {
 		slog.Error("provider init failed", "err", err)
+		os.Exit(1)
+	}
+
+	oidcPrivateKey, err := appconfig.MigrateOIDCPrivateKey(cfg.configPath, appCfg, km)
+	if err != nil {
+		slog.Error("OIDC private key migration failed", "err", err)
 		os.Exit(1)
 	}
 
@@ -203,6 +229,7 @@ func main() {
 		AllowedAudiences:     routeAudiences(strings.TrimRight(cfg.publicURL, "/"), routes),
 		TokenAudienceStrict:  cfg.tokenAudienceStrict,
 		GitHubRefreshEnabled: cfg.githubRefreshEnabled,
+		OIDCPrivateKey:       oidcPrivateKey,
 	}, prov)
 	if err != nil {
 		slog.Error("auth handler init failed", "err", err)
@@ -219,6 +246,9 @@ func main() {
 	// inside the route loop below per MCP Authorization Spec 2025-06-18.
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource", oauthHandler.ProtectedResourceMetadata)
 	mux.HandleFunc("GET /.well-known/oauth-authorization-server", oauthHandler.Discovery)
+	mux.HandleFunc("GET /.well-known/openid-configuration", oauthHandler.OIDCDiscovery)
+	mux.HandleFunc("GET /jwks", oauthHandler.JWKS)
+	mux.HandleFunc("GET /userinfo", oauthHandler.UserInfo)
 	mux.HandleFunc("GET /authorize", oauthHandler.Authorize)
 	mux.HandleFunc("GET /callback", oauthHandler.Callback)
 	mux.HandleFunc("POST /token", oauthHandler.Token)
@@ -359,6 +389,8 @@ type config struct {
 	bindAddr             string
 	oauthProvider        string
 	oauthScopes          string
+	oidcIssuerURL        string
+	oidcAudience         string
 	port                 string
 	logLevel             string
 	upstreamURL          string // deprecated; prefer ROUTE_* env vars
@@ -400,6 +432,8 @@ func loadConfig() config {
 		port:                 port,
 		oauthProvider:        oauthProvider,
 		oauthScopes:          oauthScopes,
+		oidcIssuerURL:        getEnv("OAUTH_ISSUER_URL", ""),
+		oidcAudience:         getEnv("OAUTH_AUDIENCE", ""),
 		logLevel:             getEnv("LOG_LEVEL", "info"),
 		upstreamURL:          getEnv("GITHUB_MCP_UPSTREAM_URL", ""),
 		trustedProxyCIDRs:    splitCSV(os.Getenv("MCP_GATEWAY_TRUSTED_PROXIES")),

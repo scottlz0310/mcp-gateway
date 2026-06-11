@@ -22,9 +22,9 @@ Configuration is resolved in this order:
 
 | Setting | Precedence |
 |---------|------------|
-| OAuth provider | `OAUTH_PROVIDER` > `github` (default) |
-| OAuth client ID | `OAUTH_CLIENT_ID` > deprecated `GITHUB_MCP_CLIENT_ID` > `auth.github_client_id` |
-| OAuth client secret | encrypted/plain `auth.github_client_secret` > non-empty `OAUTH_CLIENT_SECRET` > deprecated `GITHUB_MCP_CLIENT_SECRET` used to seed `config.yaml` |
+| OAuth provider | `OAUTH_PROVIDER` > `auth.provider` > `github` (default) |
+| OAuth client ID | `OAUTH_CLIENT_ID` > deprecated `GITHUB_MCP_CLIENT_ID` > `auth.client_id` > `auth.github_client_id` |
+| OAuth client secret | encrypted/plain `auth.client_secret` > encrypted/plain `auth.github_client_secret` > non-empty `OAUTH_CLIENT_SECRET` > deprecated `GITHUB_MCP_CLIENT_SECRET` used to seed `config.yaml` |
 | Routes | `ROUTE_<NAME>` env vars > `routes:` in `config.yaml` > deprecated `GITHUB_MCP_UPSTREAM_URL` fallback |
 | Public URL | `MCP_GATEWAY_PUBLIC_URL` > deprecated `MCP_GATEWAY_BASE_URL` > `gateway.public_url` > deprecated `gateway.base_url` > default |
 | Bind address | `MCP_GATEWAY_BIND_ADDR` > `gateway.bind_addr` > `127.0.0.1:<resolved-port>` |
@@ -46,10 +46,12 @@ is logged that the legacy is ignored.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OAUTH_PROVIDER` | `github` | OAuth provider kind. Currently only `github` is supported. |
-| `OAUTH_CLIENT_ID` | none | OAuth App client ID. Required unless `auth.github_client_id` is set. Supersedes `GITHUB_MCP_CLIENT_ID`. |
-| `OAUTH_CLIENT_SECRET` | none | OAuth App client secret. Used to seed encrypted `config.yaml` when no config secret exists. Supersedes `GITHUB_MCP_CLIENT_SECRET`. |
+| `OAUTH_PROVIDER` | `github` | OAuth provider kind. Currently `github` and `oidc` are supported. |
+| `OAUTH_CLIENT_ID` | none | OAuth client ID. Required unless `auth.client_id` or `auth.github_client_id` is set. Supersedes `GITHUB_MCP_CLIENT_ID`. |
+| `OAUTH_CLIENT_SECRET` | none | OAuth client secret. Used to seed encrypted `config.yaml` when no config secret exists. Supersedes `GITHUB_MCP_CLIENT_SECRET`. |
 | `OAUTH_SCOPES` | `repo,user` | OAuth scopes requested by the gateway. Supersedes `GITHUB_MCP_OAUTH_SCOPES`. |
+| `OAUTH_ISSUER_URL` | none | OIDC issuer URL (required when `OAUTH_PROVIDER=oidc`). |
+| `OAUTH_AUDIENCE` | none | OIDC audience (optional when `OAUTH_PROVIDER=oidc`). Reserved for future local JWT validation; currently unused/no-op in UserInfo validation. |
 | `GITHUB_MCP_CLIENT_ID` | none | **Deprecated** — use `OAUTH_CLIENT_ID`. Still accepted with a startup warning. |
 | `GITHUB_MCP_CLIENT_SECRET` | none | **Deprecated** — use `OAUTH_CLIENT_SECRET`. Still accepted with a startup warning. |
 | `GITHUB_MCP_OAUTH_SCOPES` | none | **Deprecated** — use `OAUTH_SCOPES`. Still accepted with a startup warning. |
@@ -111,8 +113,13 @@ setup:
 
 | Key | Description |
 |-----|-------------|
+| `auth.provider` | OAuth provider kind (`github` or `oidc`). |
+| `auth.client_id` | Generic OAuth client ID. |
+| `auth.client_secret` | Generic OAuth client secret. May be encrypted as `ENC[age:]...`. |
 | `auth.github_client_id` | GitHub OAuth App client ID. |
-| `auth.github_client_secret` | GitHub OAuth App client secret. May be encrypted as `ENC[age:]...`; plaintext is encrypted and rewritten on startup. |
+| `auth.github_client_secret` | GitHub OAuth App client secret. May be encrypted as `ENC[age:]...`. |
+| `auth.oidc_issuer_url` | OIDC issuer URL. |
+| `auth.oidc_audience` | OIDC audience. Reserved for future local JWT validation; currently unused/no-op in UserInfo validation. |
 | `gateway.public_url` | Canonical public URL visible to OAuth and MCP clients. |
 | `gateway.bind_addr` | TCP listener address. |
 | `gateway.base_url` | Deprecated alias for `gateway.public_url`. |

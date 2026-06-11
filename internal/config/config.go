@@ -1,6 +1,10 @@
 package config
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"log/slog"
 	"os"
@@ -38,6 +42,13 @@ type AppConfig struct {
 type AuthConfig struct {
 	GitHubClientID     string `yaml:"github_client_id,omitempty"`
 	GitHubClientSecret string `yaml:"github_client_secret,omitempty"`
+
+	Provider       string `yaml:"provider,omitempty"`
+	ClientID       string `yaml:"client_id,omitempty"`
+	ClientSecret   string `yaml:"client_secret,omitempty"`
+	OIDCIssuerURL  string `yaml:"oidc_issuer_url,omitempty"`
+	OIDCAudience   string `yaml:"oidc_audience,omitempty"`
+	OIDCPrivateKey string `yaml:"oidc_private_key,omitempty"`
 }
 
 // GatewayConfig holds gateway-level settings that can be persisted in config.yaml.
@@ -116,28 +127,45 @@ func SaveConfig(path string, cfg *AppConfig) error {
 //
 // When both OAUTH_CLIENT_SECRET and the legacy GITHUB_MCP_CLIENT_SECRET are set,
 // the new variable wins and a deprecation warning is logged for the legacy one.
-func MigrateSecret(configPath string, cfg *AppConfig, km *KeyMaterial) (string, error) {
-	secret := cfg.Auth.GitHubClientSecret
+func MigrateSecret(configPath string, cfg *AppConfig, km *KeyMaterial, providerKind string) (string, error) {
+	// Determine which secret to migrate based on providerKind and presence of fields
+	useGeneric := providerKind == "oidc"
+	if useGeneric && strings.TrimSpace(cfg.Auth.ClientSecret) == "" && strings.TrimSpace(cfg.Auth.GitHubClientSecret) != "" {
+		useGeneric = false
+	} else if !useGeneric && strings.TrimSpace(cfg.Auth.GitHubClientSecret) == "" && strings.TrimSpace(cfg.Auth.ClientSecret) != "" {
+		useGeneric = true
+	}
+
+	var secret *string
+	var fieldName string
+	if useGeneric {
+		secret = &cfg.Auth.ClientSecret
+		fieldName = "client_secret"
+	} else {
+		secret = &cfg.Auth.GitHubClientSecret
+		fieldName = "github_client_secret"
+	}
 
 	switch {
-	case IsEncrypted(secret):
-		plaintext, err := DecryptField(km, secret)
+	case IsEncrypted(*secret):
+		plaintext, err := DecryptField(km, *secret)
 		if err != nil {
-			return "", fmt.Errorf("decrypting github_client_secret: %w", err)
+			return "", fmt.Errorf("decrypting %s: %w", fieldName, err)
 		}
 		return plaintext, nil
 
-	case strings.TrimSpace(secret) != "":
-		slog.Info("plaintext github_client_secret found in config; encrypting and rewriting")
-		encrypted, err := EncryptField(km, secret)
+	case strings.TrimSpace(*secret) != "":
+		plain := *secret
+		slog.Info(fmt.Sprintf("plaintext %s found in config; encrypting and rewriting", fieldName))
+		encrypted, err := EncryptField(km, plain)
 		if err != nil {
-			return "", fmt.Errorf("encrypting github_client_secret from config: %w", err)
+			return "", fmt.Errorf("encrypting %s from config: %w", fieldName, err)
 		}
-		cfg.Auth.GitHubClientSecret = encrypted
+		*secret = encrypted
 		if err := SaveConfig(configPath, cfg); err != nil {
-			return "", fmt.Errorf("saving config after encrypting github_client_secret: %w", err)
+			return "", fmt.Errorf("saving config after encrypting %s: %w", fieldName, err)
 		}
-		return secret, nil
+		return plain, nil
 
 	default:
 		envSecret, envSource, ok := resolveOAuthEnvSourced("OAUTH_CLIENT_SECRET", "GITHUB_MCP_CLIENT_SECRET")
@@ -148,12 +176,64 @@ func MigrateSecret(configPath string, cfg *AppConfig, km *KeyMaterial) (string, 
 			if err != nil {
 				return "", fmt.Errorf("encrypting %s from env: %w", envSource, err)
 			}
-			cfg.Auth.GitHubClientSecret = encrypted
+			*secret = encrypted
 			if err := SaveConfig(configPath, cfg); err != nil {
 				return "", fmt.Errorf("saving config after encrypting %s: %w", envSource, err)
 			}
 			return envSecret, nil
 		}
-		return "", fmt.Errorf("github_client_secret is required: set OAUTH_CLIENT_SECRET env var or provide an encrypted value in config.yaml")
+		return "", fmt.Errorf("%s is required: set OAUTH_CLIENT_SECRET env var or provide an encrypted value in config.yaml", fieldName)
 	}
 }
+
+// MigrateOIDCPrivateKey resolves the OIDC RSA private key, following this priority:
+//
+//  1. cfg.Auth.OIDCPrivateKey is "ENC[age:]..." → decrypt, parse PEM, and return *rsa.PrivateKey
+//  2. field empty/absent → generate a new RSA 2048-bit key, PEM encode, encrypt, save to config, and return
+func MigrateOIDCPrivateKey(configPath string, cfg *AppConfig, km *KeyMaterial) (*rsa.PrivateKey, error) {
+	keyField := &cfg.Auth.OIDCPrivateKey
+	if IsEncrypted(*keyField) {
+		plaintext, err := DecryptField(km, *keyField)
+		if err != nil {
+			return nil, fmt.Errorf("decrypting oidc_private_key: %w", err)
+		}
+		block, _ := pem.Decode([]byte(plaintext))
+		if block == nil || block.Type != "RSA PRIVATE KEY" {
+			return nil, fmt.Errorf("invalid PEM block type for RSA private key")
+		}
+		privKey, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("parsing RSA private key: %w", err)
+		}
+		return privKey, nil
+	}
+
+	// Generate a new RSA 2048-bit key
+	slog.Info("no OIDC private key found; generating a new RSA key")
+	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return nil, fmt.Errorf("generating RSA private key: %w", err)
+	}
+
+	privBytes := x509.MarshalPKCS1PrivateKey(privKey)
+	pemBlock := &pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: privBytes,
+	}
+	pemBytes := pem.EncodeToMemory(pemBlock)
+
+	encrypted, err := EncryptField(km, string(pemBytes))
+	if err != nil {
+		return nil, fmt.Errorf("encrypting generated RSA private key: %w", err)
+	}
+
+	*keyField = encrypted
+	if err := SaveConfig(configPath, cfg); err != nil {
+		slog.Warn("failed to save generated OIDC private key to config; using in-memory key (will not persist across restarts)", "err", err)
+	} else {
+		slog.Info("saved generated OIDC private key to config")
+	}
+
+	return privKey, nil
+}
+

@@ -2,6 +2,11 @@ package auth
 
 import (
 	"context"
+	"crypto"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -737,6 +742,10 @@ func TestTokenDeviceGrantSuccess(t *testing.T) {
 	// Mock GitHub's token endpoint returning a successful access token.
 	ghServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/user") {
+			_, _ = fmt.Fprint(w, `{"login":"octocat","name":"The Octocat"}`)
+			return
+		}
 		_, _ = fmt.Fprint(w, `{"access_token":"gha_success_token","scope":"repo,user","token_type":"bearer"}`)
 	}))
 	defer ghServer.Close()
@@ -745,7 +754,23 @@ func TestTokenDeviceGrantSuccess(t *testing.T) {
 	defer func() { githubClient.Transport = originalTransport }()
 	githubClient.Transport = rewriteHostTransport{target: ghServer.URL, inner: ghServer.Client().Transport}
 
-	h := newTestHandler(t)
+	p := provider.NewGitHub(provider.GitHubConfig{
+		ClientID:     "test-client-id",
+		ClientSecret: "test-client-secret",
+		RedirectURI:  "http://localhost:8080/callback",
+		Scopes:       "repo,user",
+		UserAPI:      ghServer.URL + "/user",
+		TokenURL:     ghServer.URL + "/login/oauth/access_token",
+	})
+	h, err := NewHandler(Config{
+		BaseURL:    "http://localhost:8080",
+		SessionTTL: 10 * time.Minute,
+		CacheTTL:   5 * time.Minute,
+		ExpiresIn:  90 * 24 * time.Hour,
+	}, p)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
 
 	expiresAt := time.Now().Add(15 * time.Minute)
 	internalCode, err := h.store.CreateDevice("gh-dev-code", "WDJB-MJHT", "https://github.com/login/device", expiresAt, 5, "http://localhost:8080")
@@ -2023,3 +2048,178 @@ func TestTokenStoreSaveProviderRefreshNoEntry(t *testing.T) {
 		t.Fatal("SaveProviderRefresh must not create a new entry for unknown token")
 	}
 }
+
+func TestOIDCProviderEndpoints(t *testing.T) {
+	h := newTestHandler(t)
+
+	// 1. Test OIDC Discovery
+	rDisc := httptest.NewRequest(http.MethodGet, "/.well-known/openid-configuration", nil)
+	wDisc := httptest.NewRecorder()
+	h.OIDCDiscovery(wDisc, rDisc)
+
+	if wDisc.Code != http.StatusOK {
+		t.Errorf("OIDCDiscovery status: got %d, want 200", wDisc.Code)
+	}
+	var discDoc map[string]any
+	if err := json.NewDecoder(wDisc.Body).Decode(&discDoc); err != nil {
+		t.Fatalf("decoding discovery: %v", err)
+	}
+	if discDoc["issuer"] != "http://localhost:8080" {
+		t.Errorf("issuer: got %v", discDoc["issuer"])
+	}
+	if discDoc["userinfo_endpoint"] != "http://localhost:8080/userinfo" {
+		t.Errorf("userinfo_endpoint: got %v", discDoc["userinfo_endpoint"])
+	}
+	if discDoc["jwks_uri"] != "http://localhost:8080/jwks" {
+		t.Errorf("jwks_uri: got %v", discDoc["jwks_uri"])
+	}
+
+	// 2. Test JWKS
+	rJWKS := httptest.NewRequest(http.MethodGet, "/jwks", nil)
+	wJWKS := httptest.NewRecorder()
+	h.JWKS(wJWKS, rJWKS)
+
+	if wJWKS.Code != http.StatusOK {
+		t.Errorf("JWKS status: got %d, want 200", wJWKS.Code)
+	}
+	var jwksDoc map[string]any
+	if err := json.NewDecoder(wJWKS.Body).Decode(&jwksDoc); err != nil {
+		t.Fatalf("decoding JWKS: %v", err)
+	}
+	keys, ok := jwksDoc["keys"].([]any)
+	if !ok || len(keys) == 0 {
+		t.Fatalf("expected keys in JWKS: %v", jwksDoc)
+	}
+	key := keys[0].(map[string]any)
+	if key["kty"] != "RSA" || key["alg"] != "RS256" || key["kid"] != "gateway-key-1" {
+		t.Errorf("unexpected JWK fields: %v", key)
+	}
+	if key["n"] == "" || key["e"] == "" {
+		t.Errorf("missing modulus/exponent: %v", key)
+	}
+
+	// 3. Test UserInfo - Unauthorized
+	rUIUnauth := httptest.NewRequest(http.MethodGet, "/userinfo", nil)
+	wUIUnauth := httptest.NewRecorder()
+	h.UserInfo(wUIUnauth, rUIUnauth)
+	if wUIUnauth.Code != http.StatusUnauthorized {
+		t.Errorf("unauthorized userinfo status: got %d, want 401", wUIUnauth.Code)
+	}
+
+	// 4. Test UserInfo - Success
+	h.store.CacheToken("my-gateway-token", "alice", "")
+	rUISuccess := httptest.NewRequest(http.MethodGet, "/userinfo", nil)
+	rUISuccess.Header.Set("Authorization", "Bearer my-gateway-token")
+	wUISuccess := httptest.NewRecorder()
+	h.UserInfo(wUISuccess, rUISuccess)
+
+	if wUISuccess.Code != http.StatusOK {
+		t.Errorf("success userinfo status: got %d, want 200; body: %s", wUISuccess.Code, wUISuccess.Body.String())
+	}
+	var uiDoc map[string]any
+	if err := json.NewDecoder(wUISuccess.Body).Decode(&uiDoc); err != nil {
+		t.Fatalf("decoding userinfo: %v", err)
+	}
+	if uiDoc["sub"] != "alice" {
+		t.Errorf("sub: got %v, want alice", uiDoc["sub"])
+	}
+
+	// 5. Test ID Token generation during code exchange
+	h.store.SaveSession("state-oidc", "http://localhost/cb", "", "http://localhost:8080")
+	code, err := h.store.CompleteCallback("state-oidc", "provider-tok", "openid", "", time.Time{}, "alice")
+	if err != nil {
+		t.Fatalf("CompleteCallback: %v", err)
+	}
+
+	body := fmt.Sprintf("grant_type=authorization_code&code=%s&redirect_uri=http://localhost/cb", code)
+	rToken := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
+	rToken.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	wToken := httptest.NewRecorder()
+
+	h.Token(wToken, rToken)
+	if wToken.Code != http.StatusOK {
+		t.Fatalf("token exchange: got status %d; body: %s", wToken.Code, wToken.Body.String())
+	}
+
+	var tokenResp map[string]any
+	if err := json.NewDecoder(wToken.Body).Decode(&tokenResp); err != nil {
+		t.Fatalf("decoding token response: %v", err)
+	}
+
+	idToken, ok := tokenResp["id_token"].(string)
+	if !ok || idToken == "" {
+		t.Fatal("expected id_token in response when openid scope requested")
+	}
+
+	// Verify id_token JWT structure
+	parts := strings.Split(idToken, ".")
+	if len(parts) != 3 {
+		t.Fatalf("invalid JWT format: got %d parts, want 3", len(parts))
+	}
+
+	// Verify claims
+	payloadDecoded, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatalf("decoding payload: %v", err)
+	}
+	var claims map[string]any
+	if err := json.Unmarshal(payloadDecoded, &claims); err != nil {
+		t.Fatalf("unmarshaling payload: %v", err)
+	}
+	if claims["sub"] != "alice" || claims["iss"] != "http://localhost:8080" || claims["aud"] != "test-client-id" {
+		t.Errorf("unexpected payload claims: %v", claims)
+	}
+
+	// Verify signature
+	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		t.Fatalf("decoding signature: %v", err)
+	}
+	signingInput := parts[0] + "." + parts[1]
+	hasher := sha256.New()
+	hasher.Write([]byte(signingInput))
+	hashed := hasher.Sum(nil)
+
+	pubKey := h.privateKey.Public().(*rsa.PublicKey)
+	if err := rsa.VerifyPKCS1v15(pubKey, crypto.SHA256, hashed, sig); err != nil {
+		t.Errorf("signature verification failed: %v", err)
+	}
+}
+
+func TestNewHandler_OIDCPrivateKey(t *testing.T) {
+	// Generate a key to pass into Config
+	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generating key: %v", err)
+	}
+
+	cfg := Config{
+		BaseURL:        "http://localhost:8080",
+		OIDCPrivateKey: privKey,
+	}
+
+	p := provider.NewGitHub(provider.GitHubConfig{
+		ClientID: "test-client-id",
+	})
+	h, err := NewHandler(cfg, p)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	if h.privateKey != privKey {
+		t.Error("expected Handler to use the provided OIDCPrivateKey")
+	}
+
+	// Now check if it works without providing a key (should generate one)
+	cfgNoKey := Config{
+		BaseURL: "http://localhost:8080",
+	}
+	hNoKey, err := NewHandler(cfgNoKey, p)
+	if err != nil {
+		t.Fatalf("NewHandler (no key): %v", err)
+	}
+	if hNoKey.privateKey == nil {
+		t.Error("expected Handler to generate a random key when OIDCPrivateKey is nil")
+	}
+}
+
