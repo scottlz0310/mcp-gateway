@@ -76,7 +76,8 @@ type GatewayConfig struct {
 	// the OAuth App is configured for non-expiring tokens — the rotation path
 	// is dormant unless the upstream advertises refresh_token + expires_in.
 	GitHubRefreshEnabled bool `yaml:"github_refresh_enabled,omitempty"`
-	// AllowedRedirectHosts lists external hostnames permitted in OAuth redirect_uris.
+	// AllowedRedirectHosts lists hostnames permitted in OAuth redirect_uris.
+	// When set, replaces the built-in default list entirely.
 	// Defaults to ["localhost", "127.0.0.1", "vscode.dev", "antigravity.google"].
 	AllowedRedirectHosts []string `yaml:"allowed_redirect_hosts,omitempty"`
 }
