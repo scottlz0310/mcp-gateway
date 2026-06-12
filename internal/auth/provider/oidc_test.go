@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -232,5 +233,47 @@ func TestOIDCProvider_InvalidUserInfo(t *testing.T) {
 	_, err = prov.ValidateToken(context.Background(), "invalid-token")
 	if err == nil {
 		t.Error("expected ValidateToken to fail for unauthorized status")
+	}
+}
+
+func TestOIDCProviderTokenErrorIsTypedAndRedacted(t *testing.T) {
+	mux := http.NewServeMux()
+	var serverURL string
+	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"authorization_endpoint": serverURL + "/auth",
+			"token_endpoint":         serverURL + "/token",
+		})
+	})
+	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_grant","error_description":"sensitive OIDC details"}`))
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	serverURL = server.URL
+
+	prov, err := NewOIDC(OIDCConfig{
+		ClientID:     "test-client",
+		ClientSecret: "test-secret",
+		RedirectURI:  "http://localhost/cb",
+		IssuerURL:    serverURL,
+	})
+	if err != nil {
+		t.Fatalf("NewOIDC: %v", err)
+	}
+	_, err = prov.ExchangeCode(context.Background(), "secret-code")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var oauthErr *OAuthError
+	if !errors.As(err, &oauthErr) {
+		t.Fatalf("error type: got %T, want *OAuthError", err)
+	}
+	if oauthErr.Code != "invalid_grant" || oauthErr.HTTPStatus != http.StatusBadRequest {
+		t.Errorf("OAuthError: got %#v", oauthErr)
+	}
+	if strings.Contains(err.Error(), "sensitive OIDC details") || strings.Contains(err.Error(), "secret-code") {
+		t.Errorf("error leaked provider or request secret: %v", err)
 	}
 }

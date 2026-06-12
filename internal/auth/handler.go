@@ -23,6 +23,7 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"github.com/scottlz0310/mcp-gateway/internal/auth/provider"
+	"github.com/scottlz0310/mcp-gateway/internal/authaudit"
 )
 
 // refreshTokenGracePeriod is the extra lifetime added to refresh tokens beyond
@@ -98,12 +99,24 @@ type Handler struct {
 	store            *Store
 	allowedAudiences map[string]struct{}
 	privateKey       *rsa.PrivateKey
+	audit            authaudit.Recorder
 	// rotationGroup serializes concurrent GitHub refresh-token rotations
 	// targeting the same access token. Without this, a burst of requests
 	// arriving inside the leeway window would race to call the provider's
 	// refresh endpoint, wasting upstream quota and risking bad_refresh_token
 	// from GitHub's sequential rotation contract.
 	rotationGroup singleflight.Group
+}
+
+// HandlerOption は任意の auth handler integration を設定する。
+type HandlerOption func(*Handler)
+
+// WithAuditRecorder は OAuth 監査ログ永続化と直近失敗診断を有効化する。
+// recorder は事前に初期化済みでなければならない。
+func WithAuditRecorder(recorder authaudit.Recorder) HandlerOption {
+	return func(h *Handler) {
+		h.audit = recorder
+	}
 }
 
 // NewHandler creates a new OAuth Handler with the given configuration and provider.
@@ -114,7 +127,7 @@ type Handler struct {
 // JSON file so that MCP clients do not need to re-authenticate after gateway
 // restarts. Tokens are stored with TTL equal to cfg.ExpiresIn (default 90 days).
 // When cfg.TokenStorePath is empty, an in-memory store is used (TTL = cfg.CacheTTL).
-func NewHandler(cfg Config, p provider.Provider) (*Handler, error) {
+func NewHandler(cfg Config, p provider.Provider, opts ...HandlerOption) (*Handler, error) {
 	if p == nil {
 		return nil, fmt.Errorf("auth.NewHandler: provider must not be nil")
 	}
@@ -163,13 +176,70 @@ func NewHandler(cfg Config, p provider.Provider) (*Handler, error) {
 		}
 	}
 
-	return &Handler{
+	handler := &Handler{
 		cfg:              cfg,
 		provider:         p,
 		store:            NewStore(cfg.SessionTTL, tokensTTL, ts, storeOpts...),
 		allowedAudiences: audienceSet(cfg.AllowedAudiences),
 		privateKey:       privateKey,
-	}, nil
+	}
+	for _, opt := range opts {
+		opt(handler)
+	}
+	return handler, nil
+}
+
+func (h *Handler) auditSuccess(phase, message string, httpStatus int) {
+	h.recordAudit(authaudit.Event{
+		Phase:      phase,
+		Provider:   h.provider.Name(),
+		Result:     "success",
+		HTTPStatus: httpStatus,
+		Message:    message,
+	})
+}
+
+func (h *Handler) auditFailure(phase, errorClass, message string, err error, httpStatus int, tokenHash string) {
+	oauthCode, providerStatus, transient := provider.ErrorDetails(err)
+	if providerStatus != 0 {
+		httpStatus = providerStatus
+	}
+	if transient {
+		errorClass = "provider_unavailable"
+	} else if oauthCode != "" && errorClass == "provider_error" {
+		errorClass = "provider_rejected"
+	}
+	h.recordAudit(authaudit.Event{
+		Phase:      phase,
+		Provider:   h.provider.Name(),
+		Result:     "failure",
+		ErrorClass: errorClass,
+		OAuthError: oauthCode,
+		HTTPStatus: httpStatus,
+		Message:    message,
+		TokenHash:  tokenHash,
+	})
+}
+
+func (h *Handler) recordAudit(event authaudit.Event) {
+	if h.audit == nil {
+		return
+	}
+	if err := h.audit.Record(event); err != nil {
+		slog.Error("auth audit persistence failed",
+			"phase", event.Phase,
+			"result", event.Result,
+			"err", err,
+		)
+	}
+}
+
+// RecentAuthFailures は internal 診断 endpoint 向けに最新順の snapshot を返す。
+func (h *Handler) RecentAuthFailures() []authaudit.Event {
+	if h.audit == nil {
+		return nil
+	}
+	return h.audit.RecentFailures()
 }
 
 // refreshTokenTTL returns the lifetime for gateway-issued refresh tokens.
@@ -300,19 +370,23 @@ func (h *Handler) Authorize(w http.ResponseWriter, r *http.Request) {
 	codeChallengeMethod := q.Get("code_challenge_method")
 	audience, audErr := h.resolveRequestedAudience(q["resource"])
 	if audErr != nil {
+		h.auditFailure("authorize", "invalid_target", "authorization target rejected", audErr, http.StatusBadRequest, "")
 		oauthError(w, "invalid_target", audErr.Error(), http.StatusBadRequest)
 		return
 	}
 
 	if responseType != "code" {
+		h.auditFailure("authorize", "unsupported_response_type", "authorization response type rejected", nil, http.StatusBadRequest, "")
 		oauthError(w, "unsupported_response_type", "response_type must be 'code'", http.StatusBadRequest)
 		return
 	}
 	if state == "" || redirectURI == "" {
+		h.auditFailure("authorize", "invalid_request", "authorization request missing required parameters", nil, http.StatusBadRequest, "")
 		oauthError(w, "invalid_request", "missing state or redirect_uri", http.StatusBadRequest)
 		return
 	}
 	if codeChallenge != "" && codeChallengeMethod != "S256" {
+		h.auditFailure("authorize", "invalid_request", "authorization PKCE method rejected", nil, http.StatusBadRequest, "")
 		oauthError(w, "invalid_request", "code_challenge_method must be S256", http.StatusBadRequest)
 		return
 	}
@@ -322,15 +396,18 @@ func (h *Handler) Authorize(w http.ResponseWriter, r *http.Request) {
 		(parsedRedirect.Scheme != "http" && parsedRedirect.Scheme != "https") ||
 		parsedRedirect.Host == "" ||
 		parsedRedirect.Fragment != "" {
+		h.auditFailure("authorize", "invalid_request", "authorization redirect URI rejected", err, http.StatusBadRequest, "")
 		oauthError(w, "invalid_request", "invalid redirect_uri: must be absolute http/https URL without fragment", http.StatusBadRequest)
 		return
 	}
 	if !isAllowedRedirectHost(parsedRedirect.Hostname(), h.cfg.AllowedRedirectHosts) {
+		h.auditFailure("authorize", "invalid_request", "authorization redirect host rejected", nil, http.StatusBadRequest, "")
 		oauthError(w, "invalid_request", "redirect_uri host not permitted", http.StatusBadRequest)
 		return
 	}
 
 	h.store.SaveSession(state, redirectURI, codeChallenge, audience)
+	h.auditSuccess("authorize", "authorization redirect created", http.StatusFound)
 
 	http.Redirect(w, r, h.provider.AuthorizeURL(state, codeChallenge), http.StatusFound)
 }
@@ -341,33 +418,53 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	code := q.Get("code")
 	state := q.Get("state")
+	if oauthCode := provider.NormalizeOAuthErrorCode(q.Get("error")); oauthCode != "" {
+		h.recordAudit(authaudit.Event{
+			Phase:      "callback",
+			Provider:   h.provider.Name(),
+			Result:     "failure",
+			ErrorClass: "provider_rejected",
+			OAuthError: oauthCode,
+			HTTPStatus: http.StatusBadRequest,
+			Message:    "provider authorization callback rejected",
+		})
+		http.Error(w, "authorization failed", http.StatusBadRequest)
+		return
+	}
 
 	if code == "" || state == "" {
+		h.auditFailure("callback", "invalid_request", "authorization callback missing required parameters", nil, http.StatusBadRequest, "")
 		http.Error(w, "missing code or state", http.StatusBadRequest)
 		return
 	}
 	if !h.store.HasSession(state) {
+		h.auditFailure("callback", "invalid_state", "authorization callback state rejected", nil, http.StatusBadRequest, "")
 		http.Error(w, "invalid state", http.StatusBadRequest)
 		return
 	}
 
 	tokens, err := h.provider.ExchangeCode(r.Context(), code)
 	if err != nil {
+		h.auditFailure("token_exchange", "provider_error", "provider token exchange failed", err, http.StatusBadGateway, "")
 		slog.Error("OAuth token exchange failed", "provider", h.provider.Name(), "err", err)
 		http.Error(w, "token exchange failed", http.StatusBadGateway)
 		return
 	}
+	h.auditSuccess("token_exchange", "provider token exchange succeeded", http.StatusOK)
 
 	// Resolve provider identity early to get the Subject claim
 	id, err := h.provider.ValidateToken(r.Context(), tokens.AccessToken)
 	if err != nil {
+		h.auditFailure("identity_resolution", "provider_error", "provider identity resolution failed", err, http.StatusBadGateway, tokenFingerprint(tokens.AccessToken))
 		slog.Error("OAuth identity resolution failed during callback", "provider", h.provider.Name(), "err", err)
 		http.Error(w, "identity resolution failed", http.StatusBadGateway)
 		return
 	}
+	h.auditSuccess("identity_resolution", "provider identity resolved", http.StatusOK)
 
 	internalCode, err := h.store.CompleteCallback(state, tokens.AccessToken, joinScopes(tokens.Scopes), tokens.RefreshToken, providerAccessExpiry(tokens.AccessTokenExpiresIn), id.Subject)
 	if err != nil {
+		h.auditFailure("callback", "store_error", "authorization callback session completion failed", err, http.StatusBadRequest, "")
 		slog.Error("session completion failed", "err", err)
 		http.Error(w, "invalid state", http.StatusBadRequest)
 		return
@@ -375,6 +472,7 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 
 	sess := h.store.lookupByCode(internalCode)
 	if sess == nil {
+		h.auditFailure("callback", "internal_error", "authorization callback session was unavailable", nil, http.StatusInternalServerError, "")
 		http.Error(w, "session lost", http.StatusInternalServerError)
 		return
 	}
@@ -385,6 +483,7 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 	rq.Set("state", state)
 	redirect.RawQuery = rq.Encode()
 
+	h.auditSuccess("callback", "authorization callback completed", http.StatusFound)
 	http.Redirect(w, r, redirect.String(), http.StatusFound)
 }
 
@@ -392,6 +491,7 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) Token(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	if err := r.ParseForm(); err != nil {
+		h.auditFailure("token_exchange", "invalid_request", "token request body rejected", err, http.StatusBadRequest, "")
 		oauthError(w, "invalid_request", "malformed request body", http.StatusBadRequest)
 		return
 	}
@@ -403,6 +503,7 @@ func (h *Handler) Token(w http.ResponseWriter, r *http.Request) {
 	case "refresh_token":
 		h.tokenRefresh(w, r)
 	default:
+		h.auditFailure("token_exchange", "unsupported_grant_type", "token grant type rejected", nil, http.StatusBadRequest, "")
 		oauthError(w, "unsupported_grant_type", "unsupported grant_type", http.StatusBadRequest)
 	}
 }
@@ -414,6 +515,7 @@ func (h *Handler) tokenAuthCode(w http.ResponseWriter, r *http.Request) {
 		r.FormValue("code_verifier"),
 	)
 	if err != nil {
+		h.auditFailure("token_exchange", "invalid_grant", "authorization code exchange rejected", err, http.StatusBadRequest, "")
 		slog.Warn("token exchange rejected", "err", err)
 		oauthError(w, "invalid_grant", err.Error(), http.StatusBadRequest)
 		return
@@ -425,6 +527,7 @@ func (h *Handler) tokenAuthCode(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("failed to create refresh token", "err", rtErr)
 	}
 	h.writeTokenResponse(w, result.AccessToken, result.Scope, refreshToken, result.Subject)
+	h.auditSuccess("token_exchange", "authorization code exchange completed", http.StatusOK)
 }
 
 // persistProviderRefresh writes upstream provider refresh metadata to the
@@ -442,22 +545,26 @@ func (h *Handler) persistProviderRefresh(accessToken, refreshToken string, acces
 func (h *Handler) tokenDeviceGrant(w http.ResponseWriter, r *http.Request) {
 	deviceCode := r.FormValue("device_code")
 	if deviceCode == "" {
+		h.auditFailure("token_exchange", "invalid_request", "device token request missing device code", nil, http.StatusBadRequest, "")
 		oauthError(w, "invalid_request", "missing device_code", http.StatusBadRequest)
 		return
 	}
 
 	pending, ok := h.store.GetDevice(deviceCode)
 	if !ok {
+		h.auditFailure("token_exchange", "invalid_grant", "device token grant was not found", nil, http.StatusBadRequest, "")
 		oauthError(w, "invalid_grant", "device code not found", http.StatusBadRequest)
 		return
 	}
 	if time.Now().After(pending.ExpiresAt) {
+		h.auditFailure("token_exchange", "token_expired", "device token grant expired", nil, http.StatusBadRequest, "")
 		oauthError(w, "expired_token", "device code expired", http.StatusBadRequest)
 		return
 	}
 
 	switch pending.Status {
 	case deviceDenied:
+		h.auditFailure("token_exchange", "access_denied", "device token grant denied", nil, http.StatusBadRequest, "")
 		oauthError(w, "access_denied", "user denied authorization", http.StatusBadRequest)
 		return
 	}
@@ -490,6 +597,7 @@ func (h *Handler) tokenDeviceGrant(w http.ResponseWriter, r *http.Request) {
 	// Status is pending: poll GitHub on behalf of the client.
 	result, err := h.pollGitHubDeviceToken(r.Context(), pending.GitHubDevCode)
 	if err != nil {
+		h.auditFailure("token_exchange", "provider_error", "provider device token exchange failed", err, http.StatusBadGateway, "")
 		slog.Error("GitHub device token poll failed", "err", err)
 		oauthError(w, "server_error", "upstream error polling GitHub", http.StatusBadGateway)
 		return
@@ -500,12 +608,15 @@ func (h *Handler) tokenDeviceGrant(w http.ResponseWriter, r *http.Request) {
 		// Resolve provider identity early to get the Subject claim
 		id, valErr := h.provider.ValidateToken(r.Context(), result.AccessToken)
 		if valErr != nil {
+			h.auditFailure("identity_resolution", "provider_error", "device grant identity resolution failed", valErr, http.StatusBadGateway, tokenFingerprint(result.AccessToken))
 			slog.Error("Identity resolution failed during device grant callback", "err", valErr)
 			oauthError(w, "server_error", "failed to resolve identity", http.StatusBadGateway)
 			return
 		}
+		h.auditSuccess("identity_resolution", "device grant identity resolved", http.StatusOK)
 		completed, ok := h.store.AuthorizeAndConsumeDevice(deviceCode, result.AccessToken, result.Scope)
 		if !ok {
+			h.auditFailure("token_exchange", "invalid_grant", "device token grant was already consumed", nil, http.StatusBadRequest, "")
 			oauthError(w, "invalid_grant", "device code already consumed", http.StatusBadRequest)
 			return
 		}
@@ -516,17 +627,37 @@ func (h *Handler) tokenDeviceGrant(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("failed to create refresh token", "err", rtErr)
 		}
 		h.writeTokenResponse(w, result.AccessToken, result.Scope, refreshToken, id.Subject)
+		h.auditSuccess("token_exchange", "device token exchange completed", http.StatusOK)
 	case "authorization_pending":
 		oauthError(w, "authorization_pending", "user has not yet authorized the device", http.StatusBadRequest)
 	case "slow_down":
 		// RFC 8628 §3.5: client must increase polling interval by 5 seconds
 		oauthError(w, "slow_down", "polling too frequently, increase interval by 5 seconds", http.StatusBadRequest)
 	case "expired_token":
+		h.auditFailure("token_exchange", "token_expired", "provider device token expired", nil, http.StatusBadRequest, "")
 		oauthError(w, "expired_token", "device code expired on GitHub", http.StatusBadRequest)
 	case "access_denied":
 		h.store.DenyDevice(deviceCode)
+		h.recordAudit(authaudit.Event{
+			Phase:      "token_exchange",
+			Provider:   h.provider.Name(),
+			Result:     "failure",
+			ErrorClass: "access_denied",
+			OAuthError: "access_denied",
+			HTTPStatus: http.StatusBadRequest,
+			Message:    "provider device authorization denied",
+		})
 		oauthError(w, "access_denied", "user denied authorization", http.StatusBadRequest)
 	default:
+		h.recordAudit(authaudit.Event{
+			Phase:      "token_exchange",
+			Provider:   h.provider.Name(),
+			Result:     "failure",
+			ErrorClass: "provider_rejected",
+			OAuthError: provider.NormalizeOAuthErrorCode(result.Error),
+			HTTPStatus: http.StatusBadGateway,
+			Message:    "provider device token exchange rejected",
+		})
 		slog.Warn("unexpected GitHub device poll error", "err", result.Error)
 		oauthError(w, "server_error", "unexpected upstream error: "+result.Error, http.StatusBadGateway)
 	}
@@ -569,6 +700,7 @@ func (h *Handler) writeTokenResponse(w http.ResponseWriter, token, scope, refres
 func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 	rt := r.FormValue("refresh_token")
 	if rt == "" {
+		h.auditFailure("refresh", "invalid_request", "refresh request missing refresh token", nil, http.StatusBadRequest, "")
 		oauthError(w, "invalid_request", "missing refresh_token", http.StatusBadRequest)
 		return
 	}
@@ -578,9 +710,11 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 	accessToken, audience, rtExpiresAt, err := h.store.ReserveRefreshToken(rt)
 	if err != nil {
 		if errors.Is(err, ErrRefreshTokenDeleteFailed) {
+			h.auditFailure("refresh", "store_error", "refresh token store unavailable", err, http.StatusServiceUnavailable, "")
 			slog.Warn("refresh token store failure", "err", err)
 			oauthError(w, "temporarily_unavailable", "transient store error, please retry", http.StatusServiceUnavailable)
 		} else {
+			h.auditFailure("refresh", "invalid_grant", "refresh token rejected", err, http.StatusBadRequest, "")
 			slog.Warn("refresh token rejected", "err", err)
 			oauthError(w, "invalid_grant", "refresh token not found or expired", http.StatusBadRequest)
 		}
@@ -599,11 +733,13 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 		resolved, audErr := h.resolveRequestedAudience(resources)
 		if audErr != nil {
 			h.store.RestoreRefreshToken(rt, accessToken, originalAudience, rtExpiresAt)
+			h.auditFailure("refresh", "invalid_target", "refresh token target rejected", audErr, http.StatusBadRequest, tokenFingerprint(accessToken))
 			oauthError(w, "invalid_target", audErr.Error(), http.StatusBadRequest)
 			return
 		}
 		if !isSubAudience(resolved, originalAudience) {
 			h.store.RestoreRefreshToken(rt, accessToken, originalAudience, rtExpiresAt)
+			h.auditFailure("refresh", "invalid_target", "refresh token target widening rejected", nil, http.StatusBadRequest, tokenFingerprint(accessToken))
 			oauthError(w, "invalid_target", "resource is not a valid narrowing of the original audience", http.StatusBadRequest)
 			return
 		}
@@ -617,12 +753,14 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 	if valErr != nil {
 		var upstreamErr *provider.UpstreamError
 		if errors.As(valErr, &upstreamErr) {
+			h.auditFailure("refresh", "provider_error", "refresh identity validation unavailable", valErr, http.StatusServiceUnavailable, tokenFingerprint(accessToken))
 			slog.Warn("refresh rejected: transient upstream error", "err", valErr)
 			// Restore the token with its original audience so the client can retry,
 			// potentially with a different resource value.
 			h.store.RestoreRefreshToken(rt, accessToken, originalAudience, rtExpiresAt)
 			oauthError(w, "temporarily_unavailable", "upstream provider unreachable, retry later", http.StatusServiceUnavailable)
 		} else {
+			h.auditFailure("refresh", "invalid_grant", "refresh token underlying access token invalid", valErr, http.StatusBadRequest, tokenFingerprint(accessToken))
 			slog.Warn("refresh rejected: underlying token invalid", "err", valErr)
 			// Token genuinely invalid; do not restore.
 			oauthError(w, "invalid_grant", "underlying token no longer valid", http.StatusBadRequest)
@@ -635,6 +773,7 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 	// Issue the rotated refresh token. The original is already consumed (reserved).
 	newRT, rtErr := h.store.CreateRefreshToken(accessToken, audience, h.refreshTokenTTL())
 	if rtErr != nil {
+		h.auditFailure("refresh", "store_error", "refresh token rotation failed", rtErr, http.StatusInternalServerError, tokenFingerprint(accessToken))
 		slog.Error("failed to rotate refresh token", "err", rtErr)
 		// Restore the original token (with its original audience) so the client can retry.
 		h.store.RestoreRefreshToken(rt, accessToken, originalAudience, rtExpiresAt)
@@ -643,6 +782,7 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.writeTokenResponse(w, accessToken, "", newRT, id.Subject)
+	h.auditSuccess("refresh", "refresh token exchange completed", http.StatusOK)
 }
 
 // DeviceAuthorize handles POST /device_authorization (RFC 8628).
@@ -656,6 +796,7 @@ func (h *Handler) DeviceAuthorize(w http.ResponseWriter, r *http.Request) {
 	}
 	audience, audErr := h.resolveRequestedAudience(r.Form["resource"])
 	if audErr != nil {
+		h.auditFailure("authorize", "invalid_target", "device authorization target rejected", audErr, http.StatusBadRequest, "")
 		oauthError(w, "invalid_target", audErr.Error(), http.StatusBadRequest)
 		return
 	}
@@ -665,6 +806,7 @@ func (h *Handler) DeviceAuthorize(w http.ResponseWriter, r *http.Request) {
 
 	ghResp, err := h.startGitHubDeviceFlow(r.Context(), scope)
 	if err != nil {
+		h.auditFailure("authorize", "provider_error", "provider device authorization start failed", err, http.StatusBadGateway, "")
 		slog.Error("GitHub device flow start failed", "err", err)
 		oauthError(w, "server_error", "failed to start device flow with GitHub", http.StatusBadGateway)
 		return
@@ -673,6 +815,7 @@ func (h *Handler) DeviceAuthorize(w http.ResponseWriter, r *http.Request) {
 	expiresAt := time.Now().Add(time.Duration(ghResp.ExpiresIn) * time.Second)
 	internalCode, err := h.store.CreateDevice(ghResp.DeviceCode, ghResp.UserCode, ghResp.VerificationURI, expiresAt, ghResp.Interval, audience)
 	if err != nil {
+		h.auditFailure("authorize", "store_error", "device authorization session creation failed", err, http.StatusInternalServerError, "")
 		slog.Error("device session creation failed", "err", err)
 		oauthError(w, "server_error", "internal error", http.StatusInternalServerError)
 		return
@@ -691,6 +834,7 @@ func (h *Handler) DeviceAuthorize(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(resp)
+	h.auditSuccess("authorize", "device authorization started", http.StatusOK)
 }
 
 type githubDeviceCodeResp struct {
@@ -793,7 +937,7 @@ func (h *Handler) pollGitHubDeviceToken(ctx context.Context, githubDevCode strin
 		Scope:           raw.Scope,
 		RefreshToken:    raw.RefreshToken,
 		AccessExpiresIn: time.Duration(raw.ExpiresIn) * time.Second,
-		Error:           raw.Error,
+		Error:           provider.NormalizeOAuthErrorCode(raw.Error),
 	}, nil
 }
 
@@ -837,6 +981,7 @@ func (h *Handler) ValidateToken(ctx context.Context, token, audience string) (su
 	}
 	id, valErr := h.provider.ValidateToken(ctx, token)
 	if valErr != nil {
+		h.auditFailure("identity_resolution", "provider_error", "bearer identity resolution failed", valErr, http.StatusUnauthorized, tokenFingerprint(token))
 		return "", "", valErr
 	}
 	cacheAudience := ""
@@ -844,6 +989,7 @@ func (h *Handler) ValidateToken(ctx context.Context, token, audience string) (su
 		cacheAudience = audience
 	}
 	h.store.CacheToken(token, id.Subject, cacheAudience)
+	h.auditSuccess("identity_resolution", "bearer identity resolved", http.StatusOK)
 	return id.Subject, "", nil
 }
 
@@ -975,6 +1121,7 @@ func (h *Handler) runGitHubRotation(ctx context.Context, token, audience string)
 	tokens, err := h.provider.RefreshToken(ctx, record.ProviderRefreshToken)
 	if err != nil {
 		if errors.Is(err, provider.ErrRefreshNotSupported) {
+			h.auditFailure("rotation", "not_supported", "provider token rotation is not supported", err, 0, tokenFingerprint(token))
 			// Permanent: provider does not implement rotation. Clear so
 			// subsequent ValidateToken calls do not retry this branch.
 			h.store.ClearProviderRefresh(token)
@@ -982,6 +1129,7 @@ func (h *Handler) runGitHubRotation(ctx context.Context, token, audience string)
 		}
 		var upstreamErr *provider.UpstreamError
 		if errors.As(err, &upstreamErr) {
+			h.auditFailure("rotation", "provider_error", "provider token rotation unavailable", err, 0, tokenFingerprint(token))
 			// Transient (network failure / 5xx). Leave metadata intact so
 			// the next request retries — provider will likely recover.
 			slog.Warn("rotation_failed",
@@ -998,6 +1146,7 @@ func (h *Handler) runGitHubRotation(ctx context.Context, token, audience string)
 		// permanently failed additionally causes EnsureFreshAccessToken-
 		// ForSubject's lenient branch to return ErrRotationFailed instead
 		// of the (now-dead) cached bearer.
+		h.auditFailure("rotation", "provider_error", "provider token rotation rejected", err, 0, tokenFingerprint(token))
 		slog.Warn("rotation_failed",
 			"token_hash", tokenFingerprint(token),
 			"err", err,
@@ -1007,6 +1156,7 @@ func (h *Handler) runGitHubRotation(ctx context.Context, token, audience string)
 		return rotationResult{}
 	}
 	if tokens.AccessToken == "" {
+		h.auditFailure("rotation", "malformed_response", "provider token rotation returned no access token", nil, 0, tokenFingerprint(token))
 		slog.Warn("rotation_failed",
 			"token_hash", tokenFingerprint(token),
 			"err", "empty access_token from provider",
@@ -1040,6 +1190,14 @@ func (h *Handler) runGitHubRotation(ctx context.Context, token, audience string)
 		"old_token_hash", tokenFingerprint(token),
 		"new_token_hash", tokenFingerprint(tokens.AccessToken),
 	)
+	h.recordAudit(authaudit.Event{
+		Phase:      "rotation",
+		Provider:   h.provider.Name(),
+		Result:     "success",
+		HTTPStatus: http.StatusOK,
+		Message:    "provider access token rotated",
+		TokenHash:  tokenFingerprint(tokens.AccessToken),
+	})
 	return rotationResult{
 		newToken: tokens.AccessToken,
 		subject:  record.Subject,
@@ -1371,10 +1529,10 @@ func (h *Handler) JWKS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pub := h.privateKey.Public().(*rsa.PublicKey)
-	
+
 	// Encode N and E
 	nStr := base64.RawURLEncoding.EncodeToString(pub.N.Bytes())
-	
+
 	eBytes := make([]byte, 4)
 	binary.BigEndian.PutUint32(eBytes, uint32(pub.E))
 	start := 0

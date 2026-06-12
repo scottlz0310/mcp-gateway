@@ -199,6 +199,7 @@ environment:
 | `MCP_CONFIG_FILE` | `./config.yaml` | setup 結果と暗号化 secret。 |
 | `MCP_GATEWAY_KEY_PATH` | `./gateway.key` | age X25519 identity。安全にバックアップしてください。 |
 | `MCP_GATEWAY_TOKEN_STORE_PATH` | `/data/tokens.json` | Docker 向け token 永続化 path。Docker 以外では書き込み可能な path を指定してください。 |
+| `MCP_GATEWAY_AUTH_AUDIT_LOG_PATH` | OS のユーザー state 領域。公式 image では `/data/mcp-gateway/logs/auth-audit.jsonl` | OAuth 監査 JSON Lines。相対 path と Git worktree 配下は拒否されます。 |
 
 詳細は [docs/configuration.md](docs/configuration.md) を参照してください。
 

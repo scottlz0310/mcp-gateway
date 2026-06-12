@@ -80,16 +80,16 @@ func TestGitHubAuthorizeURL(t *testing.T) {
 
 func TestGitHubExchangeCode(t *testing.T) {
 	cases := []struct {
-		name             string
-		status           int
-		body             string
-		wantToken        string
-		wantScopes       []string
-		wantRefresh      string
-		wantAccessExpiry time.Duration
+		name              string
+		status            int
+		body              string
+		wantToken         string
+		wantScopes        []string
+		wantRefresh       string
+		wantAccessExpiry  time.Duration
 		wantRefreshExpiry time.Duration
-		wantErr          bool
-		wantUpstrm       bool
+		wantErr           bool
+		wantUpstrm        bool
 	}{
 		{
 			name:       "success non-expiring",
@@ -177,6 +177,57 @@ func TestGitHubExchangeCode(t *testing.T) {
 			}
 			if resp.RefreshTokenExpiresIn != tc.wantRefreshExpiry {
 				t.Errorf("refresh expiry: got %v, want %v", resp.RefreshTokenExpiresIn, tc.wantRefreshExpiry)
+			}
+		})
+	}
+}
+
+func TestGitHubOAuthErrorIsTypedAndRedacted(t *testing.T) {
+	const providerDescription = "sensitive provider response details"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_grant","error_description":"` + providerDescription + `"}`))
+	}))
+	defer srv.Close()
+
+	p := newGitHubFromServer(t, srv)
+	_, err := p.ExchangeCode(context.Background(), "secret-authorization-code")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var oauthErr *OAuthError
+	if !errors.As(err, &oauthErr) {
+		t.Fatalf("error type: got %T, want *OAuthError", err)
+	}
+	if oauthErr.Code != "invalid_grant" || oauthErr.HTTPStatus != http.StatusBadRequest {
+		t.Errorf("OAuthError: got %#v", oauthErr)
+	}
+	if strings.Contains(err.Error(), providerDescription) || strings.Contains(err.Error(), "secret-authorization-code") {
+		t.Errorf("error leaked provider or request secret: %v", err)
+	}
+	code, status, transient := ErrorDetails(err)
+	if code != "invalid_grant" || status != http.StatusBadRequest || transient {
+		t.Errorf("ErrorDetails: got code=%q status=%d transient=%v", code, status, transient)
+	}
+}
+
+func TestNormalizeOAuthErrorCode(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{input: "invalid_grant", want: "invalid_grant"},
+		{input: " access-denied ", want: "access-denied"},
+		{input: "bad.value", want: "bad.value"},
+		{input: "bad value", want: "invalid_error_code"},
+		{input: strings.Repeat("x", 65), want: "invalid_error_code"},
+		{input: "", want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.input, func(t *testing.T) {
+			if got := NormalizeOAuthErrorCode(tc.input); got != tc.want {
+				t.Errorf("NormalizeOAuthErrorCode(%q): got %q, want %q", tc.input, got, tc.want)
 			}
 		})
 	}

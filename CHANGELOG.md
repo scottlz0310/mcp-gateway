@@ -9,6 +9,10 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Add persistent OAuth audit diagnostics ([#102](https://github.com/scottlz0310/mcp-gateway/issues/102))
+  - Record authorize, callback, token exchange, identity resolution, refresh, and provider rotation outcomes as structured events
+  - Persist redacted JSON Lines outside Git worktrees with OS-specific user-state defaults and size/age/count rotation
+  - Add `GET /internal/v1/auth/failures` on the existing loopback and shared-secret internal API boundary
 - Add OIDC provider support ([#98](https://github.com/scottlz0310/mcp-gateway/pull/98))
   - Support mcp-gateway as an OIDC Identity Provider to support agy CLI
   - Support OIDC RSA private key persistence

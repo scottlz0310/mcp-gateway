@@ -67,6 +67,10 @@ is logged that the legacy is ignored.
 | `MCP_GATEWAY_BASE_URL` | none | Deprecated alias for `MCP_GATEWAY_PUBLIC_URL`. Emits a startup warning when set. |
 | `MCP_GATEWAY_TRUSTED_PROXIES` | none | Comma-separated CIDR list for immediate reverse proxies whose `X-Forwarded-*` headers are trusted. |
 | `MCP_GATEWAY_TOKEN_STORE_PATH` | `/data/tokens.json` | Persistent token store path. Set to an empty value to disable persistence. |
+| `MCP_GATEWAY_AUTH_AUDIT_LOG_PATH` | OS-specific user state path; official image: `/data/mcp-gateway/logs/auth-audit.jsonl` | OAuth 監査 JSON Lines の絶対 path。相対 path と Git worktree 配下は起動時に拒否される。 |
+| `MCP_GATEWAY_AUTH_AUDIT_MAX_SIZE_MB` | `10` | 監査ログ1ファイルの最大サイズ（MiB）。 |
+| `MCP_GATEWAY_AUTH_AUDIT_MAX_BACKUPS` | `5` | 保持するローテーション済み監査ログの最大数。 |
+| `MCP_GATEWAY_AUTH_AUDIT_MAX_AGE_DAYS` | `30` | ローテーション済み監査ログの最大保持日数。 |
 | `MCP_GATEWAY_TOKEN_AUDIENCE_STRICT` | `false` | Reject legacy tokens that have no recorded audience metadata. Leave disabled during migration. |
 | `MCP_GATEWAY_GITHUB_REFRESH_ENABLED` | `false` | Enable transparent rotation of expiring GitHub OAuth user access tokens. Safe to leave on with non-expiring OAuth Apps; the rotation path stays dormant unless GitHub returns `refresh_token` + `expires_in`. See [GitHub OAuth Refresh Token Rotation](#github-oauth-refresh-token-rotation). |
 | `MCP_GATEWAY_ALLOWED_REDIRECT_HOSTS` | none | Comma-separated list of hostnames permitted in OAuth redirect_uris. When set, replaces the built-in default list entirely. |
@@ -283,6 +287,54 @@ and proxying run.
 | `/setup` | GET/POST | First-run setup wizard endpoint, available only in setup mode. |
 | `/health` | GET | Health check in normal mode. |
 | `/<prefix>` | ANY | Reverse proxy to the matched upstream. Bearer-validated unless `auth=none` is set. |
+
+## OAuth 監査ログ
+
+認証開始、callback、token exchange、identity resolution、refresh、provider
+token rotation の成功・失敗を、標準出力と専用 JSON Lines ファイルの両方へ
+記録する。ファイルは1行1イベントで、`jq`、PowerShell、AI エージェントから
+そのまま解析できる。
+
+### 既定 path
+
+| 実行環境 | 既定 path |
+|----------|-----------|
+| Windows | `%LOCALAPPDATA%\mcp-gateway\logs\auth-audit.jsonl` |
+| Linux | `$XDG_STATE_HOME/mcp-gateway/logs/auth-audit.jsonl`。`XDG_STATE_HOME` 未設定時は `$HOME/.local/state/mcp-gateway/logs/auth-audit.jsonl` |
+| macOS | `$HOME/Library/Logs/mcp-gateway/auth-audit.jsonl` |
+| 公式 container image | `/data/mcp-gateway/logs/auth-audit.jsonl` |
+
+公式 image は Linux 標準の `XDG_STATE_HOME=/data` を設定済みである。
+compose を使わない `docker run` でも起動でき、`/data` に volume を mount
+すると container 再作成後も保持できる。
+
+```bash
+docker run --rm -p 8080:8080 \
+  --volume mcp-gateway-data:/data \
+  --env OAUTH_CLIENT_ID=<client-id> \
+  --env OAUTH_CLIENT_SECRET=<client-secret> \
+  --env MCP_GATEWAY_BIND_ADDR=0.0.0.0:8080 \
+  --env 'ROUTE_EXAMPLE=/mcp/example|http://example-mcp:8081' \
+  ghcr.io/scottlz0310/mcp-gateway:latest
+```
+
+ネイティブ実行ではリポジトリを汚さないよう、相対 path、current working
+directory への fallback、Git worktree 配下の明示 path を拒否する。OS の
+ユーザー領域を解決できない場合や、保存先を作成・追記できない場合は起動失敗と
+なる。
+
+### ローテーション
+
+- 現行ファイルが `MCP_GATEWAY_AUTH_AUDIT_MAX_SIZE_MB` に達すると UTC timestamp
+  付きファイルへローテーションする。
+- `MCP_GATEWAY_AUTH_AUDIT_MAX_BACKUPS` を超えた世代と、
+  `MCP_GATEWAY_AUTH_AUDIT_MAX_AGE_DAYS` を超えたファイルを削除する。
+- ローテーション済みファイルは AI 解析時に直接読めるよう圧縮しない。
+- ファイルは owner のみ読み書き可能な permission で作成する。
+
+監査イベントには token、authorization code、device code、OAuth `state`、
+client secret、Authorization header、provider response body を保存しない。
+相関が必要な token は短い SHA-256 fingerprint のみを記録する。
 
 ## GitHub OAuth Refresh Token Rotation
 

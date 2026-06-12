@@ -7,6 +7,10 @@
 
 ### 追加
 
+- OAuth 監査ログと診断機能を追加（[#102](https://github.com/scottlz0310/mcp-gateway/issues/102)）
+  - authorize、callback、token exchange、identity resolution、refresh、provider rotation の成否を構造化イベントとして記録
+  - OS のユーザー state 領域を既定とし、Git worktree 外へ機密情報を除外した JSON Lines をサイズ・日数・世代数でローテーション保存
+  - 既存の loopback + shared secret internal API に `GET /internal/v1/auth/failures` を追加
 - OIDC プロバイダーのサポートを追加（[#98](https://github.com/scottlz0310/mcp-gateway/pull/98)）
   - agy CLI をサポートするため、mcp-gateway を OIDC Identity Provider として動作可能に
   - OIDC 用の RSA 秘密鍵の永続化をサポート

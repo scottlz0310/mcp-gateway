@@ -1,12 +1,7 @@
-// Package internalapi implements the Phase B delegated-access PoC endpoints
-// (#72). The handlers in this package serve a loopback-only HTTP listener
-// and let trusted upstream MCP processes fetch the latest valid access
-// token for a known subject without re-doing the OAuth user flow.
-//
-// Trust boundary: the listener MUST bind to a loopback address (127.0.0.1
-// or ::1) and requests MUST present the configured shared secret in the
-// Authorization header. Both controls are enforced; binding to a non-loopback
-// address is a startup error in cmd/server.
+// Package internalapi は delegated access (#72) と認証失敗診断 (#102) の
+// internal endpoint を提供する。loopback listener と shared secret の両方を
+// 必須とし、trusted upstream だけに access token 取得と監査診断を許可する。
+// non-loopback bind は cmd/server の起動時に拒否する。
 package internalapi
 
 import (
@@ -18,10 +13,12 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/scottlz0310/mcp-gateway/internal/auth"
+	"github.com/scottlz0310/mcp-gateway/internal/authaudit"
 )
 
 // MinSecretLength is the smallest acceptable shared secret length.
@@ -40,29 +37,47 @@ type TokenResolver interface {
 	EnsureFreshAccessTokenForSubject(ctx context.Context, subject string) (auth.DelegatedAccessResult, error)
 }
 
+// FailureReader は機密情報除外済みの直近 OAuth 失敗 snapshot を提供する。
+// 実 auth handler は authaudit.FileRecorder へ処理を委譲する。
+type FailureReader interface {
+	RecentAuthFailures() []authaudit.Event
+}
+
 // Handler serves the loopback-only internal API.
 type Handler struct {
 	resolver TokenResolver
+	failures FailureReader
 	secret   string
+}
+
+type HandlerOption func(*Handler)
+
+// WithFailureReader は OAuth 失敗診断 endpoint を有効化する。
+func WithFailureReader(reader FailureReader) HandlerOption {
+	return func(h *Handler) {
+		h.failures = reader
+	}
 }
 
 // NewHandler builds the internal API handler. The secret must be at least
 // MinSecretLength characters; shorter secrets are an error so the caller
 // (cmd/server) can fail closed at startup rather than serving a weak
 // boundary.
-func NewHandler(resolver TokenResolver, secret string) (*Handler, error) {
+func NewHandler(resolver TokenResolver, secret string, opts ...HandlerOption) (*Handler, error) {
 	if resolver == nil {
 		return nil, errors.New("internalapi: resolver must not be nil")
 	}
 	if len(secret) < MinSecretLength {
 		return nil, errors.New("internalapi: shared secret must be at least 32 characters")
 	}
-	return &Handler{resolver: resolver, secret: secret}, nil
+	handler := &Handler{resolver: resolver, secret: secret}
+	for _, opt := range opts {
+		opt(handler)
+	}
+	return handler, nil
 }
 
-// RegisterRoutes wires the internal API onto mux. Currently a single
-// endpoint, but kept as a method so future delegated-access routes can be
-// added without touching the listener wiring.
+// RegisterRoutes は delegated access と認証診断 route を mux へ登録する。
 //
 // We register the route without an HTTP method prefix and check r.Method
 // inside the handler. The Go 1.22+ ServeMux method-matching syntax
@@ -70,6 +85,57 @@ func NewHandler(resolver TokenResolver, secret string) (*Handler, error) {
 // 405, bypassing our JSON error envelope.
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/internal/v1/whoami", h.Whoami)
+	mux.HandleFunc("/internal/v1/auth/failures", h.AuthFailures)
+}
+
+type authFailuresResponse struct {
+	Failures []authaudit.Event `json:"failures"`
+}
+
+// AuthFailures は直近の OAuth 失敗を最新順で返す。
+// delegated access と同じ loopback + pre-shared-secret 境界を使用する。
+func (h *Handler) AuthFailures(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	if !isLoopback(r.RemoteAddr) {
+		writeError(w, http.StatusForbidden, "loopback_required")
+		return
+	}
+	if !h.checkAuth(r) {
+		writeError(w, http.StatusUnauthorized, "invalid_authorization")
+		return
+	}
+	if h.failures == nil {
+		writeError(w, http.StatusServiceUnavailable, "diagnostics_unavailable")
+		return
+	}
+
+	limit := authaudit.DefaultFailureLimit
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 || parsed > authaudit.DefaultFailureLimit {
+			writeError(w, http.StatusBadRequest, "invalid_limit")
+			return
+		}
+		limit = parsed
+	}
+	failures := h.failures.RecentAuthFailures()
+	if len(failures) > limit {
+		failures = failures[:limit]
+	}
+	if failures == nil {
+		failures = []authaudit.Event{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	if err := json.NewEncoder(w).Encode(authFailuresResponse{Failures: failures}); err != nil {
+		slog.Warn("internalapi: auth failures response encode failed", "err", err)
+	}
 }
 
 // whoamiRequest is the body shape for POST /internal/v1/whoami.

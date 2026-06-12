@@ -112,6 +112,25 @@ returns `auth.ErrSubjectNotFound` and `auth.ErrRotationFailed` as distinct typed
 
 ---
 
+### 2.4 OAuth 失敗診断 endpoint
+
+`GET /internal/v1/auth/failures` は、既存の loopback + shared secret 境界で
+直近100件の OAuth 失敗を最新順に返す。`limit=1..100` で件数を縮小できる。
+
+| Error code | HTTP status | Trigger |
+|---|---|---|
+| `method_not_allowed` | 405 | `GET` 以外 |
+| `loopback_required` | 403 | loopback 以外からの接続 |
+| `invalid_authorization` | 401 | shared secret 不一致 |
+| `invalid_limit` | 400 | `limit` が1から100の整数ではない |
+| `diagnostics_unavailable` | 503 | failure reader が設定されていない |
+
+応答イベントには token、authorization code、OAuth `state`、secret、provider
+response body を含めない。永続的な解析の正本は OAuth 監査 JSON Lines
+ファイルであり、この endpoint のメモリ履歴は process 再起動時に消失する。
+
+---
+
 ## 3. copilot-review-mcp Mapping Contract
 
 This section documents how gateway error codes propagate through copilot-review-mcp's internal
