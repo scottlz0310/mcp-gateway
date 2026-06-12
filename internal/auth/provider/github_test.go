@@ -337,9 +337,11 @@ func TestGitHubValidateToken(t *testing.T) {
 		name       string
 		status     int
 		body       string
+		headers    map[string]string
 		wantSub    string
 		wantErr    bool
 		wantUpstrm bool
+		wantCode   string
 	}{
 		{
 			name:    "success",
@@ -348,10 +350,11 @@ func TestGitHubValidateToken(t *testing.T) {
 			wantSub: "alice",
 		},
 		{
-			name:    "401 invalid token",
-			status:  http.StatusUnauthorized,
-			body:    "",
-			wantErr: true,
+			name:     "401 invalid token",
+			status:   http.StatusUnauthorized,
+			body:     "",
+			wantErr:  true,
+			wantCode: "invalid_token",
 		},
 		{
 			name:       "5xx upstream",
@@ -361,11 +364,20 @@ func TestGitHubValidateToken(t *testing.T) {
 			wantUpstrm: true,
 		},
 		{
-			name:       "403 is upstream error",
+			name:     "403 access denied is permanent",
+			status:   http.StatusForbidden,
+			body:     "",
+			wantErr:  true,
+			wantCode: "access_denied",
+		},
+		{
+			name:       "403 primary rate limit is transient",
 			status:     http.StatusForbidden,
 			body:       "",
+			headers:    map[string]string{"X-RateLimit-Remaining": "0"},
 			wantErr:    true,
 			wantUpstrm: true,
+			wantCode:   "rate_limited",
 		},
 		{
 			name:       "429 is upstream error",
@@ -373,6 +385,7 @@ func TestGitHubValidateToken(t *testing.T) {
 			body:       "",
 			wantErr:    true,
 			wantUpstrm: true,
+			wantCode:   "rate_limited",
 		},
 		{
 			name:    "empty login",
@@ -389,6 +402,9 @@ func TestGitHubValidateToken(t *testing.T) {
 				}
 				if got := r.Header.Get("Authorization"); got != "Bearer my-token" {
 					t.Errorf("Authorization: got %q", got)
+				}
+				for key, value := range tc.headers {
+					w.Header().Set(key, value)
 				}
 				w.WriteHeader(tc.status)
 				_, _ = w.Write([]byte(tc.body))
@@ -407,6 +423,13 @@ func TestGitHubValidateToken(t *testing.T) {
 				}
 				if !tc.wantUpstrm && errors.As(err, &ue) {
 					t.Errorf("did not expect UpstreamError, got %v", err)
+				}
+				if tc.status != http.StatusOK {
+					code, status, transient := ErrorDetails(err)
+					if code != tc.wantCode || status != tc.status || transient != tc.wantUpstrm {
+						t.Errorf("ErrorDetails: got (%q, %d, %v), want (%q, %d, %v)",
+							code, status, transient, tc.wantCode, tc.status, tc.wantUpstrm)
+					}
 				}
 				return
 			}

@@ -875,8 +875,7 @@ func (h *Handler) startGitHubDeviceFlow(ctx context.Context, scope string) (*git
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
-		return nil, &provider.UpstreamError{Err: fmt.Errorf("GitHub device code returned %d: %s", resp.StatusCode, strings.TrimSpace(string(snippet)))}
+		return nil, githubDeviceHTTPError(resp, "device_authorization")
 	}
 
 	var result githubDeviceCodeResp
@@ -914,8 +913,7 @@ func (h *Handler) pollGitHubDeviceToken(ctx context.Context, githubDevCode strin
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
-		return nil, &provider.UpstreamError{Err: fmt.Errorf("GitHub device token returned %d: %s", resp.StatusCode, strings.TrimSpace(string(snippet)))}
+		return nil, githubDeviceHTTPError(resp, "device_token")
 	}
 
 	var raw struct {
@@ -939,6 +937,33 @@ func (h *Handler) pollGitHubDeviceToken(ctx context.Context, githubDevCode strin
 		AccessExpiresIn: time.Duration(raw.ExpiresIn) * time.Second,
 		Error:           provider.NormalizeOAuthErrorCode(raw.Error),
 	}, nil
+}
+
+func githubDeviceHTTPError(resp *http.Response, operation string) error {
+	var payload struct {
+		Error string `json:"error"`
+	}
+	_ = json.NewDecoder(io.LimitReader(resp.Body, 4<<10)).Decode(&payload)
+	oauthErr := &provider.OAuthError{
+		Provider:   "github",
+		Operation:  operation,
+		Code:       provider.NormalizeOAuthErrorCode(payload.Error),
+		HTTPStatus: resp.StatusCode,
+		Transient:  resp.StatusCode >= 500 || githubRateLimited(resp),
+	}
+	if oauthErr.Transient {
+		return &provider.UpstreamError{Err: oauthErr}
+	}
+	return oauthErr
+}
+
+func githubRateLimited(resp *http.Response) bool {
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return true
+	}
+	return resp.StatusCode == http.StatusForbidden &&
+		(strings.TrimSpace(resp.Header.Get("Retry-After")) != "" ||
+			strings.TrimSpace(resp.Header.Get("X-RateLimit-Remaining")) == "0")
 }
 
 // ValidateToken checks the bearer token via the provider (with cache) and

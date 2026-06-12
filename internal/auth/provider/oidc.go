@@ -243,11 +243,18 @@ func (p *oidcProvider) ValidateToken(ctx context.Context, token string) (Identit
 				Code:       "invalid_token",
 				HTTPStatus: resp.StatusCode,
 			}
-		case http.StatusForbidden, http.StatusTooManyRequests:
+		case http.StatusForbidden:
+			return Identity{}, &OAuthError{
+				Provider:   "oidc",
+				Operation:  "userinfo",
+				Code:       "access_denied",
+				HTTPStatus: resp.StatusCode,
+			}
+		case http.StatusTooManyRequests:
 			return Identity{}, &UpstreamError{Err: &OAuthError{
 				Provider:   "oidc",
 				Operation:  "userinfo",
-				Code:       map[int]string{http.StatusForbidden: "access_denied", http.StatusTooManyRequests: "rate_limited"}[resp.StatusCode],
+				Code:       "rate_limited",
 				HTTPStatus: resp.StatusCode,
 				Transient:  true,
 			}}

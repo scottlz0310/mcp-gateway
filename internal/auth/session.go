@@ -181,7 +181,7 @@ func (s *Store) CompleteCallback(state, accessToken, scope, providerRefreshToken
 	sess, ok := s.sessions[state]
 	if !ok || time.Now().After(sess.ExpiresAt) {
 		delete(s.sessions, state)
-		return "", fmt.Errorf("session not found or expired for state %q", state)
+		return "", errors.New("session not found or expired")
 	}
 
 	code, err := generateCode()

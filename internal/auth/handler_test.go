@@ -845,6 +845,70 @@ func TestDeviceAuthorizeSuccess(t *testing.T) {
 	}
 }
 
+func TestGitHubDeviceHTTPErrorRedactsResponseBody(t *testing.T) {
+	cases := []struct {
+		name          string
+		status        int
+		wantTransient bool
+	}{
+		{name: "provider rejection", status: http.StatusBadRequest},
+		{name: "provider unavailable", status: http.StatusServiceUnavailable, wantTransient: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ghServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = fmt.Fprint(w, `{"error":"invalid_grant","error_description":"secret-provider-response"}`)
+			}))
+			defer ghServer.Close()
+
+			originalClient := githubClient
+			githubClient = &http.Client{
+				Transport: rewriteHostTransport{target: ghServer.URL, inner: ghServer.Client().Transport},
+			}
+			defer func() { githubClient = originalClient }()
+
+			h := newTestHandler(t)
+			operations := []struct {
+				name string
+				call func() error
+			}{
+				{
+					name: "device authorization",
+					call: func() error {
+						_, err := h.startGitHubDeviceFlow(context.Background(), "repo")
+						return err
+					},
+				},
+				{
+					name: "device token",
+					call: func() error {
+						_, err := h.pollGitHubDeviceToken(context.Background(), "device-code")
+						return err
+					},
+				},
+			}
+			for _, operation := range operations {
+				t.Run(operation.name, func(t *testing.T) {
+					err := operation.call()
+					if err == nil {
+						t.Fatal("expected error")
+					}
+					if strings.Contains(err.Error(), "secret-provider-response") {
+						t.Fatalf("error leaked provider response body: %v", err)
+					}
+					code, status, transient := provider.ErrorDetails(err)
+					if code != "invalid_grant" || status != tc.status || transient != tc.wantTransient {
+						t.Errorf("ErrorDetails: got (%q, %d, %v), want (%q, %d, %v)",
+							code, status, transient, "invalid_grant", tc.status, tc.wantTransient)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestTokenDeviceGrantPending(t *testing.T) {
 	// Mock GitHub's token endpoint returning authorization_pending.
 	ghServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -357,7 +357,7 @@ func TestOIDCProviderUserInfoFailureClassification(t *testing.T) {
 		wantTransient bool
 	}{
 		{name: "unauthorized", status: http.StatusUnauthorized, wantCode: "invalid_token"},
-		{name: "forbidden", status: http.StatusForbidden, wantCode: "access_denied", wantTransient: true},
+		{name: "forbidden", status: http.StatusForbidden, wantCode: "access_denied"},
 		{name: "rate limited", status: http.StatusTooManyRequests, wantCode: "rate_limited", wantTransient: true},
 		{name: "server error", status: http.StatusBadGateway, wantTransient: true},
 		{name: "other rejection", status: http.StatusTeapot, wantCode: "invalid_token"},

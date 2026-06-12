@@ -197,11 +197,27 @@ func (p *githubProvider) ValidateToken(ctx context.Context, token string) (Ident
 				Code:       "invalid_token",
 				HTTPStatus: resp.StatusCode,
 			}
-		case http.StatusForbidden, http.StatusTooManyRequests:
+		case http.StatusForbidden:
+			if githubRateLimited(resp) {
+				return Identity{}, &UpstreamError{Err: &OAuthError{
+					Provider:   "github",
+					Operation:  "userinfo",
+					Code:       "rate_limited",
+					HTTPStatus: resp.StatusCode,
+					Transient:  true,
+				}}
+			}
+			return Identity{}, &OAuthError{
+				Provider:   "github",
+				Operation:  "userinfo",
+				Code:       "access_denied",
+				HTTPStatus: resp.StatusCode,
+			}
+		case http.StatusTooManyRequests:
 			return Identity{}, &UpstreamError{Err: &OAuthError{
 				Provider:   "github",
 				Operation:  "userinfo",
-				Code:       map[int]string{http.StatusForbidden: "access_denied", http.StatusTooManyRequests: "rate_limited"}[resp.StatusCode],
+				Code:       "rate_limited",
 				HTTPStatus: resp.StatusCode,
 				Transient:  true,
 			}}
@@ -243,6 +259,11 @@ func (p *githubProvider) ValidateToken(ctx context.Context, token string) (Ident
 		Subject:     user.Login,
 		DisplayName: user.Name,
 	}, nil
+}
+
+func githubRateLimited(resp *http.Response) bool {
+	return strings.TrimSpace(resp.Header.Get("Retry-After")) != "" ||
+		strings.TrimSpace(resp.Header.Get("X-RateLimit-Remaining")) == "0"
 }
 
 // splitScopes normalizes GitHub's comma-delimited scope string into a slice.
