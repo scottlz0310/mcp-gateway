@@ -791,6 +791,7 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) DeviceAuthorize(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	if err := r.ParseForm(); err != nil {
+		h.auditFailure("authorize", "invalid_request", "device authorization request body rejected", err, http.StatusBadRequest, "")
 		oauthError(w, "invalid_request", "malformed request body", http.StatusBadRequest)
 		return
 	}

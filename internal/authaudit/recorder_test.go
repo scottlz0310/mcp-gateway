@@ -386,6 +386,60 @@ func TestRecorderRotatesAndEnforcesBackupLimit(t *testing.T) {
 	}
 }
 
+func TestRecorderRecoversAfterRotationRenameFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "auth-audit.jsonl")
+	recorder, err := New(Config{
+		Path:            path,
+		MaxSizeBytes:    1,
+		MaxBackups:      2,
+		MaxAge:          24 * time.Hour,
+		FailureCapacity: 10,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = recorder.Close() }()
+
+	if err := recorder.Record(Event{
+		Phase:    "authorize",
+		Provider: "github",
+		Result:   "success",
+		Message:  "first event",
+	}); err != nil {
+		t.Fatalf("first Record: %v", err)
+	}
+
+	renameCalls := 0
+	recorder.renameFile = func(oldPath, newPath string) error {
+		renameCalls++
+		if renameCalls == 1 {
+			return errors.New("forced rename failure")
+		}
+		return os.Rename(oldPath, newPath)
+	}
+	err = recorder.Record(Event{
+		Phase:    "callback",
+		Provider: "github",
+		Result:   "failure",
+		Message:  "rotation fails",
+	})
+	if err == nil || !strings.Contains(err.Error(), "forced rename failure") {
+		t.Fatalf("rotation error: got %v", err)
+	}
+	if strings.Contains(err.Error(), "recorder is closed") {
+		t.Fatalf("recorder incorrectly became closed: %v", err)
+	}
+
+	if err := recorder.Record(Event{
+		Phase:    "token_exchange",
+		Provider: "github",
+		Result:   "success",
+		Message:  "recording resumed",
+	}); err != nil {
+		t.Fatalf("Record after recovered rotation: %v", err)
+	}
+}
+
 func TestRecorderRemovesExpiredBackups(t *testing.T) {
 	now := time.Date(2026, 6, 13, 1, 2, 3, 0, time.UTC)
 	dir := t.TempDir()

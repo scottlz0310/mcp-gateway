@@ -25,7 +25,7 @@ import (
 	"github.com/scottlz0310/mcp-gateway/internal/authaudit"
 )
 
-func newTestHandler(t *testing.T) *Handler {
+func newTestHandler(t *testing.T, opts ...HandlerOption) *Handler {
 	t.Helper()
 	p := provider.NewGitHub(provider.GitHubConfig{
 		ClientID:     "test-client-id",
@@ -38,7 +38,7 @@ func newTestHandler(t *testing.T) *Handler {
 		SessionTTL: 10 * time.Minute,
 		CacheTTL:   5 * time.Minute,
 		ExpiresIn:  90 * 24 * time.Hour,
-	}, p)
+	}, p, opts...)
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
@@ -842,6 +842,31 @@ func TestDeviceAuthorizeSuccess(t *testing.T) {
 	}
 	if resp["device_code"] == nil || resp["device_code"] == "" {
 		t.Error("device_code must be non-empty")
+	}
+}
+
+func TestDeviceAuthorizeMalformedBodyAudited(t *testing.T) {
+	recorder, _ := newAuditRecorder(t)
+	defer func() { _ = recorder.Close() }()
+	h := newTestHandler(t, WithAuditRecorder(recorder))
+	r := httptest.NewRequest(http.MethodPost, "/device_authorization",
+		strings.NewReader(strings.Repeat("x", (64<<10)+1)))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+
+	h.DeviceAuthorize(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d, want 400; body: %s", w.Code, w.Body.String())
+	}
+	failures := recorder.RecentFailures()
+	if len(failures) != 1 {
+		t.Fatalf("failure count: got %d, want 1", len(failures))
+	}
+	if got := failures[0]; got.Phase != "authorize" ||
+		got.ErrorClass != "invalid_request" ||
+		got.Message != "device authorization request body rejected" {
+		t.Fatalf("audit failure: got %#v", got)
 	}
 }
 

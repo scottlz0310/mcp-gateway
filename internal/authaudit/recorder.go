@@ -178,10 +178,11 @@ func rejectGitWorktreePath(path string) error {
 type FileRecorder struct {
 	mu sync.Mutex
 
-	cfg  Config
-	file *os.File
-	size int64
-	now  func() time.Time
+	cfg        Config
+	file       *os.File
+	size       int64
+	now        func() time.Time
+	renameFile func(string, string) error
 
 	failures    []Event
 	failureHead int
@@ -254,11 +255,12 @@ func newRecorder(cfg Config, now func() time.Time) (*FileRecorder, error) {
 	}
 
 	recorder := &FileRecorder{
-		cfg:      cfg,
-		file:     file,
-		size:     info.Size(),
-		now:      now,
-		failures: make([]Event, cfg.FailureCapacity),
+		cfg:        cfg,
+		file:       file,
+		size:       info.Size(),
+		now:        now,
+		renameFile: os.Rename,
+		failures:   make([]Event, cfg.FailureCapacity),
 	}
 	if err := recorder.cleanupLocked(); err != nil {
 		_ = file.Close()
@@ -364,30 +366,63 @@ func (r *FileRecorder) RecentFailures() []Event {
 }
 
 func (r *FileRecorder) rotateLocked(now time.Time) error {
+	rotated, err := r.nextRotatedPathLocked(now)
+	if err != nil {
+		return err
+	}
 	if err := r.file.Close(); err != nil {
 		return fmt.Errorf("closing auth audit log before rotation: %w", err)
 	}
 	r.file = nil
 
-	rotated, err := r.nextRotatedPathLocked(now)
+	if err := r.renameFile(r.cfg.Path, rotated); err != nil {
+		rotationErr := fmt.Errorf("rotating auth audit log %q to %q: %w", r.cfg.Path, rotated, err)
+		if recoveryErr := r.reopenCurrentLocked(); recoveryErr != nil {
+			return errors.Join(rotationErr, fmt.Errorf("recovering auth audit log after failed rotation: %w", recoveryErr))
+		}
+		return rotationErr
+	}
+
+	if err := r.reopenCurrentLocked(); err != nil {
+		openErr := fmt.Errorf("opening new auth audit log %q after rotation: %w", r.cfg.Path, err)
+		if recoveryErr := r.restoreRotatedLocked(rotated); recoveryErr != nil {
+			return errors.Join(openErr, fmt.Errorf("rolling back auth audit rotation: %w", recoveryErr))
+		}
+		return openErr
+	}
+	return r.cleanupLocked()
+}
+
+func (r *FileRecorder) reopenCurrentLocked() error {
+	file, err := os.OpenFile(r.cfg.Path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
-	if err := os.Rename(r.cfg.Path, rotated); err != nil {
-		return fmt.Errorf("rotating auth audit log %q to %q: %w", r.cfg.Path, rotated, err)
-	}
-
-	file, err := os.OpenFile(r.cfg.Path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return fmt.Errorf("opening new auth audit log %q after rotation: %w", r.cfg.Path, err)
-	}
 	if err := file.Chmod(0o600); err != nil {
 		_ = file.Close()
-		return fmt.Errorf("setting new auth audit log permissions %q: %w", r.cfg.Path, err)
+		return err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return err
 	}
 	r.file = file
-	r.size = 0
-	return r.cleanupLocked()
+	r.size = info.Size()
+	return nil
+}
+
+func (r *FileRecorder) restoreRotatedLocked(rotated string) error {
+	if err := os.Remove(r.cfg.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("removing incomplete auth audit log %q: %w", r.cfg.Path, err)
+	}
+	if err := r.renameFile(rotated, r.cfg.Path); err != nil {
+		return fmt.Errorf("restoring rotated auth audit log %q to %q: %w", rotated, r.cfg.Path, err)
+	}
+	if err := r.reopenCurrentLocked(); err != nil {
+		return fmt.Errorf("reopening restored auth audit log %q: %w", r.cfg.Path, err)
+	}
+	return nil
 }
 
 func (r *FileRecorder) nextRotatedPathLocked(now time.Time) (string, error) {
