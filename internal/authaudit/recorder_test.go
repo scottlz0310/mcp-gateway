@@ -1,7 +1,9 @@
 package authaudit
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -82,6 +84,31 @@ func TestDefaultPath(t *testing.T) {
 	}
 }
 
+func TestDefaultPathRejectsUnavailableHome(t *testing.T) {
+	cases := []struct {
+		name string
+		goos string
+		home string
+		err  error
+	}{
+		{name: "macOS lookup error", goos: "darwin", err: errors.New("lookup failed")},
+		{name: "macOS empty home", goos: "darwin"},
+		{name: "linux lookup error", goos: "linux", err: errors.New("lookup failed")},
+		{name: "linux empty home", goos: "linux"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := defaultPath(tc.goos, func(string) string { return "" }, func() (string, error) {
+				return tc.home, tc.err
+			})
+			if err == nil {
+				t.Fatal("expected error")
+			}
+		})
+	}
+}
+
 func TestResolvePathRejectsRelativeAndGitWorktree(t *testing.T) {
 	if _, err := ResolvePath("logs/auth-audit.jsonl"); err == nil {
 		t.Fatal("expected relative path rejection")
@@ -150,6 +177,59 @@ func TestFromEnvironment(t *testing.T) {
 	}
 }
 
+func TestFromEnvironmentRejectsInvalidRetentionValues(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "auth-audit.jsonl")
+	cases := []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{name: "zero size", key: "MCP_GATEWAY_AUTH_AUDIT_MAX_SIZE_MB", value: "0"},
+		{name: "invalid backups", key: "MCP_GATEWAY_AUTH_AUDIT_MAX_BACKUPS", value: "many"},
+		{name: "negative age", key: "MCP_GATEWAY_AUTH_AUDIT_MAX_AGE_DAYS", value: "-1"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("MCP_GATEWAY_AUTH_AUDIT_LOG_PATH", path)
+			t.Setenv(tc.key, tc.value)
+			if _, err := FromEnvironment(); err == nil {
+				t.Fatal("expected error")
+			}
+		})
+	}
+}
+
+func TestNewRecorderRejectsInvalidConfig(t *testing.T) {
+	valid := Config{
+		Path:            filepath.Join(t.TempDir(), "auth-audit.jsonl"),
+		MaxSizeBytes:    1,
+		MaxBackups:      1,
+		MaxAge:          time.Hour,
+		FailureCapacity: 1,
+	}
+	cases := []struct {
+		name   string
+		mutate func(*Config)
+	}{
+		{name: "relative path", mutate: func(cfg *Config) { cfg.Path = "auth-audit.jsonl" }},
+		{name: "zero max size", mutate: func(cfg *Config) { cfg.MaxSizeBytes = 0 }},
+		{name: "zero backups", mutate: func(cfg *Config) { cfg.MaxBackups = 0 }},
+		{name: "zero max age", mutate: func(cfg *Config) { cfg.MaxAge = 0 }},
+		{name: "zero failure capacity", mutate: func(cfg *Config) { cfg.FailureCapacity = 0 }},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := valid
+			tc.mutate(&cfg)
+			if _, err := New(cfg); err == nil {
+				t.Fatal("expected error")
+			}
+		})
+	}
+}
+
 func TestRecorderWritesJSONLinesAndRecentFailures(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "auth-audit.jsonl")
 	recorder, err := New(Config{
@@ -215,6 +295,55 @@ func TestRecorderWritesJSONLinesAndRecentFailures(t *testing.T) {
 	}
 	if failures[0].Phase != "rotation" || failures[1].Phase != "refresh" {
 		t.Errorf("failures are not newest-first: %#v", failures)
+	}
+}
+
+func TestRecorderPathTimestampAndClosedState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "auth-audit.jsonl")
+	recorder, err := New(Config{
+		Path:            path,
+		MaxSizeBytes:    1 << 20,
+		MaxBackups:      2,
+		MaxAge:          24 * time.Hour,
+		FailureCapacity: 2,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if recorder.Path() != path {
+		t.Fatalf("Path: got %q, want %q", recorder.Path(), path)
+	}
+
+	timestamp := time.Date(2026, 6, 13, 1, 2, 3, 456, time.FixedZone("test", 9*60*60))
+	if err := recorder.Record(Event{
+		Timestamp: timestamp,
+		Phase:     "authorize",
+		Provider:  "github",
+		Result:    "success",
+		Message:   "authorization started",
+	}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	if err := recorder.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := recorder.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+	if err := recorder.Record(Event{Result: "success"}); err == nil {
+		t.Fatal("expected closed recorder error")
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	var event Event
+	if err := json.Unmarshal(bytes.TrimSpace(data), &event); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if !event.Timestamp.Equal(timestamp.UTC()) || event.Timestamp.Location() != time.UTC {
+		t.Errorf("timestamp: got %v, want %v", event.Timestamp, timestamp.UTC())
 	}
 }
 

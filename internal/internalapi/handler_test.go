@@ -429,6 +429,15 @@ func TestAuthFailuresErrors(t *testing.T) {
 			wantError:  "method_not_allowed",
 		},
 		{
+			name:       "loopback required",
+			method:     http.MethodGet,
+			auth:       "Bearer " + testSecret,
+			target:     "/internal/v1/auth/failures",
+			withReader: true,
+			wantStatus: http.StatusForbidden,
+			wantError:  "loopback_required",
+		},
+		{
 			name:       "authorization required",
 			method:     http.MethodGet,
 			target:     "/internal/v1/auth/failures",
@@ -465,7 +474,11 @@ func TestAuthFailuresErrors(t *testing.T) {
 				t.Fatalf("NewHandler: %v", err)
 			}
 			req := httptest.NewRequest(tc.method, tc.target, nil)
-			req.RemoteAddr = "127.0.0.1:1234"
+			if tc.name == "loopback required" {
+				req.RemoteAddr = "10.20.30.40:1234"
+			} else {
+				req.RemoteAddr = "127.0.0.1:1234"
+			}
 			if tc.auth != "" {
 				req.Header.Set("Authorization", tc.auth)
 			}
@@ -482,6 +495,30 @@ func TestAuthFailuresErrors(t *testing.T) {
 				t.Errorf("error: got %q, want %q", envelope["error"], tc.wantError)
 			}
 		})
+	}
+}
+
+func TestAuthFailuresEmptyResponse(t *testing.T) {
+	h, err := NewHandler(&fakeResolver{}, testSecret, WithFailureReader(&fakeFailureReader{}))
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/internal/v1/auth/failures", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Header.Set("Authorization", "Bearer "+testSecret)
+	rec := httptest.NewRecorder()
+
+	h.AuthFailures(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", rec.Code)
+	}
+	if got := strings.TrimSpace(rec.Body.String()); got != `{"failures":[]}` {
+		t.Fatalf("body: got %s", got)
+	}
+	if rec.Header().Get("Cache-Control") != "no-store" || rec.Header().Get("Pragma") != "no-cache" {
+		t.Errorf("cache headers: got Cache-Control=%q Pragma=%q",
+			rec.Header().Get("Cache-Control"), rec.Header().Get("Pragma"))
 	}
 }
 

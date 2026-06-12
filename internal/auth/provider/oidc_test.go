@@ -277,3 +277,199 @@ func TestOIDCProviderTokenErrorIsTypedAndRedacted(t *testing.T) {
 		t.Errorf("error leaked provider or request secret: %v", err)
 	}
 }
+
+func TestOIDCProviderTokenFailureClassification(t *testing.T) {
+	cases := []struct {
+		name          string
+		status        int
+		body          string
+		wantCode      string
+		wantTransient bool
+	}{
+		{
+			name:     "provider rejection",
+			status:   http.StatusBadRequest,
+			body:     `{"error":"invalid_grant"}`,
+			wantCode: "invalid_grant",
+		},
+		{
+			name:          "provider unavailable",
+			status:        http.StatusServiceUnavailable,
+			body:          `{"error":"temporarily_unavailable"}`,
+			wantCode:      "temporarily_unavailable",
+			wantTransient: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			prov := newOIDCTestProvider(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}, nil)
+
+			_, err := prov.RefreshToken(context.Background(), "refresh-token")
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			code, status, transient := ErrorDetails(err)
+			if code != tc.wantCode || status != tc.status || transient != tc.wantTransient {
+				t.Errorf("ErrorDetails: got (%q, %d, %v), want (%q, %d, %v)",
+					code, status, transient, tc.wantCode, tc.status, tc.wantTransient)
+			}
+		})
+	}
+}
+
+func TestOIDCProviderRejectsInvalidTokenResponses(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{name: "invalid JSON", body: `{`},
+		{name: "embedded OAuth error", body: `{"error":"invalid_scope"}`},
+		{name: "missing access token", body: `{"scope":"openid"}`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			prov := newOIDCTestProvider(t, func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tc.body))
+			}, nil)
+			if _, err := prov.ExchangeCode(context.Background(), "code"); err == nil {
+				t.Fatal("expected error")
+			}
+		})
+	}
+
+	prov := newOIDCTestProvider(t, nil, nil)
+	if _, err := prov.RefreshToken(context.Background(), " "); err == nil {
+		t.Fatal("expected empty refresh token error")
+	}
+}
+
+func TestOIDCProviderUserInfoFailureClassification(t *testing.T) {
+	cases := []struct {
+		name          string
+		status        int
+		wantCode      string
+		wantTransient bool
+	}{
+		{name: "unauthorized", status: http.StatusUnauthorized, wantCode: "invalid_token"},
+		{name: "forbidden", status: http.StatusForbidden, wantCode: "access_denied", wantTransient: true},
+		{name: "rate limited", status: http.StatusTooManyRequests, wantCode: "rate_limited", wantTransient: true},
+		{name: "server error", status: http.StatusBadGateway, wantTransient: true},
+		{name: "other rejection", status: http.StatusTeapot, wantCode: "invalid_token"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			prov := newOIDCTestProvider(t, nil, func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+			})
+			_, err := prov.ValidateToken(context.Background(), "token")
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			code, status, transient := ErrorDetails(err)
+			if code != tc.wantCode || status != tc.status || transient != tc.wantTransient {
+				t.Errorf("ErrorDetails: got (%q, %d, %v), want (%q, %d, %v)",
+					code, status, transient, tc.wantCode, tc.status, tc.wantTransient)
+			}
+		})
+	}
+}
+
+func TestOIDCProviderRejectsInvalidUserInfo(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{name: "invalid JSON", body: `{`},
+		{name: "missing subject", body: `{"preferred_username":"alice"}`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			prov := newOIDCTestProvider(t, nil, func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(tc.body))
+			})
+			if _, err := prov.ValidateToken(context.Background(), "token"); err == nil {
+				t.Fatal("expected error")
+			}
+		})
+	}
+}
+
+func TestOIDCProviderDisplayNameFallbacks(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "name", body: `{"sub":"subject","name":"Alice"}`, want: "Alice"},
+		{name: "email", body: `{"sub":"subject","email":"alice@example.com"}`, want: "alice@example.com"},
+		{name: "subject", body: `{"sub":"subject"}`, want: "subject"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			prov := newOIDCTestProvider(t, nil, func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(tc.body))
+			})
+			identity, err := prov.ValidateToken(context.Background(), "token")
+			if err != nil {
+				t.Fatalf("ValidateToken: %v", err)
+			}
+			if identity.DisplayName != tc.want {
+				t.Errorf("DisplayName: got %q, want %q", identity.DisplayName, tc.want)
+			}
+		})
+	}
+}
+
+func newOIDCTestProvider(
+	t *testing.T,
+	tokenHandler http.HandlerFunc,
+	userInfoHandler http.HandlerFunc,
+) Provider {
+	t.Helper()
+	mux := http.NewServeMux()
+	var serverURL string
+	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"authorization_endpoint": serverURL + "/auth",
+			"token_endpoint":         serverURL + "/token",
+			"userinfo_endpoint":      serverURL + "/userinfo",
+		})
+	})
+	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
+		if tokenHandler == nil {
+			_, _ = w.Write([]byte(`{"access_token":"token"}`))
+			return
+		}
+		tokenHandler(w, r)
+	})
+	mux.HandleFunc("/userinfo", func(w http.ResponseWriter, r *http.Request) {
+		if userInfoHandler == nil {
+			_, _ = w.Write([]byte(`{"sub":"subject"}`))
+			return
+		}
+		userInfoHandler(w, r)
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	serverURL = server.URL
+
+	prov, err := NewOIDC(OIDCConfig{
+		ClientID:     "test-client",
+		ClientSecret: "test-secret",
+		RedirectURI:  "http://localhost/cb",
+		IssuerURL:    serverURL,
+	})
+	if err != nil {
+		t.Fatalf("NewOIDC: %v", err)
+	}
+	return prov
+}
