@@ -17,6 +17,9 @@
 
 ### 修正
 
+- github-mcp-server プロキシ時の認証失敗を修正（[#104](https://github.com/scottlz0310/mcp-gateway/pull/104)）
+  - docker-compose.yml で mcp-gateway の環境変数に `GITHUB_PERSONAL_ACCESS_TOKEN` を追加
+  - `/mcp/github` ルートに `upstream_bearer_token_env=GITHUB_PERSONAL_ACCESS_TOKEN` を指定し、クライアント側のトークン期限切れが github-mcp-server に伝播して認証エラーになる問題を解消
 - redirect_uri 許可ホストの設定経路を追加（[#100](https://github.com/scottlz0310/mcp-gateway/issues/100)）
   - `MCP_GATEWAY_ALLOWED_REDIRECT_HOSTS` 環境変数（カンマ区切り）および `gateway.allowed_redirect_hosts` 設定（config.yaml）による許可ホストの設定を可能に
   - デフォルトの許可リストに `antigravity.google` を追加

@@ -13,6 +13,17 @@
 
 ---
 
+## Issue #104 — github-mcp-server プロキシ時の認証切れ不具合の解消
+
+**目的**: github-mcp-server と連携時、クライアント（LLM）側のトークンが期限切れ、またはセッション状態が変化した際に、upstream で 401 認証エラーとなり、ゲートウェイ全体で「認証切れ」と報告される不具合を修正する。
+
+### サブタスク
+
+- [x] `examples/copilot-review-routing/docker-compose.yml` 内の `mcp-gateway` に `GITHUB_PERSONAL_ACCESS_TOKEN` 環境変数を追加
+- [x] `ROUTE_GITHUB` 設定に `upstream_bearer_token_env=GITHUB_PERSONAL_ACCESS_TOKEN` オプションを追加し、サーバー側のトークンをインジェクトさせる
+- [x] `CHANGELOG.md` / `CHANGELOG.ja.md` の `Unreleased` を更新
+- [x] `tasks.md` の関連タスクをクローズする
+
 ## Issue #102 — OAuth 認証監査ログの永続化・ローテーション・診断機能
 
 **目的**: OAuth 認証フローの成否と失敗原因を、リポジトリ外の機械可読な監査ログと internal API から事後解析可能にする。
