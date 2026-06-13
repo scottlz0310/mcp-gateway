@@ -19,7 +19,7 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- Fix proxy authentication failure for github-mcp-server ([#103](https://github.com/scottlz0310/mcp-gateway/pull/103))
+- Fix proxy authentication failure for github-mcp-server ([#104](https://github.com/scottlz0310/mcp-gateway/pull/104))
   - Pass `GITHUB_PERSONAL_ACCESS_TOKEN` to mcp-gateway environment in docker-compose.yml
   - Configure `/mcp/github` route with `upstream_bearer_token_env=GITHUB_PERSONAL_ACCESS_TOKEN` to prevent client token expiration from leaking to the github-mcp-server upstream
 - Fix redirect_uri host verification configuration ([#100](https://github.com/scottlz0310/mcp-gateway/issues/100))
