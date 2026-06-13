@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/scottlz0310/mcp-gateway/internal/auth"
+	"github.com/scottlz0310/mcp-gateway/internal/authaudit"
 )
 
 const testSecret = "test-secret-32-characters-long-aaa"
@@ -25,6 +26,14 @@ type fakeResolver struct {
 
 	gotSubject string
 	calls      int
+}
+
+type fakeFailureReader struct {
+	failures []authaudit.Event
+}
+
+func (f *fakeFailureReader) RecentAuthFailures() []authaudit.Event {
+	return append([]authaudit.Event(nil), f.failures...)
 }
 
 func (f *fakeResolver) EnsureFreshAccessTokenForSubject(_ context.Context, subject string) (auth.DelegatedAccessResult, error) {
@@ -337,6 +346,189 @@ func TestWhoamiNonLoopbackRejected(t *testing.T) {
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("status: got %d want 403", rr.Code)
 	}
+}
+
+func TestAuthFailures(t *testing.T) {
+	reader := &fakeFailureReader{failures: []authaudit.Event{
+		{
+			Timestamp:  time.Date(2026, 6, 13, 1, 2, 3, 0, time.UTC),
+			Event:      "oauth_audit",
+			Phase:      "rotation",
+			Provider:   "github",
+			Result:     "failure",
+			ErrorClass: "provider_rejected",
+			OAuthError: "bad_refresh_token",
+			Message:    "provider token rotation rejected",
+			TokenHash:  "12345678",
+		},
+		{
+			Timestamp:  time.Date(2026, 6, 13, 1, 1, 3, 0, time.UTC),
+			Event:      "oauth_audit",
+			Phase:      "callback",
+			Provider:   "oidc",
+			Result:     "failure",
+			ErrorClass: "access_denied",
+			OAuthError: "access_denied",
+			Message:    "provider authorization callback rejected",
+		},
+	}}
+	h, err := NewHandler(&fakeResolver{}, testSecret, WithFailureReader(reader))
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/internal/v1/auth/failures?limit=1", nil)
+	req.Header.Set("Authorization", "Bearer "+testSecret)
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status: got %d, want 200; body=%s", resp.StatusCode, body)
+	}
+	var payload struct {
+		Failures []authaudit.Event `json:"failures"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if len(payload.Failures) != 1 {
+		t.Fatalf("failure count: got %d, want 1", len(payload.Failures))
+	}
+	if payload.Failures[0].OAuthError != "bad_refresh_token" {
+		t.Errorf("oauth_error: got %q", payload.Failures[0].OAuthError)
+	}
+	if strings.Contains(mustJSON(t, payload), `"refresh_token":`) {
+		t.Fatal("diagnostic response contains a raw refresh_token field")
+	}
+}
+
+func TestAuthFailuresErrors(t *testing.T) {
+	cases := []struct {
+		name       string
+		method     string
+		auth       string
+		target     string
+		withReader bool
+		wantStatus int
+		wantError  string
+	}{
+		{
+			name:       "method rejected",
+			method:     http.MethodPost,
+			auth:       "Bearer " + testSecret,
+			target:     "/internal/v1/auth/failures",
+			withReader: true,
+			wantStatus: http.StatusMethodNotAllowed,
+			wantError:  "method_not_allowed",
+		},
+		{
+			name:       "loopback required",
+			method:     http.MethodGet,
+			auth:       "Bearer " + testSecret,
+			target:     "/internal/v1/auth/failures",
+			withReader: true,
+			wantStatus: http.StatusForbidden,
+			wantError:  "loopback_required",
+		},
+		{
+			name:       "authorization required",
+			method:     http.MethodGet,
+			target:     "/internal/v1/auth/failures",
+			withReader: true,
+			wantStatus: http.StatusUnauthorized,
+			wantError:  "invalid_authorization",
+		},
+		{
+			name:       "reader unavailable",
+			method:     http.MethodGet,
+			auth:       "Bearer " + testSecret,
+			target:     "/internal/v1/auth/failures",
+			wantStatus: http.StatusServiceUnavailable,
+			wantError:  "diagnostics_unavailable",
+		},
+		{
+			name:       "limit rejected",
+			method:     http.MethodGet,
+			auth:       "Bearer " + testSecret,
+			target:     "/internal/v1/auth/failures?limit=101",
+			withReader: true,
+			wantStatus: http.StatusBadRequest,
+			wantError:  "invalid_limit",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var opts []HandlerOption
+			if tc.withReader {
+				opts = append(opts, WithFailureReader(&fakeFailureReader{}))
+			}
+			h, err := NewHandler(&fakeResolver{}, testSecret, opts...)
+			if err != nil {
+				t.Fatalf("NewHandler: %v", err)
+			}
+			req := httptest.NewRequest(tc.method, tc.target, nil)
+			if tc.name == "loopback required" {
+				req.RemoteAddr = "10.20.30.40:1234"
+			} else {
+				req.RemoteAddr = "127.0.0.1:1234"
+			}
+			if tc.auth != "" {
+				req.Header.Set("Authorization", tc.auth)
+			}
+			rec := httptest.NewRecorder()
+			h.AuthFailures(rec, req)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status: got %d, want %d", rec.Code, tc.wantStatus)
+			}
+			var envelope map[string]string
+			if err := json.NewDecoder(rec.Body).Decode(&envelope); err != nil {
+				t.Fatalf("Decode: %v", err)
+			}
+			if envelope["error"] != tc.wantError {
+				t.Errorf("error: got %q, want %q", envelope["error"], tc.wantError)
+			}
+		})
+	}
+}
+
+func TestAuthFailuresEmptyResponse(t *testing.T) {
+	h, err := NewHandler(&fakeResolver{}, testSecret, WithFailureReader(&fakeFailureReader{}))
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/internal/v1/auth/failures", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Header.Set("Authorization", "Bearer "+testSecret)
+	rec := httptest.NewRecorder()
+
+	h.AuthFailures(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", rec.Code)
+	}
+	if got := strings.TrimSpace(rec.Body.String()); got != `{"failures":[]}` {
+		t.Fatalf("body: got %s", got)
+	}
+	if rec.Header().Get("Cache-Control") != "no-store" || rec.Header().Get("Pragma") != "no-cache" {
+		t.Errorf("cache headers: got Cache-Control=%q Pragma=%q",
+			rec.Header().Get("Cache-Control"), rec.Header().Get("Pragma"))
+	}
+}
+
+func mustJSON(t *testing.T, value any) string {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	return string(data)
 }
 
 // doWhoami issues a properly authenticated POST request. It centralizes

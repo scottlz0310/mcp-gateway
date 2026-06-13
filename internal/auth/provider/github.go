@@ -128,11 +128,18 @@ func (p *githubProvider) postToken(ctx context.Context, form url.Values, op stri
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
-		if resp.StatusCode >= 500 {
-			return TokenResponse{}, &UpstreamError{Err: fmt.Errorf("GitHub OAuth %s returned %d: %s", op, resp.StatusCode, strings.TrimSpace(string(snippet)))}
+		oauthCode := decodeOAuthErrorCode(resp.Body)
+		oauthErr := &OAuthError{
+			Provider:   "github",
+			Operation:  op,
+			Code:       oauthCode,
+			HTTPStatus: resp.StatusCode,
+			Transient:  resp.StatusCode >= 500,
 		}
-		return TokenResponse{}, fmt.Errorf("GitHub OAuth %s returned %d: %s", op, resp.StatusCode, strings.TrimSpace(string(snippet)))
+		if resp.StatusCode >= 500 {
+			return TokenResponse{}, &UpstreamError{Err: oauthErr}
+		}
+		return TokenResponse{}, oauthErr
 	}
 
 	var result struct {
@@ -142,7 +149,6 @@ func (p *githubProvider) postToken(ctx context.Context, form url.Values, op stri
 		ExpiresIn             int64  `json:"expires_in"`
 		RefreshTokenExpiresIn int64  `json:"refresh_token_expires_in"`
 		Error                 string `json:"error"`
-		ErrorDescription      string `json:"error_description"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return TokenResponse{}, fmt.Errorf("decoding GitHub OAuth %s response: %w", op, err)
@@ -150,10 +156,11 @@ func (p *githubProvider) postToken(ctx context.Context, form url.Values, op stri
 	if result.Error != "" {
 		// GitHub returns 200 OK with a JSON `error` field for normal OAuth
 		// failure modes (bad_verification_code, bad_refresh_token, ...).
-		if op == "refresh" && result.Error == "bad_refresh_token" {
-			return TokenResponse{}, fmt.Errorf("GitHub OAuth refresh error: %s", result.Error)
+		return TokenResponse{}, &OAuthError{
+			Provider:  "github",
+			Operation: op,
+			Code:      NormalizeOAuthErrorCode(result.Error),
 		}
-		return TokenResponse{}, fmt.Errorf("GitHub OAuth %s error: %s", op, result.Error)
 	}
 	if result.AccessToken == "" {
 		return TokenResponse{}, fmt.Errorf("empty access_token from GitHub on %s", op)
@@ -184,14 +191,51 @@ func (p *githubProvider) ValidateToken(ctx context.Context, token string) (Ident
 	if resp.StatusCode != http.StatusOK {
 		switch resp.StatusCode {
 		case http.StatusUnauthorized:
-			return Identity{}, fmt.Errorf("invalid token: GitHub returned %d", resp.StatusCode)
-		case http.StatusForbidden, http.StatusTooManyRequests:
-			return Identity{}, &UpstreamError{Err: fmt.Errorf("GitHub API returned %d", resp.StatusCode)}
+			return Identity{}, &OAuthError{
+				Provider:   "github",
+				Operation:  "userinfo",
+				Code:       "invalid_token",
+				HTTPStatus: resp.StatusCode,
+			}
+		case http.StatusForbidden:
+			if githubRateLimited(resp) {
+				return Identity{}, &UpstreamError{Err: &OAuthError{
+					Provider:   "github",
+					Operation:  "userinfo",
+					Code:       "rate_limited",
+					HTTPStatus: resp.StatusCode,
+					Transient:  true,
+				}}
+			}
+			return Identity{}, &OAuthError{
+				Provider:   "github",
+				Operation:  "userinfo",
+				Code:       "access_denied",
+				HTTPStatus: resp.StatusCode,
+			}
+		case http.StatusTooManyRequests:
+			return Identity{}, &UpstreamError{Err: &OAuthError{
+				Provider:   "github",
+				Operation:  "userinfo",
+				Code:       "rate_limited",
+				HTTPStatus: resp.StatusCode,
+				Transient:  true,
+			}}
 		default:
 			if resp.StatusCode >= 500 {
-				return Identity{}, &UpstreamError{Err: fmt.Errorf("GitHub API returned %d", resp.StatusCode)}
+				return Identity{}, &UpstreamError{Err: &OAuthError{
+					Provider:   "github",
+					Operation:  "userinfo",
+					HTTPStatus: resp.StatusCode,
+					Transient:  true,
+				}}
 			}
-			return Identity{}, fmt.Errorf("invalid token: GitHub returned %d", resp.StatusCode)
+			return Identity{}, &OAuthError{
+				Provider:   "github",
+				Operation:  "userinfo",
+				Code:       "invalid_token",
+				HTTPStatus: resp.StatusCode,
+			}
 		}
 	}
 
@@ -215,6 +259,11 @@ func (p *githubProvider) ValidateToken(ctx context.Context, token string) (Ident
 		Subject:     user.Login,
 		DisplayName: user.Name,
 	}, nil
+}
+
+func githubRateLimited(resp *http.Response) bool {
+	return strings.TrimSpace(resp.Header.Get("Retry-After")) != "" ||
+		strings.TrimSpace(resp.Header.Get("X-RateLimit-Remaining")) == "0"
 }
 
 // splitScopes normalizes GitHub's comma-delimited scope string into a slice.

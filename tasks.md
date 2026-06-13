@@ -13,6 +13,24 @@
 
 ---
 
+## Issue #102 — OAuth 認証監査ログの永続化・ローテーション・診断機能
+
+**目的**: OAuth 認証フローの成否と失敗原因を、リポジトリ外の機械可読な監査ログと internal API から事後解析可能にする。
+
+### サブタスク
+
+- [x] `internal/authaudit` に OS 別の外部保存 path 解決と Git worktree 配下拒否を実装
+- [x] JSON Lines、10 MiB、5世代、30日保持のローテーションを実装
+- [x] provider の OAuth エラーを型付き化し、`oauth_error` と HTTP status を安全に抽出
+- [x] authorize / callback / token exchange / identity resolution / refresh / rotation の監査イベントを追加
+- [x] 直近100件の失敗を保持し、`GET /internal/v1/auth/failures` から参照可能にする
+- [x] 公式 container image の `XDG_STATE_HOME` を `/data` に設定し、既定 path を `/data/mcp-gateway/logs/auth-audit.jsonl` に解決
+- [x] 機密情報除外、ローテーション境界、保持数・日数、並行書き込み、診断 API のテストを追加
+- [x] `README.md` / `README.ja.md` / `docs/configuration.md` / `docs/operations.md` を更新
+- [x] `CHANGELOG.md` / `CHANGELOG.ja.md` の `Unreleased` を更新
+
+---
+
 ## Issue #100 — redirect_uri 許可ホストに設定経路がなく agy 認証が失敗する
 
 **目的**: agy（Antigravity）からの OAuth 認証が許可リスト制限で失敗する問題を解消するため、ホスト許可リストの設定手段（環境変数および config.yaml）を追加し、デフォルト許可ホストに `antigravity.google` を加える。

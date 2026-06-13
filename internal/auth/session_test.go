@@ -2,6 +2,7 @@ package auth
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -52,9 +53,13 @@ func TestStoreCompleteCallback(t *testing.T) {
 
 func TestStoreCompleteCallbackUnknownState(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
-	_, err := s.CompleteCallback("nosuchstate", "tok", "", "", time.Time{}, "user123")
+	const state = "secret-state-value"
+	_, err := s.CompleteCallback(state, "tok", "", "", time.Time{}, "user123")
 	if err == nil {
 		t.Fatal("expected error for unknown state")
+	}
+	if strings.Contains(err.Error(), state) {
+		t.Fatalf("error leaked OAuth state: %v", err)
 	}
 }
 

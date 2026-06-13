@@ -80,16 +80,16 @@ func TestGitHubAuthorizeURL(t *testing.T) {
 
 func TestGitHubExchangeCode(t *testing.T) {
 	cases := []struct {
-		name             string
-		status           int
-		body             string
-		wantToken        string
-		wantScopes       []string
-		wantRefresh      string
-		wantAccessExpiry time.Duration
+		name              string
+		status            int
+		body              string
+		wantToken         string
+		wantScopes        []string
+		wantRefresh       string
+		wantAccessExpiry  time.Duration
 		wantRefreshExpiry time.Duration
-		wantErr          bool
-		wantUpstrm       bool
+		wantErr           bool
+		wantUpstrm        bool
 	}{
 		{
 			name:       "success non-expiring",
@@ -177,6 +177,57 @@ func TestGitHubExchangeCode(t *testing.T) {
 			}
 			if resp.RefreshTokenExpiresIn != tc.wantRefreshExpiry {
 				t.Errorf("refresh expiry: got %v, want %v", resp.RefreshTokenExpiresIn, tc.wantRefreshExpiry)
+			}
+		})
+	}
+}
+
+func TestGitHubOAuthErrorIsTypedAndRedacted(t *testing.T) {
+	const providerDescription = "sensitive provider response details"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_grant","error_description":"` + providerDescription + `"}`))
+	}))
+	defer srv.Close()
+
+	p := newGitHubFromServer(t, srv)
+	_, err := p.ExchangeCode(context.Background(), "secret-authorization-code")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	var oauthErr *OAuthError
+	if !errors.As(err, &oauthErr) {
+		t.Fatalf("error type: got %T, want *OAuthError", err)
+	}
+	if oauthErr.Code != "invalid_grant" || oauthErr.HTTPStatus != http.StatusBadRequest {
+		t.Errorf("OAuthError: got %#v", oauthErr)
+	}
+	if strings.Contains(err.Error(), providerDescription) || strings.Contains(err.Error(), "secret-authorization-code") {
+		t.Errorf("error leaked provider or request secret: %v", err)
+	}
+	code, status, transient := ErrorDetails(err)
+	if code != "invalid_grant" || status != http.StatusBadRequest || transient {
+		t.Errorf("ErrorDetails: got code=%q status=%d transient=%v", code, status, transient)
+	}
+}
+
+func TestNormalizeOAuthErrorCode(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{input: "invalid_grant", want: "invalid_grant"},
+		{input: " access-denied ", want: "access-denied"},
+		{input: "bad.value", want: "bad.value"},
+		{input: "bad value", want: "invalid_error_code"},
+		{input: strings.Repeat("x", 65), want: "invalid_error_code"},
+		{input: "", want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.input, func(t *testing.T) {
+			if got := NormalizeOAuthErrorCode(tc.input); got != tc.want {
+				t.Errorf("NormalizeOAuthErrorCode(%q): got %q, want %q", tc.input, got, tc.want)
 			}
 		})
 	}
@@ -286,9 +337,11 @@ func TestGitHubValidateToken(t *testing.T) {
 		name       string
 		status     int
 		body       string
+		headers    map[string]string
 		wantSub    string
 		wantErr    bool
 		wantUpstrm bool
+		wantCode   string
 	}{
 		{
 			name:    "success",
@@ -297,10 +350,11 @@ func TestGitHubValidateToken(t *testing.T) {
 			wantSub: "alice",
 		},
 		{
-			name:    "401 invalid token",
-			status:  http.StatusUnauthorized,
-			body:    "",
-			wantErr: true,
+			name:     "401 invalid token",
+			status:   http.StatusUnauthorized,
+			body:     "",
+			wantErr:  true,
+			wantCode: "invalid_token",
 		},
 		{
 			name:       "5xx upstream",
@@ -310,11 +364,20 @@ func TestGitHubValidateToken(t *testing.T) {
 			wantUpstrm: true,
 		},
 		{
-			name:       "403 is upstream error",
+			name:     "403 access denied is permanent",
+			status:   http.StatusForbidden,
+			body:     "",
+			wantErr:  true,
+			wantCode: "access_denied",
+		},
+		{
+			name:       "403 primary rate limit is transient",
 			status:     http.StatusForbidden,
 			body:       "",
+			headers:    map[string]string{"X-RateLimit-Remaining": "0"},
 			wantErr:    true,
 			wantUpstrm: true,
+			wantCode:   "rate_limited",
 		},
 		{
 			name:       "429 is upstream error",
@@ -322,6 +385,7 @@ func TestGitHubValidateToken(t *testing.T) {
 			body:       "",
 			wantErr:    true,
 			wantUpstrm: true,
+			wantCode:   "rate_limited",
 		},
 		{
 			name:    "empty login",
@@ -338,6 +402,9 @@ func TestGitHubValidateToken(t *testing.T) {
 				}
 				if got := r.Header.Get("Authorization"); got != "Bearer my-token" {
 					t.Errorf("Authorization: got %q", got)
+				}
+				for key, value := range tc.headers {
+					w.Header().Set(key, value)
 				}
 				w.WriteHeader(tc.status)
 				_, _ = w.Write([]byte(tc.body))
@@ -356,6 +423,13 @@ func TestGitHubValidateToken(t *testing.T) {
 				}
 				if !tc.wantUpstrm && errors.As(err, &ue) {
 					t.Errorf("did not expect UpstreamError, got %v", err)
+				}
+				if tc.status != http.StatusOK {
+					code, status, transient := ErrorDetails(err)
+					if code != tc.wantCode || status != tc.status || transient != tc.wantUpstrm {
+						t.Errorf("ErrorDetails: got (%q, %d, %v), want (%q, %d, %v)",
+							code, status, transient, tc.wantCode, tc.status, tc.wantUpstrm)
+					}
 				}
 				return
 			}

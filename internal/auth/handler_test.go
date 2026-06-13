@@ -22,9 +22,10 @@ import (
 	"time"
 
 	"github.com/scottlz0310/mcp-gateway/internal/auth/provider"
+	"github.com/scottlz0310/mcp-gateway/internal/authaudit"
 )
 
-func newTestHandler(t *testing.T) *Handler {
+func newTestHandler(t *testing.T, opts ...HandlerOption) *Handler {
 	t.Helper()
 	p := provider.NewGitHub(provider.GitHubConfig{
 		ClientID:     "test-client-id",
@@ -37,11 +38,27 @@ func newTestHandler(t *testing.T) *Handler {
 		SessionTTL: 10 * time.Minute,
 		CacheTTL:   5 * time.Minute,
 		ExpiresIn:  90 * 24 * time.Hour,
-	}, p)
+	}, p, opts...)
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
 	return h
+}
+
+func newAuditRecorder(t *testing.T) (*authaudit.FileRecorder, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "auth-audit.jsonl")
+	recorder, err := authaudit.New(authaudit.Config{
+		Path:            path,
+		MaxSizeBytes:    1 << 20,
+		MaxBackups:      2,
+		MaxAge:          24 * time.Hour,
+		FailureCapacity: authaudit.DefaultFailureLimit,
+	})
+	if err != nil {
+		t.Fatalf("authaudit.New: %v", err)
+	}
+	return recorder, path
 }
 
 func TestDiscovery(t *testing.T) {
@@ -292,6 +309,154 @@ func TestAuthorizeRedirectsToGitHub(t *testing.T) {
 	}
 	if !strings.Contains(loc, "client_id=test-client-id") {
 		t.Errorf("location missing client_id: %q", loc)
+	}
+}
+
+func TestOAuthAuditEventsAndSecretRedaction(t *testing.T) {
+	recorder, auditPath := newAuditRecorder(t)
+	p := &provider.Mock{
+		NameValue:     "github",
+		ClientIDValue: "test-client-id",
+		ScopesValue:   "repo,user",
+		ExchangeCodeFunc: func(_ context.Context, code string) (provider.TokenResponse, error) {
+			if code != "provider-secret-code" {
+				return provider.TokenResponse{}, fmt.Errorf("unexpected authorization code")
+			}
+			return provider.TokenResponse{
+				AccessToken:          "secret-access-token",
+				RefreshToken:         "secret-provider-refresh-token",
+				AccessTokenExpiresIn: 30 * time.Second,
+				Scopes:               []string{"repo", "user"},
+			}, nil
+		},
+		ValidateFunc: func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Provider: "github", Subject: "alice"}, nil
+		},
+		RefreshTokenFunc: func(_ context.Context, refreshToken string) (provider.TokenResponse, error) {
+			if refreshToken != "secret-provider-refresh-token" {
+				return provider.TokenResponse{}, fmt.Errorf("unexpected provider refresh token")
+			}
+			return provider.TokenResponse{
+				AccessToken:          "rotated-secret-access-token",
+				RefreshToken:         "rotated-secret-provider-refresh-token",
+				AccessTokenExpiresIn: time.Hour,
+			}, nil
+		},
+	}
+	h, err := NewHandler(Config{
+		BaseURL:              "http://localhost:8080",
+		SessionTTL:           10 * time.Minute,
+		CacheTTL:             5 * time.Minute,
+		ExpiresIn:            90 * 24 * time.Hour,
+		GitHubRefreshEnabled: true,
+	}, p, WithAuditRecorder(recorder))
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	authReq := httptest.NewRequest(http.MethodGet,
+		"/authorize?response_type=code&state=secret-state&redirect_uri=http://localhost/cb", nil)
+	authRec := httptest.NewRecorder()
+	h.Authorize(authRec, authReq)
+	if authRec.Code != http.StatusFound {
+		t.Fatalf("authorize status: got %d", authRec.Code)
+	}
+
+	callbackReq := httptest.NewRequest(http.MethodGet,
+		"/callback?code=provider-secret-code&state=secret-state", nil)
+	callbackRec := httptest.NewRecorder()
+	h.Callback(callbackRec, callbackReq)
+	if callbackRec.Code != http.StatusFound {
+		t.Fatalf("callback status: got %d; body=%s", callbackRec.Code, callbackRec.Body.String())
+	}
+	redirectURL, err := url.Parse(callbackRec.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse callback redirect: %v", err)
+	}
+	internalCode := redirectURL.Query().Get("code")
+	if internalCode == "" {
+		t.Fatal("callback redirect missing internal code")
+	}
+
+	tokenBody := "grant_type=authorization_code&redirect_uri=http%3A%2F%2Flocalhost%2Fcb&code=" + url.QueryEscape(internalCode)
+	tokenReq := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(tokenBody))
+	tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	tokenRec := httptest.NewRecorder()
+	h.Token(tokenRec, tokenReq)
+	if tokenRec.Code != http.StatusOK {
+		t.Fatalf("token status: got %d; body=%s", tokenRec.Code, tokenRec.Body.String())
+	}
+	var tokenResponse map[string]any
+	if err := json.NewDecoder(tokenRec.Body).Decode(&tokenResponse); err != nil {
+		t.Fatalf("decode token response: %v", err)
+	}
+	gatewayRefreshToken, _ := tokenResponse["refresh_token"].(string)
+	if gatewayRefreshToken == "" {
+		t.Fatal("token response missing gateway refresh token")
+	}
+
+	if _, rotated, err := h.ValidateToken(context.Background(), "secret-access-token", "http://localhost:8080"); err != nil {
+		t.Fatalf("ValidateToken: %v", err)
+	} else if rotated != "rotated-secret-access-token" {
+		t.Fatalf("rotated token: got %q", rotated)
+	}
+
+	refreshBody := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(gatewayRefreshToken)
+	refreshReq := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(refreshBody))
+	refreshReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	refreshRec := httptest.NewRecorder()
+	h.Token(refreshRec, refreshReq)
+	if refreshRec.Code != http.StatusOK {
+		t.Fatalf("refresh status: got %d; body=%s", refreshRec.Code, refreshRec.Body.String())
+	}
+
+	deniedReq := httptest.NewRequest(http.MethodGet,
+		"/callback?error=access_denied&error_description=contains-secret&state=another-secret-state", nil)
+	deniedRec := httptest.NewRecorder()
+	h.Callback(deniedRec, deniedReq)
+	if deniedRec.Code != http.StatusBadRequest {
+		t.Fatalf("denied callback status: got %d", deniedRec.Code)
+	}
+
+	if err := recorder.Close(); err != nil {
+		t.Fatalf("recorder.Close: %v", err)
+	}
+	data, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	var phases = map[string]bool{}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var event authaudit.Event
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatalf("invalid audit JSON line: %v", err)
+		}
+		if event.Result == "success" {
+			phases[event.Phase] = true
+		}
+	}
+	for _, phase := range []string{"authorize", "callback", "token_exchange", "identity_resolution", "refresh", "rotation"} {
+		if !phases[phase] {
+			t.Errorf("missing successful audit phase %q", phase)
+		}
+	}
+	failures := recorder.RecentFailures()
+	if len(failures) != 1 || failures[0].OAuthError != "access_denied" {
+		t.Fatalf("recent failures: got %#v", failures)
+	}
+	for _, secret := range []string{
+		"secret-state",
+		"another-secret-state",
+		"provider-secret-code",
+		"secret-access-token",
+		"secret-provider-refresh-token",
+		"rotated-secret-access-token",
+		"contains-secret",
+		gatewayRefreshToken,
+	} {
+		if strings.Contains(string(data), secret) {
+			t.Errorf("audit log contains secret value %q", secret)
+		}
 	}
 }
 
@@ -677,6 +842,95 @@ func TestDeviceAuthorizeSuccess(t *testing.T) {
 	}
 	if resp["device_code"] == nil || resp["device_code"] == "" {
 		t.Error("device_code must be non-empty")
+	}
+}
+
+func TestDeviceAuthorizeMalformedBodyAudited(t *testing.T) {
+	recorder, _ := newAuditRecorder(t)
+	defer func() { _ = recorder.Close() }()
+	h := newTestHandler(t, WithAuditRecorder(recorder))
+	r := httptest.NewRequest(http.MethodPost, "/device_authorization",
+		strings.NewReader(strings.Repeat("x", (64<<10)+1)))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+
+	h.DeviceAuthorize(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d, want 400; body: %s", w.Code, w.Body.String())
+	}
+	failures := recorder.RecentFailures()
+	if len(failures) != 1 {
+		t.Fatalf("failure count: got %d, want 1", len(failures))
+	}
+	if got := failures[0]; got.Phase != "authorize" ||
+		got.ErrorClass != "invalid_request" ||
+		got.Message != "device authorization request body rejected" {
+		t.Fatalf("audit failure: got %#v", got)
+	}
+}
+
+func TestGitHubDeviceHTTPErrorRedactsResponseBody(t *testing.T) {
+	cases := []struct {
+		name          string
+		status        int
+		wantTransient bool
+	}{
+		{name: "provider rejection", status: http.StatusBadRequest},
+		{name: "provider unavailable", status: http.StatusServiceUnavailable, wantTransient: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ghServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = fmt.Fprint(w, `{"error":"invalid_grant","error_description":"secret-provider-response"}`)
+			}))
+			defer ghServer.Close()
+
+			originalClient := githubClient
+			githubClient = &http.Client{
+				Transport: rewriteHostTransport{target: ghServer.URL, inner: ghServer.Client().Transport},
+			}
+			defer func() { githubClient = originalClient }()
+
+			h := newTestHandler(t)
+			operations := []struct {
+				name string
+				call func() error
+			}{
+				{
+					name: "device authorization",
+					call: func() error {
+						_, err := h.startGitHubDeviceFlow(context.Background(), "repo")
+						return err
+					},
+				},
+				{
+					name: "device token",
+					call: func() error {
+						_, err := h.pollGitHubDeviceToken(context.Background(), "device-code")
+						return err
+					},
+				},
+			}
+			for _, operation := range operations {
+				t.Run(operation.name, func(t *testing.T) {
+					err := operation.call()
+					if err == nil {
+						t.Fatal("expected error")
+					}
+					if strings.Contains(err.Error(), "secret-provider-response") {
+						t.Fatalf("error leaked provider response body: %v", err)
+					}
+					code, status, transient := provider.ErrorDetails(err)
+					if code != "invalid_grant" || status != tc.status || transient != tc.wantTransient {
+						t.Errorf("ErrorDetails: got (%q, %d, %v), want (%q, %d, %v)",
+							code, status, transient, "invalid_grant", tc.status, tc.wantTransient)
+					}
+				})
+			}
+		})
 	}
 }
 
@@ -1830,9 +2084,9 @@ func TestValidateTokenGitHubRotationSingleflight(t *testing.T) {
 func TestValidateTokenGitHubRotationFailureClearsMetadata(t *testing.T) {
 	const audience = "http://localhost:8080/mcp"
 	cases := []struct {
-		name              string
-		refreshFunc       func(ctx context.Context, rt string) (provider.TokenResponse, error)
-		wantMetadataKept  bool // true means metadata must remain intact for next retry
+		name             string
+		refreshFunc      func(ctx context.Context, rt string) (provider.TokenResponse, error)
+		wantMetadataKept bool // true means metadata must remain intact for next retry
 	}{
 		{
 			name: "bad_refresh_token (permanent) clears metadata",
@@ -2273,4 +2527,3 @@ func TestNewHandler_OIDCPrivateKey(t *testing.T) {
 		t.Error("expected Handler to generate a random key when OIDCPrivateKey is nil")
 	}
 }
-

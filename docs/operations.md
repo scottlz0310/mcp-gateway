@@ -180,6 +180,46 @@ If `jq` is not available, follow the raw logs:
 docker compose logs -f mcp-gateway
 ```
 
+### OAuth 監査ログファイル
+
+OAuth 監査イベントは stdout に加え、ローテーション付き JSON Lines ファイルへ
+保存される。既定 path は Windows では
+`%LOCALAPPDATA%\mcp-gateway\logs\auth-audit.jsonl`、Linux では
+`$XDG_STATE_HOME/mcp-gateway/logs/auth-audit.jsonl` または
+`$HOME/.local/state/mcp-gateway/logs/auth-audit.jsonl`、macOS では
+`$HOME/Library/Logs/mcp-gateway/auth-audit.jsonl` である。公式 container
+image は `/data/mcp-gateway/logs/auth-audit.jsonl` を使用する。
+
+PowerShell:
+
+```powershell
+$path = Join-Path $env:LOCALAPPDATA 'mcp-gateway\logs\auth-audit.jsonl'
+Get-Content -LiteralPath $path |
+  ForEach-Object { $_ | ConvertFrom-Json } |
+  Where-Object result -eq 'failure' |
+  Select-Object timestamp, phase, provider, error_class, oauth_error, http_status
+```
+
+Linux / macOS / container:
+
+```bash
+jq 'select(.result == "failure") |
+  {timestamp, phase, provider, error_class, oauth_error, http_status}' \
+  /data/mcp-gateway/logs/auth-audit.jsonl
+```
+
+直近の失敗は internal API が有効な場合に取得できる。endpoint は既存の
+loopback + shared secret 境界を共有する。
+
+```bash
+curl -fsS \
+  -H "Authorization: Bearer ${MCP_GATEWAY_INTERNAL_SECRET}" \
+  "http://127.0.0.1:${MCP_GATEWAY_INTERNAL_PORT}/internal/v1/auth/failures?limit=20"
+```
+
+応答は最新順で最大100件である。永続的な事後解析の正本は JSON Lines
+ファイルであり、internal API の履歴は process 再起動時に消失する。
+
 ## Common Problems
 
 ### `setup_required`

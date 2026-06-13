@@ -16,6 +16,9 @@ FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=builder /out/mcp-gateway /mcp-gateway
 COPY --chown=nonroot:nonroot --from=builder /out/data /data
 EXPOSE 8080
+# Linux 標準の user state root を /data に置き、volume mount 時は監査ログを
+# /data/mcp-gateway/logs 配下へそのまま永続化する。
+ENV XDG_STATE_HOME=/data
 # Trivy DS-0002: explicitly declare non-root user (distroless:nonroot UID=65532)
 USER nonroot:nonroot
 ENTRYPOINT ["/mcp-gateway"]

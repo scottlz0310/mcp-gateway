@@ -14,6 +14,7 @@ import (
 
 	"github.com/scottlz0310/mcp-gateway/internal/auth"
 	"github.com/scottlz0310/mcp-gateway/internal/auth/provider"
+	"github.com/scottlz0310/mcp-gateway/internal/authaudit"
 	appconfig "github.com/scottlz0310/mcp-gateway/internal/config"
 	"github.com/scottlz0310/mcp-gateway/internal/internalapi"
 	"github.com/scottlz0310/mcp-gateway/internal/middleware"
@@ -223,6 +224,22 @@ func main() {
 		os.Exit(1)
 	}
 
+	auditConfig, err := authaudit.FromEnvironment()
+	if err != nil {
+		slog.Error("auth audit configuration invalid", "err", err)
+		os.Exit(1)
+	}
+	auditRecorder, err := authaudit.New(auditConfig)
+	if err != nil {
+		slog.Error("auth audit initialization failed", "path", auditConfig.Path, "err", err)
+		os.Exit(1)
+	}
+	defer func() {
+		if err := auditRecorder.Close(); err != nil {
+			slog.Error("auth audit shutdown failed", "err", err)
+		}
+	}()
+
 	oauthHandler, err := auth.NewHandler(auth.Config{
 		BaseURL:              cfg.publicURL,
 		SessionTTL:           time.Duration(cfg.sessionTTLMin) * time.Minute,
@@ -234,7 +251,7 @@ func main() {
 		GitHubRefreshEnabled: cfg.githubRefreshEnabled,
 		OIDCPrivateKey:       oidcPrivateKey,
 		AllowedRedirectHosts: cfg.allowedRedirectHosts,
-	}, prov)
+	}, prov, auth.WithAuditRecorder(auditRecorder))
 	if err != nil {
 		slog.Error("auth handler init failed", "err", err)
 		os.Exit(1)
@@ -316,6 +333,7 @@ func main() {
 		"trusted_proxies", len(trustedProxies),
 		"token_audience_strict", cfg.tokenAudienceStrict,
 		"github_refresh_enabled", cfg.githubRefreshEnabled,
+		"auth_audit_log_path", auditRecorder.Path(),
 	)
 
 	server := &http.Server{
@@ -330,7 +348,7 @@ func main() {
 	// Phase B (#72) delegated-access PoC: optional loopback-only internal API.
 	// Activated only when both env vars are set; missing either → disabled
 	// (fail-closed) with an explicit log so misconfiguration is obvious.
-	startInternalAPI(oauthHandler)
+	startInternalAPI(oauthHandler, oauthHandler)
 
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		slog.Error("server error", "err", err)
@@ -545,7 +563,7 @@ func parseLogLevel(level string) slog.Level {
 // Missing or invalid configuration fails closed: the API is simply not served
 // and a log line announces the disabled state. We never bind to a non-loopback
 // address.
-func startInternalAPI(resolver internalapi.TokenResolver) {
+func startInternalAPI(resolver internalapi.TokenResolver, failures internalapi.FailureReader) {
 	secret := strings.TrimSpace(os.Getenv("MCP_GATEWAY_INTERNAL_SECRET"))
 	portRaw := strings.TrimSpace(os.Getenv("MCP_GATEWAY_INTERNAL_PORT"))
 	if secret == "" || portRaw == "" {
@@ -557,7 +575,7 @@ func startInternalAPI(resolver internalapi.TokenResolver) {
 		slog.Error("internal delegated access API disabled: invalid port", "port", portRaw)
 		return
 	}
-	handler, err := internalapi.NewHandler(resolver, secret)
+	handler, err := internalapi.NewHandler(resolver, secret, internalapi.WithFailureReader(failures))
 	if err != nil {
 		slog.Error("internal delegated access API disabled: invalid configuration", "err", err)
 		return

@@ -130,11 +130,11 @@ func (p *oidcProvider) AuthorizeURL(state, codeChallenge string) string {
 
 func (p *oidcProvider) ExchangeCode(ctx context.Context, code string) (TokenResponse, error) {
 	form := url.Values{
-		"grant_type":   {"authorization_code"},
-		"client_id":    {p.cfg.ClientID},
+		"grant_type":    {"authorization_code"},
+		"client_id":     {p.cfg.ClientID},
 		"client_secret": {p.cfg.ClientSecret},
-		"code":         {code},
-		"redirect_uri": {p.cfg.RedirectURI},
+		"code":          {code},
+		"redirect_uri":  {p.cfg.RedirectURI},
 	}
 	return p.postToken(ctx, form, "exchange")
 }
@@ -168,11 +168,18 @@ func (p *oidcProvider) postToken(ctx context.Context, form url.Values, op string
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
-		if resp.StatusCode >= 500 {
-			return TokenResponse{}, &UpstreamError{Err: fmt.Errorf("OIDC token %s returned %d: %s", op, resp.StatusCode, strings.TrimSpace(string(snippet)))}
+		oauthCode := decodeOAuthErrorCode(resp.Body)
+		oauthErr := &OAuthError{
+			Provider:   "oidc",
+			Operation:  op,
+			Code:       oauthCode,
+			HTTPStatus: resp.StatusCode,
+			Transient:  resp.StatusCode >= 500,
 		}
-		return TokenResponse{}, fmt.Errorf("OIDC token %s returned %d: %s", op, resp.StatusCode, strings.TrimSpace(string(snippet)))
+		if resp.StatusCode >= 500 {
+			return TokenResponse{}, &UpstreamError{Err: oauthErr}
+		}
+		return TokenResponse{}, oauthErr
 	}
 
 	var result struct {
@@ -186,7 +193,11 @@ func (p *oidcProvider) postToken(ctx context.Context, form url.Values, op string
 		return TokenResponse{}, fmt.Errorf("decoding OIDC token %s response: %w", op, err)
 	}
 	if result.Error != "" {
-		return TokenResponse{}, fmt.Errorf("OIDC token %s error: %s", op, result.Error)
+		return TokenResponse{}, &OAuthError{
+			Provider:  "oidc",
+			Operation: op,
+			Code:      NormalizeOAuthErrorCode(result.Error),
+		}
 	}
 	if result.AccessToken == "" {
 		return TokenResponse{}, fmt.Errorf("empty access_token from OIDC on %s", op)
@@ -226,14 +237,42 @@ func (p *oidcProvider) ValidateToken(ctx context.Context, token string) (Identit
 	if resp.StatusCode != http.StatusOK {
 		switch resp.StatusCode {
 		case http.StatusUnauthorized:
-			return Identity{}, fmt.Errorf("invalid token: OIDC userinfo returned %d", resp.StatusCode)
-		case http.StatusForbidden, http.StatusTooManyRequests:
-			return Identity{}, &UpstreamError{Err: fmt.Errorf("OIDC userinfo returned %d", resp.StatusCode)}
+			return Identity{}, &OAuthError{
+				Provider:   "oidc",
+				Operation:  "userinfo",
+				Code:       "invalid_token",
+				HTTPStatus: resp.StatusCode,
+			}
+		case http.StatusForbidden:
+			return Identity{}, &OAuthError{
+				Provider:   "oidc",
+				Operation:  "userinfo",
+				Code:       "access_denied",
+				HTTPStatus: resp.StatusCode,
+			}
+		case http.StatusTooManyRequests:
+			return Identity{}, &UpstreamError{Err: &OAuthError{
+				Provider:   "oidc",
+				Operation:  "userinfo",
+				Code:       "rate_limited",
+				HTTPStatus: resp.StatusCode,
+				Transient:  true,
+			}}
 		default:
 			if resp.StatusCode >= 500 {
-				return Identity{}, &UpstreamError{Err: fmt.Errorf("OIDC userinfo returned %d", resp.StatusCode)}
+				return Identity{}, &UpstreamError{Err: &OAuthError{
+					Provider:   "oidc",
+					Operation:  "userinfo",
+					HTTPStatus: resp.StatusCode,
+					Transient:  true,
+				}}
 			}
-			return Identity{}, fmt.Errorf("invalid token: OIDC userinfo returned %d", resp.StatusCode)
+			return Identity{}, &OAuthError{
+				Provider:   "oidc",
+				Operation:  "userinfo",
+				Code:       "invalid_token",
+				HTTPStatus: resp.StatusCode,
+			}
 		}
 	}
 
