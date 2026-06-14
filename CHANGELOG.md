@@ -30,6 +30,7 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 - `docs/architecture.md`: define mcp-gateway's role as MCP reverse proxy / routing gateway / auth boundary within the review platform; document responsibility boundaries with thread-owl, mcp-resource-subscriber, review-raven, and Mcp-Docker ([#92](https://github.com/scottlz0310/mcp-gateway/issues/92))
 - `README.md`: expand Repository Stack table to the full five-repo review infrastructure ([#92](https://github.com/scottlz0310/mcp-gateway/issues/92))
+- `docs/spike-105-auth-issue-investigation.md`: add spike investigation report on 401 authentication errors across routed MCP servers ([#105](https://github.com/scottlz0310/mcp-gateway/issues/105))
 
 ## [0.5.2] - 2026-06-10
 

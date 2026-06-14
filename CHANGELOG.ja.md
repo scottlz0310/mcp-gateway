@@ -28,6 +28,7 @@
 
 - `docs/architecture.md` 新規作成: review platform における mcp-gateway の役割（MCP reverse proxy / routing gateway / auth boundary）を明文化し、thread-owl / mcp-resource-subscriber / review-raven / Mcp-Docker との責務境界を記載（[#92](https://github.com/scottlz0310/mcp-gateway/issues/92)）
 - `README.md`: Repository Stack 表を5本立てレビュー基盤の全コンポーネントに拡張（[#92](https://github.com/scottlz0310/mcp-gateway/issues/92)）
+- `docs/spike-105-auth-issue-investigation.md`: ルーティング先 MCP サーバーで発生する認証切れ（401エラー）に関する調査結果・根本原因分析レポートを追加（[#105](https://github.com/scottlz0310/mcp-gateway/issues/105)）
 
 ## [0.5.2] - 2026-06-10
 
