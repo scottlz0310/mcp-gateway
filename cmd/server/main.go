@@ -287,7 +287,7 @@ func main() {
 	// /.well-known/oauth-protected-resource{prefix}, and 401 responses point
 	// resource_metadata at that route-scoped URL.
 	for _, route := range routes {
-		h := proxy.NewHandler(route.Upstream, oauthHandler, route.UpstreamBearerTokenEnv)
+		h := proxy.NewHandler(route.Upstream, oauthHandler, route.UpstreamBearerTokenEnv, route.Prefix)
 		var wrapped http.Handler
 		if route.NoAuth {
 			wrapped = h

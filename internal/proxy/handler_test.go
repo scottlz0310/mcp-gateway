@@ -52,7 +52,7 @@ func TestProxyInjectsIdentityHeaders(t *testing.T) {
 	defer upstream.Close()
 
 	u, _ := url.Parse(upstream.URL)
-	h := NewHandler(u, &mockInvalidator{}, "")
+	h := NewHandler(u, &mockInvalidator{}, "", "")
 
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, requestWithContext("alice", "tok"))
@@ -88,7 +88,7 @@ func TestProxyStripsClientSpoofableHeaders(t *testing.T) {
 	defer upstream.Close()
 
 	u, _ := url.Parse(upstream.URL)
-	h := NewHandler(u, &mockInvalidator{}, "")
+	h := NewHandler(u, &mockInvalidator{}, "", "")
 
 	r := requestWithContext("bob", "tok")
 	r.Header.Set("X-Forwarded-For", "1.2.3.4")
@@ -134,7 +134,7 @@ func TestProxyNormalizesAuthorization(t *testing.T) {
 	defer upstream.Close()
 
 	u, _ := url.Parse(upstream.URL)
-	h := NewHandler(u, &mockInvalidator{}, "")
+	h := NewHandler(u, &mockInvalidator{}, "", "")
 
 	r := requestWithContext("carol", "ctx-token")
 	r.Header.Set("Authorization", "Bearer client-supplied-token")
@@ -153,7 +153,7 @@ func TestProxyInvalidatesCacheOn401(t *testing.T) {
 
 	u, _ := url.Parse(upstream.URL)
 	inv := &mockInvalidator{}
-	h := NewHandler(u, inv, "")
+	h := NewHandler(u, inv, "", "")
 
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, requestWithContext("dave", "secret-token"))
@@ -172,7 +172,7 @@ func TestProxySanitizesHeaderInjectionCharacters(t *testing.T) {
 	defer upstream.Close()
 
 	u, _ := url.Parse(upstream.URL)
-	h := NewHandler(u, &mockInvalidator{}, "")
+	h := NewHandler(u, &mockInvalidator{}, "", "")
 
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, requestWithContext("alice\r\nevil: injected", "tok"))
@@ -187,7 +187,7 @@ func TestProxyNilInvalidatorDoesNotPanicOn401(t *testing.T) {
 	defer upstream.Close()
 
 	u, _ := url.Parse(upstream.URL)
-	h := NewHandler(u, nil, "")
+	h := NewHandler(u, nil, "", "")
 
 	w := httptest.NewRecorder()
 	// Must not panic.
@@ -214,7 +214,7 @@ func TestMiddlewareToProxyInjectsIdentityHeaders(t *testing.T) {
 
 	u, _ := url.Parse(upstream.URL)
 	validator := &testValidator{login: "octocat"}
-	chain := middleware.Auth(validator)(NewHandler(u, &mockInvalidator{}, ""))
+	chain := middleware.Auth(validator)(NewHandler(u, &mockInvalidator{}, "", ""))
 
 	r := httptest.NewRequest(http.MethodGet, "/mcp/test", nil)
 	r.Header.Set("Authorization", "Bearer real-github-token")
@@ -245,7 +245,7 @@ func TestProxyUpstreamBearerEnvInjectsToken(t *testing.T) {
 
 	t.Setenv("UPSTREAM_TEST_TOKEN", "env-api-token")
 	u, _ := url.Parse(upstream.URL)
-	h := NewHandler(u, &mockInvalidator{}, "UPSTREAM_TEST_TOKEN")
+	h := NewHandler(u, &mockInvalidator{}, "UPSTREAM_TEST_TOKEN", "")
 
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, requestWithContext("alice", "client-oauth-token"))
@@ -265,7 +265,7 @@ func TestProxyUpstreamBearerEnvStripsClientAuth(t *testing.T) {
 
 	t.Setenv("UPSTREAM_TEST_TOKEN2", "real-env-token")
 	u, _ := url.Parse(upstream.URL)
-	h := NewHandler(u, &mockInvalidator{}, "UPSTREAM_TEST_TOKEN2")
+	h := NewHandler(u, &mockInvalidator{}, "UPSTREAM_TEST_TOKEN2", "")
 
 	req := requestWithContext("bob", "client-token")
 	req.Header.Set("Authorization", "Bearer client-supplied-auth")
@@ -284,12 +284,172 @@ func TestProxyUpstreamBearerEnvDoesNotInvalidateOn401(t *testing.T) {
 	t.Setenv("UPSTREAM_TEST_TOKEN3", "some-api-token")
 	u, _ := url.Parse(upstream.URL)
 	inv := &mockInvalidator{}
-	h := NewHandler(u, inv, "UPSTREAM_TEST_TOKEN3")
+	h := NewHandler(u, inv, "UPSTREAM_TEST_TOKEN3", "")
 
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, requestWithContext("carol", "client-oauth-token"))
 
 	if len(inv.tokens) != 0 {
 		t.Errorf("expected no invalidated tokens for upstream-credential route, got %v", inv.tokens)
+	}
+}
+
+func TestProxyStripsRoutingPrefix(t *testing.T) {
+	tests := []struct {
+		name        string
+		prefix      string
+		requestPath string
+		wantPath    string
+	}{
+		{
+			name:        "strips prefix from path",
+			prefix:      "/mcp/github",
+			requestPath: "/mcp/github/sse",
+			wantPath:    "/sse",
+		},
+		{
+			name:        "strips prefix, root becomes slash",
+			prefix:      "/mcp/github",
+			requestPath: "/mcp/github",
+			wantPath:    "/",
+		},
+		{
+			name:        "no prefix (empty), path unchanged",
+			prefix:      "",
+			requestPath: "/mcp/github/sse",
+			wantPath:    "/mcp/github/sse",
+		},
+		{
+			name:        "root prefix, path unchanged",
+			prefix:      "/",
+			requestPath: "/mcp/github/sse",
+			wantPath:    "/mcp/github/sse",
+		},
+		{
+			name:        "path does not start with prefix, unchanged",
+			prefix:      "/mcp/github",
+			requestPath: "/other/path",
+			wantPath:    "/other/path",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotPath string
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.Path
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer upstream.Close()
+
+			u, _ := url.Parse(upstream.URL)
+			h := NewHandler(u, &mockInvalidator{}, "", tc.prefix)
+
+			r := httptest.NewRequest(http.MethodGet, tc.requestPath, nil)
+			ctx := context.WithValue(r.Context(), middleware.ContextKeyIdentity, "alice")
+			ctx = context.WithValue(ctx, middleware.ContextKeyToken, "tok")
+			r = r.WithContext(ctx)
+
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+
+			if gotPath != tc.wantPath {
+				t.Errorf("upstream path: got %q, want %q", gotPath, tc.wantPath)
+			}
+		})
+	}
+}
+
+// TestProxyStripsRoutingPrefixWithUpstreamBasePath verifies that prefix stripping
+// happens before SetURL so that an upstream with a base path (e.g.
+// https://mcp.cloudflare.com/mcp) receives prefix-stripped_path appended to its
+// own base, not the full gateway path.
+func TestProxyStripsRoutingPrefixWithUpstreamBasePath(t *testing.T) {
+	tests := []struct {
+		name         string
+		prefix       string
+		upstreamBase string // path suffix added to httptest server URL
+		requestPath  string
+		wantPath     string
+	}{
+		{
+			name:         "upstream with base path: prefix stripped then base prepended",
+			prefix:       "/mcp/cloudflare",
+			upstreamBase: "/mcp",
+			requestPath:  "/mcp/cloudflare/sse",
+			wantPath:     "/mcp/sse",
+		},
+		{
+			name:         "upstream with base path: prefix stripped to root",
+			prefix:       "/mcp/cloudflare",
+			upstreamBase: "/mcp",
+			requestPath:  "/mcp/cloudflare",
+			wantPath:     "/mcp/",
+		},
+		{
+			name:         "upstream with base path: no prefix leaves path intact",
+			prefix:       "",
+			upstreamBase: "/mcp",
+			requestPath:  "/mcp/cloudflare/sse",
+			wantPath:     "/mcp/mcp/cloudflare/sse",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotPath string
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.Path
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer upstream.Close()
+
+			u, _ := url.Parse(upstream.URL + tc.upstreamBase)
+			h := NewHandler(u, &mockInvalidator{}, "", tc.prefix)
+
+			r := httptest.NewRequest(http.MethodGet, tc.requestPath, nil)
+			ctx := context.WithValue(r.Context(), middleware.ContextKeyIdentity, "alice")
+			ctx = context.WithValue(ctx, middleware.ContextKeyToken, "tok")
+			r = r.WithContext(ctx)
+
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+
+			if gotPath != tc.wantPath {
+				t.Errorf("upstream path: got %q, want %q", gotPath, tc.wantPath)
+			}
+		})
+	}
+}
+
+// TestProxyStripsRoutingPrefixRawPath verifies the RawPath branch: when the
+// request URL contains percent-encoded characters, both Path and RawPath are
+// stripped consistently so the upstream receives an aligned pair.
+func TestProxyStripsRoutingPrefixRawPath(t *testing.T) {
+	var gotPath, gotRawPath string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotRawPath = r.URL.RawPath
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	u, _ := url.Parse(upstream.URL)
+	h := NewHandler(u, &mockInvalidator{}, "", "/mcp/test")
+
+	// %40 encodes '@': Path = /mcp/test/file@name, RawPath = /mcp/test/file%40name.
+	r := httptest.NewRequest(http.MethodGet, "/mcp/test/file%40name", nil)
+	ctx := context.WithValue(r.Context(), middleware.ContextKeyIdentity, "alice")
+	ctx = context.WithValue(ctx, middleware.ContextKeyToken, "tok")
+	r = r.WithContext(ctx)
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if gotPath != "/file@name" {
+		t.Errorf("upstream Path: got %q, want %q", gotPath, "/file@name")
+	}
+	if gotRawPath != "/file%40name" {
+		t.Errorf("upstream RawPath: got %q, want %q", gotRawPath, "/file%40name")
 	}
 }
