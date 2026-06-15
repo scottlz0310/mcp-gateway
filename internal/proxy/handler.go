@@ -30,10 +30,25 @@ type TokenInvalidator interface {
 // In this mode, upstream 401 responses are NOT treated as client token
 // invalidation events — the failure belongs to the upstream credential,
 // not the client session.
-func NewHandler(upstream *url.URL, inv TokenInvalidator, upstreamBearerTokenEnv string) http.Handler {
+func NewHandler(upstream *url.URL, inv TokenInvalidator, upstreamBearerTokenEnv string, prefix string) http.Handler {
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(upstream)
+
+			if prefix != "" && prefix != "/" {
+				stripped := strings.TrimPrefix(pr.Out.URL.Path, prefix)
+				if stripped == "" {
+					stripped = "/"
+				}
+				pr.Out.URL.Path = stripped
+				if pr.Out.URL.RawPath != "" {
+					rawStripped := strings.TrimPrefix(pr.Out.URL.RawPath, prefix)
+					if rawStripped == "" {
+						rawStripped = "/"
+					}
+					pr.Out.URL.RawPath = rawStripped
+				}
+			}
 
 			pr.Out.Header.Del("X-Forwarded-For")
 			pr.Out.Header.Del("X-Real-Ip")
