@@ -359,3 +359,65 @@ func TestProxyStripsRoutingPrefix(t *testing.T) {
 		})
 	}
 }
+
+// TestProxyStripsRoutingPrefixWithUpstreamBasePath verifies that prefix stripping
+// happens before SetURL so that an upstream with a base path (e.g.
+// https://mcp.cloudflare.com/mcp) receives prefix-stripped_path appended to its
+// own base, not the full gateway path.
+func TestProxyStripsRoutingPrefixWithUpstreamBasePath(t *testing.T) {
+	tests := []struct {
+		name         string
+		prefix       string
+		upstreamBase string // path suffix added to httptest server URL
+		requestPath  string
+		wantPath     string
+	}{
+		{
+			name:         "upstream with base path: prefix stripped then base prepended",
+			prefix:       "/mcp/cloudflare",
+			upstreamBase: "/mcp",
+			requestPath:  "/mcp/cloudflare/sse",
+			wantPath:     "/mcp/sse",
+		},
+		{
+			name:         "upstream with base path: prefix stripped to root",
+			prefix:       "/mcp/cloudflare",
+			upstreamBase: "/mcp",
+			requestPath:  "/mcp/cloudflare",
+			wantPath:     "/mcp/",
+		},
+		{
+			name:         "upstream with base path: no prefix leaves path intact",
+			prefix:       "",
+			upstreamBase: "/mcp",
+			requestPath:  "/mcp/cloudflare/sse",
+			wantPath:     "/mcp/mcp/cloudflare/sse",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotPath string
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.Path
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer upstream.Close()
+
+			u, _ := url.Parse(upstream.URL + tc.upstreamBase)
+			h := NewHandler(u, &mockInvalidator{}, "", tc.prefix)
+
+			r := httptest.NewRequest(http.MethodGet, tc.requestPath, nil)
+			ctx := context.WithValue(r.Context(), middleware.ContextKeyIdentity, "alice")
+			ctx = context.WithValue(ctx, middleware.ContextKeyToken, "tok")
+			r = r.WithContext(ctx)
+
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+
+			if gotPath != tc.wantPath {
+				t.Errorf("upstream path: got %q, want %q", gotPath, tc.wantPath)
+			}
+		})
+	}
+}
