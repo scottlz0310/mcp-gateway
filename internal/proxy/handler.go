@@ -35,9 +35,11 @@ func NewHandler(upstream *url.URL, inv TokenInvalidator, upstreamBearerTokenEnv 
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			// Strip prefix before SetURL so that SetURL correctly joins
 			// upstream.Path + stripped_path (SetURL appends pr.Out.URL.Path).
+			exactPrefix := false
 			if prefix != "" && prefix != "/" {
 				stripped := strings.TrimPrefix(pr.Out.URL.Path, prefix)
 				if stripped == "" {
+					exactPrefix = true
 					stripped = "/"
 				}
 				pr.Out.URL.Path = stripped
@@ -51,6 +53,12 @@ func NewHandler(upstream *url.URL, inv TokenInvalidator, upstreamBearerTokenEnv 
 			}
 
 			pr.SetURL(upstream)
+			if exactPrefix && upstream.Path != "" {
+				// SetURL appends "/" when joining a non-empty base path with
+				// the exact route prefix. Preserve the configured base path.
+				pr.Out.URL.Path = upstream.Path
+				pr.Out.URL.RawPath = upstream.RawPath
+			}
 
 			pr.Out.Header.Del("X-Forwarded-For")
 			pr.Out.Header.Del("X-Real-Ip")

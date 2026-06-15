@@ -19,6 +19,7 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Preserve an upstream base path without adding a trailing slash for exact-prefix requests ([#111](https://github.com/scottlz0310/mcp-gateway/issues/111))
 - Strip routing prefix before forwarding to upstream ([#108](https://github.com/scottlz0310/mcp-gateway/issues/108))
   - Routing prefix (e.g. `/mcp/github`) is now stripped from the request path before proxying to prevent `405 Method Not Allowed` errors on path-strict MCP servers such as `github-mcp-server` and `playwright-mcp`
   - Prefix is stripped before `SetURL` so that upstream base paths (e.g. `https://mcp.cloudflare.com/mcp`) are correctly joined with the stripped path
