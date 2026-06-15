@@ -421,3 +421,35 @@ func TestProxyStripsRoutingPrefixWithUpstreamBasePath(t *testing.T) {
 		})
 	}
 }
+
+// TestProxyStripsRoutingPrefixRawPath verifies the RawPath branch: when the
+// request URL contains percent-encoded characters, both Path and RawPath are
+// stripped consistently so the upstream receives an aligned pair.
+func TestProxyStripsRoutingPrefixRawPath(t *testing.T) {
+	var gotPath, gotRawPath string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotRawPath = r.URL.RawPath
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	u, _ := url.Parse(upstream.URL)
+	h := NewHandler(u, &mockInvalidator{}, "", "/mcp/test")
+
+	// %40 encodes '@': Path = /mcp/test/file@name, RawPath = /mcp/test/file%40name.
+	r := httptest.NewRequest(http.MethodGet, "/mcp/test/file%40name", nil)
+	ctx := context.WithValue(r.Context(), middleware.ContextKeyIdentity, "alice")
+	ctx = context.WithValue(ctx, middleware.ContextKeyToken, "tok")
+	r = r.WithContext(ctx)
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if gotPath != "/file@name" {
+		t.Errorf("upstream Path: got %q, want %q", gotPath, "/file@name")
+	}
+	if gotRawPath != "/file%40name" {
+		t.Errorf("upstream RawPath: got %q, want %q", gotRawPath, "/file%40name")
+	}
+}
