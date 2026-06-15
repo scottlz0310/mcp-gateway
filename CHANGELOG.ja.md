@@ -17,6 +17,9 @@
 
 ### 修正
 
+- upstream 転送時にルーティングプレフィックスをストリップする機能を追加（[#108](https://github.com/scottlz0310/mcp-gateway/issues/108)）
+  - `github-mcp-server` や `playwright-mcp` などパスを厳格に検証する MCP サーバーで発生していた `405 Method Not Allowed` を解消するため、プロキシ転送前にルーティングプレフィックス（例: `/mcp/github`）をリクエストパスから除去するよう修正
+  - upstream にベースパスがある場合（例: `https://mcp.cloudflare.com/mcp`）も正しくパスが結合されるよう、`SetURL` の呼び出し前にプレフィックスを除去する実装に変更
 - github-mcp-server プロキシ時の認証失敗を修正（[#104](https://github.com/scottlz0310/mcp-gateway/pull/104)）
   - docker-compose.yml で mcp-gateway の環境変数に `GITHUB_PERSONAL_ACCESS_TOKEN` を追加
   - `/mcp/github` ルートに `upstream_bearer_token_env=GITHUB_PERSONAL_ACCESS_TOKEN` を指定し、クライアント側のトークン期限切れが github-mcp-server に伝播して認証エラーになる問題を解消
