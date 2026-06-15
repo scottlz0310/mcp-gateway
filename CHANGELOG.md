@@ -19,6 +19,9 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Strip routing prefix before forwarding to upstream ([#108](https://github.com/scottlz0310/mcp-gateway/issues/108))
+  - Routing prefix (e.g. `/mcp/github`) is now stripped from the request path before proxying to prevent `405 Method Not Allowed` errors on path-strict MCP servers such as `github-mcp-server` and `playwright-mcp`
+  - Prefix is stripped before `SetURL` so that upstream base paths (e.g. `https://mcp.cloudflare.com/mcp`) are correctly joined with the stripped path
 - Fix proxy authentication failure for github-mcp-server ([#104](https://github.com/scottlz0310/mcp-gateway/pull/104))
   - Pass `GITHUB_PERSONAL_ACCESS_TOKEN` to mcp-gateway environment in docker-compose.yml
   - Configure `/mcp/github` route with `upstream_bearer_token_env=GITHUB_PERSONAL_ACCESS_TOKEN` to prevent client token expiration from leaking to the github-mcp-server upstream
