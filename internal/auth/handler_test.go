@@ -2624,3 +2624,596 @@ func TestAuthorizeCustomSchemeDefaultSchemes(t *testing.T) {
 		})
 	}
 }
+
+// newBuiltinTestHandler creates a Handler in builtin mode (provider.Name() == "builtin")
+// with the given GitHub exchange and identity functions.
+func newBuiltinTestHandler(t *testing.T, ghExchange func(context.Context, string) (provider.TokenResponse, error), ghValidate func(context.Context, string) (provider.Identity, error)) *Handler {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+	p := &provider.Mock{
+		NameValue:        "builtin",
+		ClientIDValue:    "builtin-client-id",
+		ScopesValue:      "read:user,user:email",
+		ExchangeCodeFunc: ghExchange,
+		ValidateFunc:     ghValidate,
+	}
+	h, err := NewHandler(Config{
+		BaseURL:        "http://localhost:8080",
+		SessionTTL:     10 * time.Minute,
+		CacheTTL:       5 * time.Minute,
+		ExpiresIn:      90 * 24 * time.Hour,
+		OIDCPrivateKey: key,
+	}, p)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	return h
+}
+
+// pkceChallenge returns a PKCE S256 code_challenge for the given verifier.
+func pkceChallenge(verifier string) string {
+	h := sha256.Sum256([]byte(verifier))
+	return base64.RawURLEncoding.EncodeToString(h[:])
+}
+
+// parseJWTPayload base64url-decodes the JWT payload and unmarshals it.
+func parseJWTPayload(t *testing.T, token string) map[string]any {
+	t.Helper()
+	parts := strings.SplitN(token, ".", 3)
+	if len(parts) != 3 {
+		t.Fatalf("not a JWT: %q", token)
+	}
+	b, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatalf("JWT payload decode: %v", err)
+	}
+	var claims map[string]any
+	if err := json.Unmarshal(b, &claims); err != nil {
+		t.Fatalf("JWT payload parse: %v", err)
+	}
+	return claims
+}
+
+func TestBuiltinAuthorizeRedirectsToGitHub(t *testing.T) {
+	const ghAccessToken = "gh-access-token-must-not-leak"
+	h := newBuiltinTestHandler(t,
+		func(_ context.Context, code string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{AccessToken: ghAccessToken}, nil
+		},
+		func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Subject: "testuser"}, nil
+		},
+	)
+
+	// AuthorizeURL with PKCE challenge and state
+	verifier := "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+	challenge := pkceChallenge(verifier)
+	r := httptest.NewRequest(http.MethodGet,
+		"/authorize?response_type=code&state=teststate&redirect_uri=http://localhost/cb"+
+			"&code_challenge="+challenge+"&code_challenge_method=S256", nil)
+	w := httptest.NewRecorder()
+	h.Authorize(w, r)
+
+	if w.Code != http.StatusFound {
+		t.Fatalf("status: got %d, want %d; body=%s", w.Code, http.StatusFound, w.Body.String())
+	}
+	loc := w.Header().Get("Location")
+	if !strings.Contains(loc, "state=teststate") {
+		t.Errorf("location missing state: %q", loc)
+	}
+	// GitHub classic OAuth ignores code_challenge, but the URL must not contain it
+	// or the gateway silently drops PKCE enforcement; we only verify redirect target.
+	if !strings.Contains(loc, "github.com") && !strings.Contains(loc, "mock.example.com") {
+		t.Errorf("unexpected redirect target: %q", loc)
+	}
+}
+
+func TestBuiltinTokenFlowIssuesGatewayJWT(t *testing.T) {
+	const ghAccessToken = "gh-access-token-must-not-leak"
+	h := newBuiltinTestHandler(t,
+		func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{AccessToken: ghAccessToken}, nil
+		},
+		func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Subject: "alice"}, nil
+		},
+	)
+
+	verifier := "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+	challenge := pkceChallenge(verifier)
+	const state = "builtin-state"
+	const redirectURI = "http://localhost/cb"
+
+	// 1. authorize
+	authReq := httptest.NewRequest(http.MethodGet,
+		"/authorize?response_type=code&state="+state+"&redirect_uri="+url.QueryEscape(redirectURI)+
+			"&code_challenge="+challenge+"&code_challenge_method=S256", nil)
+	authRec := httptest.NewRecorder()
+	h.Authorize(authRec, authReq)
+	if authRec.Code != http.StatusFound {
+		t.Fatalf("authorize: got %d", authRec.Code)
+	}
+
+	// 2. callback (GitHub sends code back)
+	cbReq := httptest.NewRequest(http.MethodGet,
+		"/callback?code=gh-code&state="+state, nil)
+	cbRec := httptest.NewRecorder()
+	h.Callback(cbRec, cbReq)
+	if cbRec.Code != http.StatusFound {
+		t.Fatalf("callback: got %d; body=%s", cbRec.Code, cbRec.Body.String())
+	}
+	redirectURL, err := url.Parse(cbRec.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse callback redirect: %v", err)
+	}
+	internalCode := redirectURL.Query().Get("code")
+	if internalCode == "" {
+		t.Fatal("callback redirect missing internal code")
+	}
+
+	// 3. token exchange
+	tokenBody := "grant_type=authorization_code" +
+		"&redirect_uri=" + url.QueryEscape(redirectURI) +
+		"&code=" + url.QueryEscape(internalCode) +
+		"&code_verifier=" + url.QueryEscape(verifier)
+	tokenReq := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(tokenBody))
+	tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	tokenRec := httptest.NewRecorder()
+	h.Token(tokenRec, tokenReq)
+	if tokenRec.Code != http.StatusOK {
+		t.Fatalf("token: got %d; body=%s", tokenRec.Code, tokenRec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(tokenRec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode token response: %v", err)
+	}
+
+	// access_token must be a gateway JWT, not the GitHub token
+	accessToken, _ := resp["access_token"].(string)
+	if accessToken == "" {
+		t.Fatal("token response missing access_token")
+	}
+	if accessToken == ghAccessToken {
+		t.Error("access_token must not be the GitHub access token")
+	}
+	// gateway JWT has 3 dot-separated parts
+	if strings.Count(accessToken, ".") != 2 {
+		t.Errorf("access_token is not a JWT: %q", accessToken)
+	}
+
+	// refresh_token must be present
+	if rt, _ := resp["refresh_token"].(string); rt == "" {
+		t.Error("token response missing refresh_token")
+	}
+
+	// id_token must be present in builtin mode
+	idToken, _ := resp["id_token"].(string)
+	if idToken == "" {
+		t.Error("token response missing id_token")
+	}
+}
+
+func TestBuiltinGitHubAccessTokenNotLeaked(t *testing.T) {
+	const ghAccessToken = "SUPER_SECRET_GITHUB_TOKEN"
+	h := newBuiltinTestHandler(t,
+		func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{AccessToken: ghAccessToken}, nil
+		},
+		func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Subject: "bob"}, nil
+		},
+	)
+
+	verifier := "test-verifier-12345678901234567890123456789012"
+	challenge := pkceChallenge(verifier)
+	const state = "leak-test-state"
+	const redirectURI = "http://localhost/cb"
+
+	authReq := httptest.NewRequest(http.MethodGet,
+		"/authorize?response_type=code&state="+state+"&redirect_uri="+url.QueryEscape(redirectURI)+
+			"&code_challenge="+challenge+"&code_challenge_method=S256", nil)
+	h.Authorize(httptest.NewRecorder(), authReq)
+
+	cbReq := httptest.NewRequest(http.MethodGet, "/callback?code=gh-code&state="+state, nil)
+	cbRec := httptest.NewRecorder()
+	h.Callback(cbRec, cbReq)
+	redirectURL, _ := url.Parse(cbRec.Header().Get("Location"))
+	internalCode := redirectURL.Query().Get("code")
+
+	tokenBody := "grant_type=authorization_code" +
+		"&redirect_uri=" + url.QueryEscape(redirectURI) +
+		"&code=" + url.QueryEscape(internalCode) +
+		"&code_verifier=" + url.QueryEscape(verifier)
+	tokenReq := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(tokenBody))
+	tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	tokenRec := httptest.NewRecorder()
+	h.Token(tokenRec, tokenReq)
+
+	body := tokenRec.Body.String()
+	if strings.Contains(body, ghAccessToken) {
+		t.Errorf("token response must not contain GitHub access token, got body: %s", body)
+	}
+}
+
+func TestBuiltinIDTokenClaims(t *testing.T) {
+	h := newBuiltinTestHandler(t,
+		func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{AccessToken: "gh-tok"}, nil
+		},
+		func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Subject: "charlie"}, nil
+		},
+	)
+
+	verifier := "test-verifier-abcdefghijklmnopqrstuvwxyz12345"
+	challenge := pkceChallenge(verifier)
+	const state = "claims-test-state"
+	const redirectURI = "http://localhost/cb"
+
+	authReq := httptest.NewRequest(http.MethodGet,
+		"/authorize?response_type=code&state="+state+"&redirect_uri="+url.QueryEscape(redirectURI)+
+			"&code_challenge="+challenge+"&code_challenge_method=S256", nil)
+	h.Authorize(httptest.NewRecorder(), authReq)
+
+	cbReq := httptest.NewRequest(http.MethodGet, "/callback?code=gh-code&state="+state, nil)
+	cbRec := httptest.NewRecorder()
+	h.Callback(cbRec, cbReq)
+	redirectURL, _ := url.Parse(cbRec.Header().Get("Location"))
+	internalCode := redirectURL.Query().Get("code")
+
+	tokenBody := "grant_type=authorization_code" +
+		"&redirect_uri=" + url.QueryEscape(redirectURI) +
+		"&code=" + url.QueryEscape(internalCode) +
+		"&code_verifier=" + url.QueryEscape(verifier)
+	tokenReq := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(tokenBody))
+	tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	tokenRec := httptest.NewRecorder()
+	h.Token(tokenRec, tokenReq)
+
+	var resp map[string]any
+	_ = json.NewDecoder(tokenRec.Body).Decode(&resp)
+
+	idToken, _ := resp["id_token"].(string)
+	if idToken == "" {
+		t.Fatal("missing id_token")
+	}
+	claims := parseJWTPayload(t, idToken)
+
+	for _, key := range []string{"iss", "sub", "aud", "exp", "iat"} {
+		if claims[key] == nil {
+			t.Errorf("id_token missing claim %q", key)
+		}
+	}
+	if sub, _ := claims["sub"].(string); sub != "charlie" {
+		t.Errorf("id_token sub: got %q, want %q", sub, "charlie")
+	}
+	if iss, _ := claims["iss"].(string); iss != "http://localhost:8080" {
+		t.Errorf("id_token iss: got %q, want %q", iss, "http://localhost:8080")
+	}
+}
+
+func TestBuiltinStateMismatchRejected(t *testing.T) {
+	h := newBuiltinTestHandler(t,
+		func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{AccessToken: "gh-tok"}, nil
+		},
+		func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Subject: "dave"}, nil
+		},
+	)
+	const redirectURI = "http://localhost/cb"
+
+	authReq := httptest.NewRequest(http.MethodGet,
+		"/authorize?response_type=code&state=real-state&redirect_uri="+url.QueryEscape(redirectURI), nil)
+	h.Authorize(httptest.NewRecorder(), authReq)
+
+	// callback with wrong state
+	cbReq := httptest.NewRequest(http.MethodGet, "/callback?code=gh-code&state=wrong-state", nil)
+	cbRec := httptest.NewRecorder()
+	h.Callback(cbRec, cbReq)
+	if cbRec.Code != http.StatusBadRequest {
+		t.Errorf("state mismatch: got %d, want %d", cbRec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestBuiltinCodeVerifierMismatchRejected(t *testing.T) {
+	h := newBuiltinTestHandler(t,
+		func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{AccessToken: "gh-tok"}, nil
+		},
+		func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Subject: "eve"}, nil
+		},
+	)
+
+	verifier := "correct-verifier-abcdefghijklmnopqrstuvwxyz01"
+	challenge := pkceChallenge(verifier)
+	const state = "pkce-test-state"
+	const redirectURI = "http://localhost/cb"
+
+	authReq := httptest.NewRequest(http.MethodGet,
+		"/authorize?response_type=code&state="+state+"&redirect_uri="+url.QueryEscape(redirectURI)+
+			"&code_challenge="+challenge+"&code_challenge_method=S256", nil)
+	h.Authorize(httptest.NewRecorder(), authReq)
+
+	cbReq := httptest.NewRequest(http.MethodGet, "/callback?code=gh-code&state="+state, nil)
+	cbRec := httptest.NewRecorder()
+	h.Callback(cbRec, cbReq)
+	redirectURL, _ := url.Parse(cbRec.Header().Get("Location"))
+	internalCode := redirectURL.Query().Get("code")
+
+	// wrong verifier
+	tokenBody := "grant_type=authorization_code" +
+		"&redirect_uri=" + url.QueryEscape(redirectURI) +
+		"&code=" + url.QueryEscape(internalCode) +
+		"&code_verifier=wrong-verifier"
+	tokenReq := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(tokenBody))
+	tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	tokenRec := httptest.NewRecorder()
+	h.Token(tokenRec, tokenReq)
+	if tokenRec.Code != http.StatusBadRequest {
+		t.Errorf("PKCE mismatch: got %d, want %d; body=%s", tokenRec.Code, http.StatusBadRequest, tokenRec.Body.String())
+	}
+}
+
+func TestBuiltinRefreshIssuesNewGatewayJWT(t *testing.T) {
+	h := newBuiltinTestHandler(t,
+		func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{AccessToken: "gh-tok"}, nil
+		},
+		func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Subject: "frank"}, nil
+		},
+	)
+
+	verifier := "refresh-verifier-abcdefghijklmnopqrstuvwxyz0123"
+	challenge := pkceChallenge(verifier)
+	const state = "refresh-test-state"
+	const redirectURI = "http://localhost/cb"
+
+	authReq := httptest.NewRequest(http.MethodGet,
+		"/authorize?response_type=code&state="+state+"&redirect_uri="+url.QueryEscape(redirectURI)+
+			"&code_challenge="+challenge+"&code_challenge_method=S256", nil)
+	h.Authorize(httptest.NewRecorder(), authReq)
+
+	cbReq := httptest.NewRequest(http.MethodGet, "/callback?code=gh-code&state="+state, nil)
+	cbRec := httptest.NewRecorder()
+	h.Callback(cbRec, cbReq)
+	redirectURL, _ := url.Parse(cbRec.Header().Get("Location"))
+	internalCode := redirectURL.Query().Get("code")
+
+	tokenBody := "grant_type=authorization_code" +
+		"&redirect_uri=" + url.QueryEscape(redirectURI) +
+		"&code=" + url.QueryEscape(internalCode) +
+		"&code_verifier=" + url.QueryEscape(verifier)
+	tokenReq := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(tokenBody))
+	tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	tokenRec := httptest.NewRecorder()
+	h.Token(tokenRec, tokenReq)
+	if tokenRec.Code != http.StatusOK {
+		t.Fatalf("initial token: got %d; body=%s", tokenRec.Code, tokenRec.Body.String())
+	}
+
+	var tokenResp map[string]any
+	_ = json.NewDecoder(tokenRec.Body).Decode(&tokenResp)
+	firstAccessToken, _ := tokenResp["access_token"].(string)
+	refreshToken, _ := tokenResp["refresh_token"].(string)
+	if refreshToken == "" {
+		t.Fatal("missing refresh_token in initial response")
+	}
+
+	// Use refresh token to obtain a new gateway JWT
+	refreshBody := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(refreshToken)
+	refreshReq := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(refreshBody))
+	refreshReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	refreshRec := httptest.NewRecorder()
+	h.Token(refreshRec, refreshReq)
+	if refreshRec.Code != http.StatusOK {
+		t.Fatalf("refresh: got %d; body=%s", refreshRec.Code, refreshRec.Body.String())
+	}
+
+	var refreshResp map[string]any
+	_ = json.NewDecoder(refreshRec.Body).Decode(&refreshResp)
+	newAccessToken, _ := refreshResp["access_token"].(string)
+	if newAccessToken == "" {
+		t.Fatal("refresh response missing access_token")
+	}
+	if newAccessToken == firstAccessToken {
+		t.Error("refresh must issue a new access_token, not reuse the original")
+	}
+	if strings.Count(newAccessToken, ".") != 2 {
+		t.Errorf("refreshed access_token is not a JWT: %q", newAccessToken)
+	}
+	if newRT, _ := refreshResp["refresh_token"].(string); newRT == "" {
+		t.Error("refresh response missing new refresh_token")
+	}
+}
+
+// runBuiltinFullFlow performs a full authorize→callback→token flow in builtin mode
+// and returns the token response and the issued access_token.
+func runBuiltinFullFlow(t *testing.T, h *Handler, subject string) (resp map[string]any, accessToken string) {
+	t.Helper()
+	verifier := "builtin-flow-verifier-abcdefghijklmnopqrstuvwxyz0"
+	challenge := pkceChallenge(verifier)
+	state := "flow-state-" + subject
+	redirectURI := "http://localhost/cb"
+
+	authReq := httptest.NewRequest(http.MethodGet,
+		"/authorize?response_type=code&state="+state+"&redirect_uri="+url.QueryEscape(redirectURI)+
+			"&code_challenge="+challenge+"&code_challenge_method=S256", nil)
+	h.Authorize(httptest.NewRecorder(), authReq)
+
+	cbReq := httptest.NewRequest(http.MethodGet, "/callback?code=gh-code&state="+state, nil)
+	cbRec := httptest.NewRecorder()
+	h.Callback(cbRec, cbReq)
+	if cbRec.Code != http.StatusFound {
+		t.Fatalf("callback: got %d; body=%s", cbRec.Code, cbRec.Body.String())
+	}
+	redirectURL, _ := url.Parse(cbRec.Header().Get("Location"))
+	internalCode := redirectURL.Query().Get("code")
+
+	tokenBody := "grant_type=authorization_code" +
+		"&redirect_uri=" + url.QueryEscape(redirectURI) +
+		"&code=" + url.QueryEscape(internalCode) +
+		"&code_verifier=" + url.QueryEscape(verifier)
+	tokenReq := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(tokenBody))
+	tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	tokenRec := httptest.NewRecorder()
+	h.Token(tokenRec, tokenReq)
+	if tokenRec.Code != http.StatusOK {
+		t.Fatalf("token: got %d; body=%s", tokenRec.Code, tokenRec.Body.String())
+	}
+	_ = json.NewDecoder(tokenRec.Body).Decode(&resp)
+	accessToken, _ = resp["access_token"].(string)
+	return resp, accessToken
+}
+
+func TestBuiltinValidateTokenCacheMiss(t *testing.T) {
+	h := newBuiltinTestHandler(t,
+		func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{AccessToken: "gh-tok"}, nil
+		},
+		func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Subject: "zoe"}, nil
+		},
+	)
+
+	_, accessToken := runBuiltinFullFlow(t, h, "zoe")
+
+	// Create a fresh handler with the same key so the token store is empty (cache miss).
+	h2 := newBuiltinTestHandlerWithKey(t, h.privateKey,
+		func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{AccessToken: "gh-tok"}, nil
+		},
+		func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Subject: "zoe"}, nil
+		},
+	)
+
+	sub, _, err := h2.ValidateToken(context.Background(), accessToken, "")
+	if err != nil {
+		t.Fatalf("ValidateToken on cache miss: %v", err)
+	}
+	if sub != "zoe" {
+		t.Errorf("subject: got %q, want %q", sub, "zoe")
+	}
+}
+
+func TestBuiltinValidateTokenExpiredJWT(t *testing.T) {
+	h := newBuiltinTestHandler(t,
+		func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{AccessToken: "gh-tok"}, nil
+		},
+		func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Subject: "expired-user"}, nil
+		},
+	)
+
+	// Generate an already-expired gateway JWT directly.
+	expiredToken, err := generateExpiredGatewayToken(h.privateKey, "expired-user", "")
+	if err != nil {
+		t.Fatalf("generate expired token: %v", err)
+	}
+
+	_, _, err = h.ValidateToken(context.Background(), expiredToken, "")
+	if err == nil {
+		t.Error("expected error for expired JWT, got nil")
+	}
+}
+
+func TestBuiltinValidateTokenAudienceStrict(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+	p := &provider.Mock{
+		NameValue:     "builtin",
+		ClientIDValue: "builtin-client-id",
+		ScopesValue:   "read:user,user:email",
+		ExchangeCodeFunc: func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{AccessToken: "gh-tok"}, nil
+		},
+		ValidateFunc: func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Subject: "strict-user"}, nil
+		},
+	}
+	h, err := NewHandler(Config{
+		BaseURL:              "http://localhost:8080",
+		SessionTTL:           10 * time.Minute,
+		CacheTTL:             5 * time.Minute,
+		ExpiresIn:            90 * 24 * time.Hour,
+		OIDCPrivateKey:       key,
+		TokenAudienceStrict:  true,
+	}, p)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	_, accessToken := runBuiltinFullFlow(t, h, "strict-user")
+
+	// ValidateToken with TokenAudienceStrict=true must still succeed for builtin
+	// tokens even on cache miss (audience is taken from the JWT aud claim).
+	sub, _, valErr := h.ValidateToken(context.Background(), accessToken, "")
+	if valErr != nil {
+		t.Fatalf("ValidateToken with TokenAudienceStrict: %v", valErr)
+	}
+	if sub != "strict-user" {
+		t.Errorf("subject: got %q, want %q", sub, "strict-user")
+	}
+}
+
+// newBuiltinTestHandlerWithKey is like newBuiltinTestHandler but uses a given RSA key.
+func newBuiltinTestHandlerWithKey(t *testing.T, key *rsa.PrivateKey, ghExchange func(context.Context, string) (provider.TokenResponse, error), ghValidate func(context.Context, string) (provider.Identity, error)) *Handler {
+	t.Helper()
+	p := &provider.Mock{
+		NameValue:        "builtin",
+		ClientIDValue:    "builtin-client-id",
+		ScopesValue:      "read:user,user:email",
+		ExchangeCodeFunc: ghExchange,
+		ValidateFunc:     ghValidate,
+	}
+	h, err := NewHandler(Config{
+		BaseURL:        "http://localhost:8080",
+		SessionTTL:     10 * time.Minute,
+		CacheTTL:       5 * time.Minute,
+		ExpiresIn:      90 * 24 * time.Hour,
+		OIDCPrivateKey: key,
+	}, p)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	return h
+}
+
+// generateExpiredGatewayToken creates a gateway-signed JWT with exp in the past.
+func generateExpiredGatewayToken(key *rsa.PrivateKey, subject, audience string) (string, error) {
+	header := map[string]string{"alg": "RS256", "typ": "JWT", "kid": "gateway-key-1"}
+	headerBytes, _ := json.Marshal(header)
+	headerB64 := base64.RawURLEncoding.EncodeToString(headerBytes)
+
+	now := time.Now().Unix()
+	payload := map[string]any{
+		"iss": "http://localhost:8080",
+		"sub": subject,
+		"aud": audience,
+		"iat": now - 7200,
+		"exp": now - 3600, // already expired
+		"jti": "expired-jti",
+	}
+	payloadBytes, _ := json.Marshal(payload)
+	payloadB64 := base64.RawURLEncoding.EncodeToString(payloadBytes)
+
+	signingInput := headerB64 + "." + payloadB64
+	h := sha256.New()
+	h.Write([]byte(signingInput))
+	hashed := h.Sum(nil)
+	sigBytes, err := rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, hashed)
+	if err != nil {
+		return "", err
+	}
+	return signingInput + "." + base64.RawURLEncoding.EncodeToString(sigBytes), nil
+}

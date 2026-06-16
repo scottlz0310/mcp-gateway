@@ -534,6 +534,28 @@ func (h *Handler) tokenAuthCode(w http.ResponseWriter, r *http.Request) {
 		oauthError(w, "invalid_grant", err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	if h.isBuiltinMode() {
+		// builtin mode: discard GitHub access token, issue gateway-signed JWT instead.
+		// GitHub token was used only for identity resolution in Callback(); it must not
+		// reach the client.
+		gatewayToken, genErr := h.generateGatewayAccessToken(result.Subject, result.Audience)
+		if genErr != nil {
+			h.auditFailure("token_exchange", "server_error", "gateway access token generation failed", genErr, http.StatusInternalServerError, "")
+			slog.Error("gateway access token generation failed", "err", genErr)
+			oauthError(w, "server_error", "internal error", http.StatusInternalServerError)
+			return
+		}
+		h.store.CacheToken(gatewayToken, result.Subject, result.Audience)
+		refreshToken, rtErr := h.store.CreateRefreshToken(gatewayToken, result.Audience, h.refreshTokenTTL())
+		if rtErr != nil {
+			slog.Warn("failed to create refresh token", "err", rtErr)
+		}
+		h.writeTokenResponse(w, gatewayToken, result.Scope, refreshToken, result.Subject)
+		h.auditSuccess("token_exchange", "authorization code exchange completed (builtin)", http.StatusOK)
+		return
+	}
+
 	h.store.CacheToken(result.AccessToken, result.Subject, result.Audience)
 	h.persistProviderRefresh(result.AccessToken, result.ProviderRefreshToken, result.ProviderAccessExpiry)
 	refreshToken, rtErr := h.store.CreateRefreshToken(result.AccessToken, result.Audience, h.refreshTokenTTL())
@@ -690,7 +712,7 @@ func (h *Handler) writeTokenResponse(w http.ResponseWriter, token, scope, refres
 	if refreshToken != "" {
 		resp["refresh_token"] = refreshToken
 	}
-	if subject != "" && (strings.Contains(scope, "openid") || h.provider.Name() == "oidc") {
+	if subject != "" && (strings.Contains(scope, "openid") || h.provider.Name() == "oidc" || h.isBuiltinMode()) {
 		idToken, err := h.generateIDToken(h.cfg.BaseURL, subject, h.provider.ClientID())
 		if err == nil {
 			resp["id_token"] = idToken
@@ -758,6 +780,38 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		audience = resolved
+	}
+
+	if h.isBuiltinMode() {
+		// builtin mode: verify the existing gateway JWT locally to extract subject,
+		// then issue a new gateway JWT. GitHub API is not consulted.
+		sub, _, jwtErr := h.verifyGatewayJWT(accessToken)
+		if jwtErr != nil {
+			h.auditFailure("refresh", "invalid_grant", "refresh token gateway JWT invalid", jwtErr, http.StatusBadRequest, tokenFingerprint(accessToken))
+			slog.Warn("refresh rejected: gateway JWT invalid", "err", jwtErr)
+			oauthError(w, "invalid_grant", "underlying token no longer valid", http.StatusBadRequest)
+			return
+		}
+		newGatewayToken, genErr := h.generateGatewayAccessToken(sub, audience)
+		if genErr != nil {
+			h.auditFailure("refresh", "server_error", "gateway token generation failed during refresh", genErr, http.StatusInternalServerError, tokenFingerprint(accessToken))
+			slog.Error("gateway access token generation failed during refresh", "err", genErr)
+			h.store.RestoreRefreshToken(rt, accessToken, originalAudience, rtExpiresAt)
+			oauthError(w, "server_error", "internal error", http.StatusInternalServerError)
+			return
+		}
+		h.store.CacheToken(newGatewayToken, sub, audience)
+		newRT, rtErr := h.store.CreateRefreshToken(newGatewayToken, audience, h.refreshTokenTTL())
+		if rtErr != nil {
+			h.auditFailure("refresh", "store_error", "refresh token rotation failed", rtErr, http.StatusInternalServerError, tokenFingerprint(newGatewayToken))
+			slog.Error("failed to rotate refresh token (builtin)", "err", rtErr)
+			h.store.RestoreRefreshToken(rt, accessToken, originalAudience, rtExpiresAt)
+			oauthError(w, "server_error", "internal error", http.StatusInternalServerError)
+			return
+		}
+		h.writeTokenResponse(w, newGatewayToken, "", newRT, sub)
+		h.auditSuccess("refresh", "refresh token exchange completed (builtin)", http.StatusOK)
+		return
 	}
 
 	// Re-validate the underlying token directly against the upstream provider,
@@ -1016,9 +1070,39 @@ func (h *Handler) ValidateToken(ctx context.Context, token, audience string) (su
 			}
 			return record.Subject, "", nil
 		}
-	} else if err := h.validateAudience(token, TokenRecord{}, audience); err != nil {
+	}
+
+	// builtin mode: validate gateway-issued JWT locally without calling GitHub API.
+	// Must be checked before validateAudience because the token store has no audience
+	// record on cache miss; validateAudience(token, TokenRecord{}, audience) would
+	// erroneously reject valid tokens when TokenAudienceStrict is enabled.
+	if h.isBuiltinMode() {
+		sub, tokenAud, jwtErr := h.verifyGatewayJWT(token)
+		if jwtErr != nil {
+			h.auditFailure("identity_resolution", "invalid_token", "gateway JWT verification failed", jwtErr, http.StatusUnauthorized, tokenFingerprint(token))
+			return "", "", jwtErr
+		}
+		// Validate that the JWT audience matches the requested resource.
+		// normalizeAudience("") returns "" which means any audience is accepted.
+		if audience != "" && normalizeAudience(tokenAud) != audience {
+			err := audienceCheckError{ErrTokenAudienceMismatch}
+			h.auditFailure("identity_resolution", "invalid_token", "gateway JWT audience mismatch", err, http.StatusUnauthorized, tokenFingerprint(token))
+			return "", "", err
+		}
+		// Cache with the audience from the JWT so subsequent hits can validate it.
+		cacheAudience := tokenAud
+		if audience != "" {
+			cacheAudience = audience
+		}
+		h.store.CacheToken(token, sub, cacheAudience)
+		h.auditSuccess("identity_resolution", "gateway JWT verified", http.StatusOK)
+		return sub, "", nil
+	}
+
+	if err := h.validateAudience(token, TokenRecord{}, audience); err != nil {
 		return "", "", err
 	}
+
 	id, valErr := h.provider.ValidateToken(ctx, token)
 	if valErr != nil {
 		h.auditFailure("identity_resolution", "provider_error", "bearer identity resolution failed", valErr, http.StatusUnauthorized, tokenFingerprint(token))
@@ -1631,6 +1715,123 @@ func (h *Handler) UserInfo(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(doc)
+}
+
+// isBuiltinMode reports whether the handler operates in builtin mode, where
+// the gateway issues its own RS256 JWTs instead of forwarding provider tokens.
+func (h *Handler) isBuiltinMode() bool {
+	return h.provider.Name() == "builtin"
+}
+
+// generateGatewayAccessToken creates a signed RS256 JWT suitable for use as
+// the client-facing access_token in builtin mode. Unlike generateIDToken it
+// uses h.cfg.ExpiresIn for the expiry so the lifetime matches the token store TTL.
+func (h *Handler) generateGatewayAccessToken(subject, audience string) (string, error) {
+	if h.privateKey == nil {
+		return "", fmt.Errorf("private key is nil")
+	}
+	header := map[string]string{
+		"alg": "RS256",
+		"typ": "JWT",
+		"kid": "gateway-key-1",
+	}
+	headerBytes, err := json.Marshal(header)
+	if err != nil {
+		return "", err
+	}
+	headerB64 := base64.RawURLEncoding.EncodeToString(headerBytes)
+
+	now := time.Now()
+	expiresIn := h.cfg.ExpiresIn
+	if expiresIn <= 0 {
+		expiresIn = 90 * 24 * time.Hour
+	}
+	jtiBytes := make([]byte, 16)
+	if _, err := rand.Read(jtiBytes); err != nil {
+		return "", fmt.Errorf("generating JWT ID: %w", err)
+	}
+	payload := map[string]any{
+		"iss": h.cfg.BaseURL,
+		"sub": subject,
+		"aud": audience,
+		"iat": now.Unix(),
+		"exp": now.Add(expiresIn).Unix(),
+		"jti": base64.RawURLEncoding.EncodeToString(jtiBytes),
+	}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	payloadB64 := base64.RawURLEncoding.EncodeToString(payloadBytes)
+
+	signingInput := headerB64 + "." + payloadB64
+	hasher := sha256.New()
+	hasher.Write([]byte(signingInput))
+	hashed := hasher.Sum(nil)
+
+	sigBytes, err := rsa.SignPKCS1v15(rand.Reader, h.privateKey, crypto.SHA256, hashed)
+	if err != nil {
+		return "", fmt.Errorf("signing gateway access token: %w", err)
+	}
+	return signingInput + "." + base64.RawURLEncoding.EncodeToString(sigBytes), nil
+}
+
+// verifyGatewayJWT verifies a gateway-issued RS256 JWT and returns the subject
+// and audience claims. It validates alg, signature, exp (required), and sub.
+// Audience matching against the request resource is the caller's responsibility.
+func (h *Handler) verifyGatewayJWT(token string) (subject, audience string, err error) {
+	parts := strings.SplitN(token, ".", 3)
+	if len(parts) != 3 {
+		return "", "", fmt.Errorf("malformed JWT: expected 3 parts")
+	}
+
+	// Validate header: alg must be RS256.
+	headerBytes, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return "", "", fmt.Errorf("JWT header decode: %w", err)
+	}
+	var header struct {
+		Alg string `json:"alg"`
+	}
+	if err := json.Unmarshal(headerBytes, &header); err != nil {
+		return "", "", fmt.Errorf("JWT header parse: %w", err)
+	}
+	if header.Alg != "RS256" {
+		return "", "", fmt.Errorf("JWT alg must be RS256, got %q", header.Alg)
+	}
+
+	signingInput := parts[0] + "." + parts[1]
+	sigBytes, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		return "", "", fmt.Errorf("JWT signature decode: %w", err)
+	}
+	hasher := sha256.New()
+	hasher.Write([]byte(signingInput))
+	hashed := hasher.Sum(nil)
+	if err := rsa.VerifyPKCS1v15(&h.privateKey.PublicKey, crypto.SHA256, hashed, sigBytes); err != nil {
+		return "", "", fmt.Errorf("JWT signature invalid: %w", err)
+	}
+
+	payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return "", "", fmt.Errorf("JWT payload decode: %w", err)
+	}
+	var claims struct {
+		Sub string `json:"sub"`
+		Aud string `json:"aud"`
+		Exp int64  `json:"exp"`
+	}
+	if err := json.Unmarshal(payloadBytes, &claims); err != nil {
+		return "", "", fmt.Errorf("JWT payload parse: %w", err)
+	}
+	if claims.Sub == "" {
+		return "", "", fmt.Errorf("JWT missing sub claim")
+	}
+	// exp is required in gateway-issued JWTs; absence or zero is rejected.
+	if claims.Exp <= 0 || time.Now().Unix() > claims.Exp {
+		return "", "", fmt.Errorf("JWT expired or missing exp claim")
+	}
+	return claims.Sub, claims.Aud, nil
 }
 
 // generateIDToken creates a signed RS256 JWT for the given subject.
