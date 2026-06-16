@@ -41,6 +41,27 @@ func New(cfg Config) (Provider, error) {
 			RedirectURI:  cfg.RedirectURI,
 			Scopes:       cfg.Scopes,
 		}), nil
+	case "builtin":
+		if cfg.ClientID == "" || cfg.ClientSecret == "" {
+			return nil, fmt.Errorf("builtin provider requires ClientID and ClientSecret (GitHub OAuth App credentials)")
+		}
+		if cfg.RedirectURI == "" {
+			return nil, fmt.Errorf("builtin provider requires RedirectURI")
+		}
+		u, err := url.Parse(cfg.RedirectURI)
+		if err != nil || !u.IsAbs() || u.Host == "" || u.Fragment != "" || (u.Scheme != "http" && u.Scheme != "https") {
+			return nil, fmt.Errorf("builtin provider requires an absolute http/https RedirectURI with a host and no fragment, got %q", cfg.RedirectURI)
+		}
+		scopes := cfg.Scopes
+		if scopes == "" {
+			scopes = "read:user,user:email"
+		}
+		return NewBuiltin(GitHubConfig{
+			ClientID:     cfg.ClientID,
+			ClientSecret: cfg.ClientSecret,
+			RedirectURI:  cfg.RedirectURI,
+			Scopes:       scopes,
+		}), nil
 	case "oidc":
 		if cfg.ClientID == "" || cfg.ClientSecret == "" {
 			return nil, fmt.Errorf("oidc provider requires ClientID and ClientSecret")

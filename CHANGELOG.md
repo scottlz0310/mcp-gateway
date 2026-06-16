@@ -9,6 +9,13 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Add `OAUTH_PROVIDER=builtin` mode: GitHub OAuth 2.0 PKCE social login with gateway-issued RS256 JWT ([#127](https://github.com/scottlz0310/mcp-gateway/issues/127))
+  - gateway が自身の RS256 JWT（access_token + id_token + refresh_token）を発行する
+  - GitHub は identity 取得のみに使用し、GitHub access_token はクライアントに渡さず callback 後に破棄する
+  - `/token`（authorization_code grant）でゲートウェイ署名付き JWT を発行
+  - `/token`（refresh_token grant）でゲートウェイ JWT を再発行（GitHub API 不要）
+  - `ValidateToken` でゲートウェイ JWT をローカルで RS256 検証（GitHub API 呼び出し不要）
+  - 既存の `OAUTH_PROVIDER=github` モードとの並存を維持
 - Add persistent OAuth audit diagnostics ([#102](https://github.com/scottlz0310/mcp-gateway/issues/102))
   - Record authorize, callback, token exchange, identity resolution, refresh, and provider rotation outcomes as structured events
   - Persist redacted JSON Lines outside Git worktrees with OS-specific user-state defaults and size/age/count rotation
