@@ -16,6 +16,10 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 - Add OIDC provider support ([#98](https://github.com/scottlz0310/mcp-gateway/pull/98))
   - Support mcp-gateway as an OIDC Identity Provider to support agy CLI
   - Support OIDC RSA private key persistence
+- Add RFC 8252 custom URL scheme redirect_uri support ([#121](https://github.com/scottlz0310/mcp-gateway/issues/121))
+  - Allow native app clients (e.g. agy CLI) to use custom URL scheme redirect_uris such as `antigravity://oauth-callback`
+  - Default permitted schemes: `antigravity`, `antigravity-insiders`
+  - Configurable via `MCP_GATEWAY_ALLOWED_REDIRECT_SCHEMES` env var or `gateway.allowed_redirect_schemes` in `config.yaml`
 
 ### Fixed
 

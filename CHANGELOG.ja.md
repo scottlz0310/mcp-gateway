@@ -14,6 +14,10 @@
 - OIDC プロバイダーのサポートを追加（[#98](https://github.com/scottlz0310/mcp-gateway/pull/98)）
   - agy CLI をサポートするため、mcp-gateway を OIDC Identity Provider として動作可能に
   - OIDC 用の RSA 秘密鍵の永続化をサポート
+- RFC 8252 カスタム URL スキーム redirect_uri のサポートを追加（[#121](https://github.com/scottlz0310/mcp-gateway/issues/121)）
+  - agy CLI 等のネイティブアプリクライアントが `antigravity://oauth-callback` 等のカスタム URL スキームを redirect_uri として使用可能に
+  - デフォルト許可スキーム: `antigravity`、`antigravity-insiders`
+  - `MCP_GATEWAY_ALLOWED_REDIRECT_SCHEMES` 環境変数または `gateway.allowed_redirect_schemes`（config.yaml）で上書き可能
 
 ### 修正
 
