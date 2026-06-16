@@ -785,7 +785,7 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 	if h.isBuiltinMode() {
 		// builtin mode: verify the existing gateway JWT locally to extract subject,
 		// then issue a new gateway JWT. GitHub API is not consulted.
-		sub, jwtErr := h.verifyGatewayJWT(accessToken)
+		sub, _, jwtErr := h.verifyGatewayJWT(accessToken)
 		if jwtErr != nil {
 			h.auditFailure("refresh", "invalid_grant", "refresh token gateway JWT invalid", jwtErr, http.StatusBadRequest, tokenFingerprint(accessToken))
 			slog.Warn("refresh rejected: gateway JWT invalid", "err", jwtErr)
@@ -1070,24 +1070,37 @@ func (h *Handler) ValidateToken(ctx context.Context, token, audience string) (su
 			}
 			return record.Subject, "", nil
 		}
-	} else if err := h.validateAudience(token, TokenRecord{}, audience); err != nil {
-		return "", "", err
 	}
 
 	// builtin mode: validate gateway-issued JWT locally without calling GitHub API.
+	// Must be checked before validateAudience because the token store has no audience
+	// record on cache miss; validateAudience(token, TokenRecord{}, audience) would
+	// erroneously reject valid tokens when TokenAudienceStrict is enabled.
 	if h.isBuiltinMode() {
-		sub, jwtErr := h.verifyGatewayJWT(token)
+		sub, tokenAud, jwtErr := h.verifyGatewayJWT(token)
 		if jwtErr != nil {
 			h.auditFailure("identity_resolution", "invalid_token", "gateway JWT verification failed", jwtErr, http.StatusUnauthorized, tokenFingerprint(token))
 			return "", "", jwtErr
 		}
-		cacheAudience := ""
-		if cached && record.HasAudience(audience) {
+		// Validate that the JWT audience matches the requested resource.
+		// normalizeAudience("") returns "" which means any audience is accepted.
+		if audience != "" && normalizeAudience(tokenAud) != audience {
+			err := audienceCheckError{ErrTokenAudienceMismatch}
+			h.auditFailure("identity_resolution", "invalid_token", "gateway JWT audience mismatch", err, http.StatusUnauthorized, tokenFingerprint(token))
+			return "", "", err
+		}
+		// Cache with the audience from the JWT so subsequent hits can validate it.
+		cacheAudience := tokenAud
+		if audience != "" {
 			cacheAudience = audience
 		}
 		h.store.CacheToken(token, sub, cacheAudience)
 		h.auditSuccess("identity_resolution", "gateway JWT verified", http.StatusOK)
 		return sub, "", nil
+	}
+
+	if err := h.validateAudience(token, TokenRecord{}, audience); err != nil {
+		return "", "", err
 	}
 
 	id, valErr := h.provider.ValidateToken(ctx, token)
@@ -1763,45 +1776,62 @@ func (h *Handler) generateGatewayAccessToken(subject, audience string) (string, 
 	return signingInput + "." + base64.RawURLEncoding.EncodeToString(sigBytes), nil
 }
 
-// verifyGatewayJWT verifies a gateway-issued RS256 JWT and returns the subject claim.
-// It does not perform audience validation; callers must check audience separately.
-func (h *Handler) verifyGatewayJWT(token string) (subject string, err error) {
+// verifyGatewayJWT verifies a gateway-issued RS256 JWT and returns the subject
+// and audience claims. It validates alg, signature, exp (required), and sub.
+// Audience matching against the request resource is the caller's responsibility.
+func (h *Handler) verifyGatewayJWT(token string) (subject, audience string, err error) {
 	parts := strings.SplitN(token, ".", 3)
 	if len(parts) != 3 {
-		return "", fmt.Errorf("malformed JWT: expected 3 parts")
+		return "", "", fmt.Errorf("malformed JWT: expected 3 parts")
 	}
+
+	// Validate header: alg must be RS256.
+	headerBytes, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return "", "", fmt.Errorf("JWT header decode: %w", err)
+	}
+	var header struct {
+		Alg string `json:"alg"`
+	}
+	if err := json.Unmarshal(headerBytes, &header); err != nil {
+		return "", "", fmt.Errorf("JWT header parse: %w", err)
+	}
+	if header.Alg != "RS256" {
+		return "", "", fmt.Errorf("JWT alg must be RS256, got %q", header.Alg)
+	}
+
 	signingInput := parts[0] + "." + parts[1]
 	sigBytes, err := base64.RawURLEncoding.DecodeString(parts[2])
 	if err != nil {
-		return "", fmt.Errorf("JWT signature decode: %w", err)
+		return "", "", fmt.Errorf("JWT signature decode: %w", err)
 	}
-
 	hasher := sha256.New()
 	hasher.Write([]byte(signingInput))
 	hashed := hasher.Sum(nil)
-	pub := &h.privateKey.PublicKey
-	if err := rsa.VerifyPKCS1v15(pub, crypto.SHA256, hashed, sigBytes); err != nil {
-		return "", fmt.Errorf("JWT signature invalid: %w", err)
+	if err := rsa.VerifyPKCS1v15(&h.privateKey.PublicKey, crypto.SHA256, hashed, sigBytes); err != nil {
+		return "", "", fmt.Errorf("JWT signature invalid: %w", err)
 	}
 
 	payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return "", fmt.Errorf("JWT payload decode: %w", err)
+		return "", "", fmt.Errorf("JWT payload decode: %w", err)
 	}
 	var claims struct {
 		Sub string `json:"sub"`
+		Aud string `json:"aud"`
 		Exp int64  `json:"exp"`
 	}
 	if err := json.Unmarshal(payloadBytes, &claims); err != nil {
-		return "", fmt.Errorf("JWT payload parse: %w", err)
+		return "", "", fmt.Errorf("JWT payload parse: %w", err)
 	}
 	if claims.Sub == "" {
-		return "", fmt.Errorf("JWT missing sub claim")
+		return "", "", fmt.Errorf("JWT missing sub claim")
 	}
-	if claims.Exp > 0 && time.Now().Unix() > claims.Exp {
-		return "", fmt.Errorf("JWT expired")
+	// exp is required in gateway-issued JWTs; absence or zero is rejected.
+	if claims.Exp <= 0 || time.Now().Unix() > claims.Exp {
+		return "", "", fmt.Errorf("JWT expired or missing exp claim")
 	}
-	return claims.Sub, nil
+	return claims.Sub, claims.Aud, nil
 }
 
 // generateIDToken creates a signed RS256 JWT for the given subject.

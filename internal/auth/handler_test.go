@@ -3032,3 +3032,188 @@ func TestBuiltinRefreshIssuesNewGatewayJWT(t *testing.T) {
 		t.Error("refresh response missing new refresh_token")
 	}
 }
+
+// runBuiltinFullFlow performs a full authorize→callback→token flow in builtin mode
+// and returns the token response and the issued access_token.
+func runBuiltinFullFlow(t *testing.T, h *Handler, subject string) (resp map[string]any, accessToken string) {
+	t.Helper()
+	verifier := "builtin-flow-verifier-abcdefghijklmnopqrstuvwxyz0"
+	challenge := pkceChallenge(verifier)
+	state := "flow-state-" + subject
+	redirectURI := "http://localhost/cb"
+
+	authReq := httptest.NewRequest(http.MethodGet,
+		"/authorize?response_type=code&state="+state+"&redirect_uri="+url.QueryEscape(redirectURI)+
+			"&code_challenge="+challenge+"&code_challenge_method=S256", nil)
+	h.Authorize(httptest.NewRecorder(), authReq)
+
+	cbReq := httptest.NewRequest(http.MethodGet, "/callback?code=gh-code&state="+state, nil)
+	cbRec := httptest.NewRecorder()
+	h.Callback(cbRec, cbReq)
+	if cbRec.Code != http.StatusFound {
+		t.Fatalf("callback: got %d; body=%s", cbRec.Code, cbRec.Body.String())
+	}
+	redirectURL, _ := url.Parse(cbRec.Header().Get("Location"))
+	internalCode := redirectURL.Query().Get("code")
+
+	tokenBody := "grant_type=authorization_code" +
+		"&redirect_uri=" + url.QueryEscape(redirectURI) +
+		"&code=" + url.QueryEscape(internalCode) +
+		"&code_verifier=" + url.QueryEscape(verifier)
+	tokenReq := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(tokenBody))
+	tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	tokenRec := httptest.NewRecorder()
+	h.Token(tokenRec, tokenReq)
+	if tokenRec.Code != http.StatusOK {
+		t.Fatalf("token: got %d; body=%s", tokenRec.Code, tokenRec.Body.String())
+	}
+	_ = json.NewDecoder(tokenRec.Body).Decode(&resp)
+	accessToken, _ = resp["access_token"].(string)
+	return resp, accessToken
+}
+
+func TestBuiltinValidateTokenCacheMiss(t *testing.T) {
+	h := newBuiltinTestHandler(t,
+		func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{AccessToken: "gh-tok"}, nil
+		},
+		func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Subject: "zoe"}, nil
+		},
+	)
+
+	_, accessToken := runBuiltinFullFlow(t, h, "zoe")
+
+	// Create a fresh handler with the same key so the token store is empty (cache miss).
+	h2 := newBuiltinTestHandlerWithKey(t, h.privateKey,
+		func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{AccessToken: "gh-tok"}, nil
+		},
+		func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Subject: "zoe"}, nil
+		},
+	)
+
+	sub, _, err := h2.ValidateToken(context.Background(), accessToken, "")
+	if err != nil {
+		t.Fatalf("ValidateToken on cache miss: %v", err)
+	}
+	if sub != "zoe" {
+		t.Errorf("subject: got %q, want %q", sub, "zoe")
+	}
+}
+
+func TestBuiltinValidateTokenExpiredJWT(t *testing.T) {
+	h := newBuiltinTestHandler(t,
+		func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{AccessToken: "gh-tok"}, nil
+		},
+		func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Subject: "expired-user"}, nil
+		},
+	)
+
+	// Generate an already-expired gateway JWT directly.
+	expiredToken, err := generateExpiredGatewayToken(h.privateKey, "expired-user", "")
+	if err != nil {
+		t.Fatalf("generate expired token: %v", err)
+	}
+
+	_, _, err = h.ValidateToken(context.Background(), expiredToken, "")
+	if err == nil {
+		t.Error("expected error for expired JWT, got nil")
+	}
+}
+
+func TestBuiltinValidateTokenAudienceStrict(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+	p := &provider.Mock{
+		NameValue:     "builtin",
+		ClientIDValue: "builtin-client-id",
+		ScopesValue:   "read:user,user:email",
+		ExchangeCodeFunc: func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{AccessToken: "gh-tok"}, nil
+		},
+		ValidateFunc: func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Subject: "strict-user"}, nil
+		},
+	}
+	h, err := NewHandler(Config{
+		BaseURL:              "http://localhost:8080",
+		SessionTTL:           10 * time.Minute,
+		CacheTTL:             5 * time.Minute,
+		ExpiresIn:            90 * 24 * time.Hour,
+		OIDCPrivateKey:       key,
+		TokenAudienceStrict:  true,
+	}, p)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	_, accessToken := runBuiltinFullFlow(t, h, "strict-user")
+
+	// ValidateToken with TokenAudienceStrict=true must still succeed for builtin
+	// tokens even on cache miss (audience is taken from the JWT aud claim).
+	sub, _, valErr := h.ValidateToken(context.Background(), accessToken, "")
+	if valErr != nil {
+		t.Fatalf("ValidateToken with TokenAudienceStrict: %v", valErr)
+	}
+	if sub != "strict-user" {
+		t.Errorf("subject: got %q, want %q", sub, "strict-user")
+	}
+}
+
+// newBuiltinTestHandlerWithKey is like newBuiltinTestHandler but uses a given RSA key.
+func newBuiltinTestHandlerWithKey(t *testing.T, key *rsa.PrivateKey, ghExchange func(context.Context, string) (provider.TokenResponse, error), ghValidate func(context.Context, string) (provider.Identity, error)) *Handler {
+	t.Helper()
+	p := &provider.Mock{
+		NameValue:        "builtin",
+		ClientIDValue:    "builtin-client-id",
+		ScopesValue:      "read:user,user:email",
+		ExchangeCodeFunc: ghExchange,
+		ValidateFunc:     ghValidate,
+	}
+	h, err := NewHandler(Config{
+		BaseURL:        "http://localhost:8080",
+		SessionTTL:     10 * time.Minute,
+		CacheTTL:       5 * time.Minute,
+		ExpiresIn:      90 * 24 * time.Hour,
+		OIDCPrivateKey: key,
+	}, p)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	return h
+}
+
+// generateExpiredGatewayToken creates a gateway-signed JWT with exp in the past.
+func generateExpiredGatewayToken(key *rsa.PrivateKey, subject, audience string) (string, error) {
+	header := map[string]string{"alg": "RS256", "typ": "JWT", "kid": "gateway-key-1"}
+	headerBytes, _ := json.Marshal(header)
+	headerB64 := base64.RawURLEncoding.EncodeToString(headerBytes)
+
+	now := time.Now().Unix()
+	payload := map[string]any{
+		"iss": "http://localhost:8080",
+		"sub": subject,
+		"aud": audience,
+		"iat": now - 7200,
+		"exp": now - 3600, // already expired
+		"jti": "expired-jti",
+	}
+	payloadBytes, _ := json.Marshal(payload)
+	payloadB64 := base64.RawURLEncoding.EncodeToString(payloadBytes)
+
+	signingInput := headerB64 + "." + payloadB64
+	h := sha256.New()
+	h.Write([]byte(signingInput))
+	hashed := h.Sum(nil)
+	sigBytes, err := rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, hashed)
+	if err != nil {
+		return "", err
+	}
+	return signingInput + "." + base64.RawURLEncoding.EncodeToString(sigBytes), nil
+}
