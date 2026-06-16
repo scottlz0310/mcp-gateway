@@ -68,6 +68,10 @@ type Config struct {
 	// AllowedAudiences is the set of RFC 8707 resource indicator values accepted
 	// by this gateway. BaseURL is always allowed.
 	AllowedAudiences []string
+	// AllowedRedirectSchemes is the set of custom URL schemes (RFC 8252) permitted
+	// as redirect_uri in addition to http and https. When empty, defaults to
+	// ["antigravity", "antigravity-insiders"]. Set explicitly to override.
+	AllowedRedirectSchemes []string
 	// TokenAudienceStrict rejects tokens without audience metadata. The default
 	// false value is a grace mode for tokens issued before this metadata existed.
 	TokenAudienceStrict bool
@@ -135,6 +139,9 @@ func NewHandler(cfg Config, p provider.Provider, opts ...HandlerOption) (*Handle
 	cfg.AllowedAudiences = normalizeAllowedAudiences(cfg.BaseURL, cfg.AllowedAudiences)
 	if len(cfg.AllowedRedirectHosts) == 0 {
 		cfg.AllowedRedirectHosts = []string{"localhost", "127.0.0.1", "vscode.dev", "antigravity.google"}
+	}
+	if len(cfg.AllowedRedirectSchemes) == 0 {
+		cfg.AllowedRedirectSchemes = []string{"antigravity", "antigravity-insiders"}
 	}
 	if cfg.ExpiresIn <= 0 {
 		cfg.ExpiresIn = 90 * 24 * time.Hour
@@ -392,18 +399,25 @@ func (h *Handler) Authorize(w http.ResponseWriter, r *http.Request) {
 	}
 
 	parsedRedirect, err := url.Parse(redirectURI)
-	if err != nil ||
-		(parsedRedirect.Scheme != "http" && parsedRedirect.Scheme != "https") ||
-		parsedRedirect.Host == "" ||
-		parsedRedirect.Fragment != "" {
+	if err != nil || parsedRedirect.Scheme == "" || parsedRedirect.Host == "" || parsedRedirect.Fragment != "" {
 		h.auditFailure("authorize", "invalid_request", "authorization redirect URI rejected", err, http.StatusBadRequest, "")
-		oauthError(w, "invalid_request", "invalid redirect_uri: must be absolute http/https URL without fragment", http.StatusBadRequest)
+		oauthError(w, "invalid_request", "invalid redirect_uri: must be an absolute URI without fragment", http.StatusBadRequest)
 		return
 	}
-	if !isAllowedRedirectHost(parsedRedirect.Hostname(), h.cfg.AllowedRedirectHosts) {
-		h.auditFailure("authorize", "invalid_request", "authorization redirect host rejected", nil, http.StatusBadRequest, "")
-		oauthError(w, "invalid_request", "redirect_uri host not permitted", http.StatusBadRequest)
-		return
+	switch parsedRedirect.Scheme {
+	case "http", "https":
+		if !isAllowedRedirectHost(parsedRedirect.Hostname(), h.cfg.AllowedRedirectHosts) {
+			h.auditFailure("authorize", "invalid_request", "authorization redirect host rejected", nil, http.StatusBadRequest, "")
+			oauthError(w, "invalid_request", "redirect_uri host not permitted", http.StatusBadRequest)
+			return
+		}
+	default:
+		// RFC 8252: custom URL scheme for native apps (e.g. antigravity://oauth-callback)
+		if !isAllowedRedirectScheme(parsedRedirect.Scheme, h.cfg.AllowedRedirectSchemes) {
+			h.auditFailure("authorize", "invalid_request", "authorization redirect scheme rejected", nil, http.StatusBadRequest, "")
+			oauthError(w, "invalid_request", "redirect_uri scheme not permitted", http.StatusBadRequest)
+			return
+		}
 	}
 
 	h.store.SaveSession(state, redirectURI, codeChallenge, audience)
@@ -1497,6 +1511,10 @@ func tokenFingerprint(token string) string {
 
 func isAllowedRedirectHost(hostname string, allowed []string) bool {
 	return slices.Contains(allowed, hostname)
+}
+
+func isAllowedRedirectScheme(scheme string, allowed []string) bool {
+	return slices.Contains(allowed, scheme)
 }
 
 // joinScopes serializes the provider's scope slice for OAuth token responses.

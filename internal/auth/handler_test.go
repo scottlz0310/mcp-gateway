@@ -2527,3 +2527,100 @@ func TestNewHandler_OIDCPrivateKey(t *testing.T) {
 		t.Error("expected Handler to generate a random key when OIDCPrivateKey is nil")
 	}
 }
+
+func TestAuthorizeCustomSchemeRedirectURI(t *testing.T) {
+	tests := []struct {
+		name        string
+		redirectURI string
+		schemes     []string // nil = use default
+		wantStatus  int
+	}{
+		{
+			name:        "antigravity scheme accepted by default",
+			redirectURI: "antigravity://oauth-callback",
+			wantStatus:  http.StatusFound,
+		},
+		{
+			name:        "antigravity-insiders scheme accepted by default",
+			redirectURI: "antigravity-insiders://oauth-callback",
+			wantStatus:  http.StatusFound,
+		},
+		{
+			name:        "unknown custom scheme rejected",
+			redirectURI: "myapp://callback",
+			wantStatus:  http.StatusBadRequest,
+		},
+		{
+			name:        "custom scheme allowed when explicitly configured",
+			redirectURI: "myapp://callback",
+			schemes:     []string{"myapp"},
+			wantStatus:  http.StatusFound,
+		},
+		{
+			name:        "http scheme still works",
+			redirectURI: "http://localhost/callback",
+			wantStatus:  http.StatusFound,
+		},
+		{
+			name:        "https scheme still works",
+			redirectURI: "https://antigravity.google/oauth-callback",
+			wantStatus:  http.StatusFound,
+		},
+		{
+			name:        "custom scheme with explicit empty list rejects antigravity",
+			redirectURI: "antigravity://oauth-callback",
+			schemes:     []string{"other"},
+			wantStatus:  http.StatusBadRequest,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := provider.NewGitHub(provider.GitHubConfig{
+				ClientID:     "test-client-id",
+				ClientSecret: "test-client-secret",
+				RedirectURI:  "http://localhost:8080/callback",
+				Scopes:       "repo,user",
+			})
+			cfg := Config{
+				BaseURL:    "http://localhost:8080",
+				SessionTTL: 10 * time.Minute,
+				CacheTTL:   5 * time.Minute,
+				ExpiresIn:  90 * 24 * time.Hour,
+			}
+			if tc.schemes != nil {
+				cfg.AllowedRedirectSchemes = tc.schemes
+			}
+			h, err := NewHandler(cfg, p)
+			if err != nil {
+				t.Fatalf("NewHandler: %v", err)
+			}
+
+			r := httptest.NewRequest(http.MethodGet, "/authorize?response_type=code&state=teststate&redirect_uri="+url.QueryEscape(tc.redirectURI), nil)
+			w := httptest.NewRecorder()
+			h.Authorize(w, r)
+
+			if w.Code != tc.wantStatus {
+				t.Errorf("status: got %d, want %d; body: %s", w.Code, tc.wantStatus, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestAuthorizeCustomSchemeDefaultSchemes(t *testing.T) {
+	h := newTestHandler(t)
+
+	// デフォルトの AllowedRedirectSchemes が正しく設定されているか検証
+	wantSchemes := []string{"antigravity", "antigravity-insiders"}
+	for _, scheme := range wantSchemes {
+		t.Run("default includes "+scheme, func(t *testing.T) {
+			redirectURI := scheme + "://oauth-callback"
+			r := httptest.NewRequest(http.MethodGet, "/authorize?response_type=code&state=s&redirect_uri="+url.QueryEscape(redirectURI), nil)
+			w := httptest.NewRecorder()
+			h.Authorize(w, r)
+			if w.Code != http.StatusFound {
+				t.Errorf("scheme %q should be accepted by default, got status %d", scheme, w.Code)
+			}
+		})
+	}
+}

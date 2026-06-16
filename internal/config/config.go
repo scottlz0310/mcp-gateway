@@ -80,6 +80,11 @@ type GatewayConfig struct {
 	// When set, replaces the built-in default list entirely.
 	// Defaults to ["localhost", "127.0.0.1", "vscode.dev", "antigravity.google"].
 	AllowedRedirectHosts []string `yaml:"allowed_redirect_hosts,omitempty"`
+	// AllowedRedirectSchemes lists custom URL schemes (RFC 8252) permitted in
+	// OAuth redirect_uris in addition to http and https. When set, replaces the
+	// built-in default list entirely.
+	// Defaults to ["antigravity", "antigravity-insiders"].
+	AllowedRedirectSchemes []string `yaml:"allowed_redirect_schemes,omitempty"`
 }
 
 // LoadConfig reads AppConfig from path.

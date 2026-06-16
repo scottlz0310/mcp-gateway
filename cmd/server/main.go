@@ -132,6 +132,9 @@ func main() {
 	if strings.TrimSpace(os.Getenv("MCP_GATEWAY_ALLOWED_REDIRECT_HOSTS")) == "" && len(appCfg.Gateway.AllowedRedirectHosts) > 0 {
 		cfg.allowedRedirectHosts = appCfg.Gateway.AllowedRedirectHosts
 	}
+	if strings.TrimSpace(os.Getenv("MCP_GATEWAY_ALLOWED_REDIRECT_SCHEMES")) == "" && len(appCfg.Gateway.AllowedRedirectSchemes) > 0 {
+		cfg.allowedRedirectSchemes = appCfg.Gateway.AllowedRedirectSchemes
+	}
 	// Apply config.yaml OAuth provider overrides
 	if strings.TrimSpace(os.Getenv("OAUTH_PROVIDER")) == "" && strings.TrimSpace(appCfg.Auth.Provider) != "" {
 		cfg.oauthProvider = appCfg.Auth.Provider
@@ -250,7 +253,8 @@ func main() {
 		TokenAudienceStrict:  cfg.tokenAudienceStrict,
 		GitHubRefreshEnabled: cfg.githubRefreshEnabled,
 		OIDCPrivateKey:       oidcPrivateKey,
-		AllowedRedirectHosts: cfg.allowedRedirectHosts,
+		AllowedRedirectHosts:   cfg.allowedRedirectHosts,
+		AllowedRedirectSchemes: cfg.allowedRedirectSchemes,
 	}, prov, auth.WithAuditRecorder(auditRecorder))
 	if err != nil {
 		slog.Error("auth handler init failed", "err", err)
@@ -425,7 +429,8 @@ type config struct {
 	tokenStorePath       string
 	keyPath              string
 	configPath           string
-	allowedRedirectHosts []string
+	allowedRedirectHosts   []string
+	allowedRedirectSchemes []string
 }
 
 func loadConfig() config {
@@ -468,7 +473,8 @@ func loadConfig() config {
 		tokenStorePath:       lookupEnv("MCP_GATEWAY_TOKEN_STORE_PATH", "/data/tokens.json"),
 		keyPath:              getEnv("MCP_GATEWAY_KEY_PATH", "./gateway.key"),
 		configPath:           getEnv("MCP_CONFIG_FILE", "./config.yaml"),
-		allowedRedirectHosts: splitCSV(os.Getenv("MCP_GATEWAY_ALLOWED_REDIRECT_HOSTS")),
+		allowedRedirectHosts:   splitCSV(os.Getenv("MCP_GATEWAY_ALLOWED_REDIRECT_HOSTS")),
+		allowedRedirectSchemes: splitCSV(os.Getenv("MCP_GATEWAY_ALLOWED_REDIRECT_SCHEMES")),
 	}
 }
 
