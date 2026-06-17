@@ -58,8 +58,8 @@ is logged that the legacy is ignored.
 | `GITHUB_MCP_CLIENT_SECRET` | none | **Deprecated** — use `OAUTH_CLIENT_SECRET`. Still accepted with a startup warning. |
 | `GITHUB_MCP_OAUTH_SCOPES` | none | **Deprecated** — use `OAUTH_SCOPES`. Still accepted with a startup warning. |
 | `ROUTE_<NAME>` | none | Route definition in `<prefix>|<upstream_url>[|auth=none]` form. At least one route is required unless configured in `config.yaml`. |
-| `MCP_CONFIG_FILE` | `./config.yaml` | Path to persisted YAML configuration. |
-| `MCP_GATEWAY_KEY_PATH` | `./gateway.key` | Path to the age X25519 identity used to encrypt `auth.github_client_secret`. |
+| `MCP_CONFIG_FILE` | OS state dir¹ `/config.yaml` | Path to persisted YAML configuration. |
+| `MCP_GATEWAY_KEY_PATH` | OS state dir¹ `/gateway.key` | Path to the age X25519 identity used to encrypt `auth.github_client_secret`. |
 | `MCP_GATEWAY_MASTER_KEY` | none | Optional deterministic key seed. Use 32+ random bytes encoded as a string, for example `openssl rand -base64 32`. Used only when creating `gateway.key`. |
 | `MCP_MASTER_KEY` | none | Legacy alias for `MCP_GATEWAY_MASTER_KEY`. |
 | `MCP_GATEWAY_PUBLIC_URL` | `http://127.0.0.1:<port>` | Canonical client-visible URL used for OAuth callbacks, discovery metadata, and Protected Resource Metadata. |
@@ -67,8 +67,8 @@ is logged that the legacy is ignored.
 | `MCP_GATEWAY_PORT` | `8080` | Port used to derive default `public_url` and `bind_addr` when those settings are not explicit. |
 | `MCP_GATEWAY_BASE_URL` | none | Deprecated alias for `MCP_GATEWAY_PUBLIC_URL`. Emits a startup warning when set. |
 | `MCP_GATEWAY_TRUSTED_PROXIES` | none | Comma-separated CIDR list for immediate reverse proxies whose `X-Forwarded-*` headers are trusted. |
-| `MCP_GATEWAY_TOKEN_STORE_PATH` | `/data/tokens.json` | Persistent token store path. Set to an empty value to disable persistence. |
-| `MCP_GATEWAY_AUTH_AUDIT_LOG_PATH` | OS-specific user state path; official image: `/data/mcp-gateway/logs/auth-audit.jsonl` | OAuth 監査 JSON Lines の絶対 path。相対 path と Git worktree 配下は起動時に拒否される。 |
+| `MCP_GATEWAY_TOKEN_STORE_PATH` | OS state dir¹ `/tokens.json` | Persistent token store path. Set to an empty value to disable persistence. Docker deployments override this via env var. |
+| `MCP_GATEWAY_AUTH_AUDIT_LOG_PATH` | OS audit dir² | OAuth 監査 JSON Lines の絶対 path。相対 path と Git worktree 配下は起動時に拒否される。 |
 | `MCP_GATEWAY_AUTH_AUDIT_MAX_SIZE_MB` | `10` | 監査ログ1ファイルの最大サイズ（MiB）。 |
 | `MCP_GATEWAY_AUTH_AUDIT_MAX_BACKUPS` | `5` | 保持するローテーション済み監査ログの最大数。 |
 | `MCP_GATEWAY_AUTH_AUDIT_MAX_AGE_DAYS` | `30` | ローテーション済み監査ログの最大保持日数。 |
@@ -81,6 +81,29 @@ is logged that the legacy is ignored.
 | `TOKEN_CACHE_TTL_MIN` | `30` | In-memory validation cache TTL in minutes. Used when token persistence is disabled. |
 | `TOKEN_EXPIRES_IN_SEC` | `7776000` | Token lifetime advertised to clients and persistent token entry TTL. Default is 90 days. |
 | `GITHUB_MCP_UPSTREAM_URL` | none | Deprecated single-upstream fallback when no `ROUTE_*` or `routes:` entries exist. |
+
+¹ **OS state directory** — resolved by `gatewayStateDir()` at startup:
+
+| OS | Default state directory |
+|----|------------------------|
+| Windows | `%LOCALAPPDATA%\mcp-gateway\` |
+| macOS | `~/Library/Application Support/mcp-gateway/` |
+| Linux / other | `$XDG_STATE_HOME/mcp-gateway/` → `~/.local/state/mcp-gateway/` |
+| Docker (official image) | `/data/mcp-gateway/` (via `XDG_STATE_HOME=/data`) |
+
+The directory is created automatically on startup (`MkdirAll 0700`). Docker and
+other containerised deployments should always pin paths explicitly via environment
+variables; the OS default applies to bare-metal installations only.
+
+² **OS audit log directory** — resolved independently by `authaudit.defaultPath()`
+(separate from `gatewayStateDir()`):
+
+| OS | Default audit log path |
+|----|------------------------|
+| Windows | `%LOCALAPPDATA%\mcp-gateway\logs\auth-audit.jsonl` |
+| macOS | `~/Library/Logs/mcp-gateway/auth-audit.jsonl` |
+| Linux / other | `$XDG_STATE_HOME/mcp-gateway/logs/auth-audit.jsonl` → `~/.local/state/mcp-gateway/logs/auth-audit.jsonl` |
+| Docker (official image) | `/data/mcp-gateway/logs/auth-audit.jsonl` (via `XDG_STATE_HOME=/data`) |
 
 `MCP_GATEWAY_MASTER_KEY` is checked as the byte length of the supplied string
 after trimming whitespace. A base64 string generated with `openssl rand -base64
@@ -209,11 +232,13 @@ Secrets and key material are not logged. A corrupt, empty, or unreadable
 
 ## Token Persistence
 
-By default, validated token state is stored in `/data/tokens.json`, which is
-created in the Docker image. For non-Docker runs, set a writable path:
+By default, validated token state is stored in `{state-dir}/tokens.json` (see
+the OS state directory table in the [Environment Variables](#environment-variables)
+section above). Docker deployments override this via `MCP_GATEWAY_TOKEN_STORE_PATH`
+in `docker-compose.yml`. To point to an explicit path:
 
 ```bash
-MCP_GATEWAY_TOKEN_STORE_PATH=./tokens.json
+MCP_GATEWAY_TOKEN_STORE_PATH=/var/lib/mcp-gateway/tokens.json
 ```
 
 Set the variable to an empty value to disable persistence:

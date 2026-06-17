@@ -10,8 +10,11 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 ### Added
 
 - OS-appropriate default paths for runtime state files ([#144](https://github.com/scottlz0310/mcp-gateway/issues/144))
-  - `MCP_GATEWAY_KEY_PATH`, `MCP_CONFIG_FILE`, `MCP_GATEWAY_TOKEN_STORE_PATH` now default to the OS user state directory (`%LOCALAPPDATA%\mcp-gateway\` on Windows, `~/.local/share/mcp-gateway/` on Linux, `~/Library/Application Support/mcp-gateway/` on macOS) instead of the process working directory or a Docker-only `/data/` path
+  - `MCP_GATEWAY_KEY_PATH`, `MCP_CONFIG_FILE`, `MCP_GATEWAY_TOKEN_STORE_PATH` now default to the OS user state directory (`%LOCALAPPDATA%\mcp-gateway\` on Windows, `~/.local/state/mcp-gateway/` on Linux via `$XDG_STATE_HOME`, `~/Library/Application Support/mcp-gateway/` on macOS) instead of the process working directory or a Docker-only `/data/` path
+  - State directory is created automatically on startup (`MkdirAll 0700`); clean installs no longer fail on first run
   - Docker operators continue to override via environment variables; this change only affects bare-metal / non-containerised deployments
+- Sync `docs/configuration.md`, `README.md`, and `README.ja.md` default path descriptions to reflect `#144` implementation ([#147](https://github.com/scottlz0310/mcp-gateway/issues/147))
+  - Environment variable table updated with `{state-dir}` notation and OS-breakdown footnote
 - Recommended GitHub App permission settings documented ([#145](https://github.com/scottlz0310/mcp-gateway/issues/145))
   - `README.md`, `README.ja.md`: expanded Permissions section with a table covering Repository (Contents/Issues/Pull requests/Metadata) and Account (Email addresses) permissions needed by `review-raven` / `github-mcp-server` upstreams
   - `examples/copilot-review-routing/.env.example`: updated GitHub App creation comment with the same permission table
