@@ -9,6 +9,12 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Separate `aud` claim by route via `required_audience` config ([#129](https://github.com/scottlz0310/mcp-gateway/issues/129))
+  - `RouteConfig.required_audience` / `Route.RequiredAudience` field: per-route JWT audience (e.g. `"mcp-server"`, `"external-mcp"`); defaults to `"mcp-gateway"`
+  - `/token` and device-authorize endpoints accept `resource=<route-name>` (RFC 8707); gateway resolves audience from route config and stamps it in issued access tokens
+  - `"mcp-gateway"` narrowing: refresh token with gateway-wide `mcp-gateway` audience may be narrowed to any per-route audience on subsequent refresh
+  - `ResourceAudienceMap` (`auth.Config`) replaces the former `AllowedAudiences` slice; keys are route names, values are `required_audience` values
+  - `routeResource` (RFC 9728 PRM discovery URL) is kept as a separate URL-form identifier and is not used for JWT aud validation
 - Migrate refresh token store from file-backed JSON to SQLite ([#134](https://github.com/scottlz0310/mcp-gateway/issues/134))
   - Atomic `Revoke` / `RevokeFamily` via single-statement `UPDATE` — eliminates in-process TOCTOU between `Lookup` and `Revoke`
   - Flush-failure rollback is now guaranteed by SQLite transactions (no manual `prev`-state bookkeeping)

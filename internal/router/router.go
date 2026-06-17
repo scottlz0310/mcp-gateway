@@ -10,6 +10,11 @@ import (
 	appconfig "github.com/scottlz0310/mcp-gateway/internal/config"
 )
 
+// DefaultRequiredAudience is the aud claim value used when a route does not
+// specify required_audience. It matches the default resource for clients that
+// do not pass a resource parameter to /token.
+const DefaultRequiredAudience = "mcp-gateway"
+
 // Route maps a URL path prefix to an upstream MCP server.
 type Route struct {
 	Name     string
@@ -26,6 +31,10 @@ type Route struct {
 	// than terminating. Operators must restart the gateway after rotating
 	// this credential to restore fail-closed protection.
 	UpstreamBearerTokenEnv string
+	// RequiredAudience is the aud claim value that access tokens must carry to
+	// access this route. Clients request a token with this audience by passing
+	// resource=<route-name> to the /token endpoint. Defaults to "mcp-gateway".
+	RequiredAudience string
 }
 
 // ParseEnv reads ROUTE_<NAME>=<prefix>|<upstream_url>[|opt=val...] environment
@@ -104,6 +113,17 @@ func parseRoutes(env []string) ([]Route, error) {
 			delete(options, "upstream_bearer_token_env")
 		}
 
+		// required_audience: the aud claim value access tokens must carry to reach this route.
+		requiredAudience := DefaultRequiredAudience
+		if aud, ok := options["required_audience"]; ok {
+			aud = strings.TrimSpace(aud)
+			if aud == "" {
+				return nil, fmt.Errorf("%s: required_audience value must not be empty", key)
+			}
+			requiredAudience = aud
+			delete(options, "required_audience")
+		}
+
 		// Reject any unrecognised option keys.
 		if len(options) > 0 {
 			unknown := make([]string, 0, len(options))
@@ -147,6 +167,7 @@ func parseRoutes(env []string) ([]Route, error) {
 			Upstream:               u,
 			NoAuth:                 noAuth,
 			UpstreamBearerTokenEnv: upstreamBearerTokenEnv,
+			RequiredAudience:       requiredAudience,
 		})
 	}
 	// Longest prefix first for correct matching order.
@@ -163,11 +184,16 @@ func parseRoutes(env []string) ([]Route, error) {
 func ParseFromConfig(cfgRoutes []appconfig.RouteConfig) ([]Route, error) {
 	var routes []Route
 	seen := make(map[string]struct{})
+	seenNames := make(map[string]struct{})
 	for _, r := range cfgRoutes {
 		name := strings.ToLower(strings.TrimSpace(r.Name))
 		if name == "" {
 			return nil, fmt.Errorf("route name must not be empty")
 		}
+		if _, dup := seenNames[name]; dup {
+			return nil, fmt.Errorf("route %q: duplicate route name", name)
+		}
+		seenNames[name] = struct{}{}
 		prefix := r.Prefix
 		if prefix != "/" {
 			prefix = strings.TrimRight(prefix, "/")
@@ -204,6 +230,10 @@ func ParseFromConfig(cfgRoutes []appconfig.RouteConfig) ([]Route, error) {
 				return nil, fmt.Errorf("route %q: upstream_bearer_token_env=%s is not set or empty (fail-closed)", name, upstreamBearerTokenEnv)
 			}
 		}
+		requiredAudience := strings.TrimSpace(r.RequiredAudience)
+		if requiredAudience == "" {
+			requiredAudience = DefaultRequiredAudience
+		}
 		seen[prefix] = struct{}{}
 		routes = append(routes, Route{
 			Name:                   name,
@@ -211,6 +241,7 @@ func ParseFromConfig(cfgRoutes []appconfig.RouteConfig) ([]Route, error) {
 			Upstream:               u,
 			NoAuth:                 r.NoAuth,
 			UpstreamBearerTokenEnv: upstreamBearerTokenEnv,
+			RequiredAudience:       requiredAudience,
 		})
 	}
 	sort.Slice(routes, func(i, j int) bool {

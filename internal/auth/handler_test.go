@@ -1,4 +1,4 @@
-package auth
+﻿package auth
 
 import (
 	"context"
@@ -395,7 +395,7 @@ func TestOAuthAuditEventsAndSecretRedaction(t *testing.T) {
 		t.Fatal("token response missing gateway refresh token")
 	}
 
-	if _, rotated, err := h.ValidateToken(context.Background(), "secret-access-token", "http://localhost:8080"); err != nil {
+	if _, rotated, err := h.ValidateToken(context.Background(), "secret-access-token", "mcp-gateway"); err != nil {
 		t.Fatalf("ValidateToken: %v", err)
 	} else if rotated != "rotated-secret-access-token" {
 		t.Fatalf("rotated token: got %q", rotated)
@@ -461,7 +461,7 @@ func TestOAuthAuditEventsAndSecretRedaction(t *testing.T) {
 }
 
 func TestAuthorizeResourceAudienceStoredOnToken(t *testing.T) {
-	const routeAudience = "http://localhost:8080/mcp/foo"
+	const routeAudience = "mcp-server"
 	p := &provider.Mock{
 		ClientIDValue: "test-client-id",
 		ScopesValue:   "repo,user",
@@ -476,18 +476,18 @@ func TestAuthorizeResourceAudienceStoredOnToken(t *testing.T) {
 		},
 	}
 	h, err := NewHandler(Config{
-		BaseURL:          "http://localhost:8080",
-		SessionTTL:       10 * time.Minute,
-		CacheTTL:         5 * time.Minute,
-		ExpiresIn:        90 * 24 * time.Hour,
-		AllowedAudiences: []string{routeAudience},
+		BaseURL:             "http://localhost:8080",
+		SessionTTL:          10 * time.Minute,
+		CacheTTL:            5 * time.Minute,
+		ExpiresIn:           90 * 24 * time.Hour,
+		ResourceAudienceMap: map[string]string{"foo": routeAudience},
 	}, p)
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
 	}
 
 	authReq := httptest.NewRequest(http.MethodGet,
-		"/authorize?response_type=code&state=state-aud&redirect_uri=http://localhost/cb&resource="+url.QueryEscape(routeAudience), nil)
+		"/authorize?response_type=code&state=state-aud&redirect_uri=http://localhost/cb&resource=foo", nil)
 	authRec := httptest.NewRecorder()
 	h.Authorize(authRec, authReq)
 	if authRec.Code != http.StatusFound {
@@ -540,7 +540,7 @@ func TestAuthorizeResourceAudienceStoredOnToken(t *testing.T) {
 func TestAuthorizeRejectsUnknownResource(t *testing.T) {
 	h := newTestHandler(t)
 	r := httptest.NewRequest(http.MethodGet,
-		"/authorize?response_type=code&state=s&redirect_uri=http://localhost/cb&resource=http%3A%2F%2Flocalhost%3A8080%2Fmcp%2Fmissing", nil)
+		"/authorize?response_type=code&state=s&redirect_uri=http://localhost/cb&resource=missing-route", nil)
 	w := httptest.NewRecorder()
 
 	h.Authorize(w, r)
@@ -1524,8 +1524,8 @@ func TestNewHandlerRefreshStoreInitError(t *testing.T) {
 }
 
 // newTestRefreshHandlerWithGitHub creates a Handler wired to a stub GitHub user API
-// and configured with extra allowed audiences.
-func newTestRefreshHandlerWithGitHub(t *testing.T, extraAudiences []string) (*Handler, *httptest.Server) {
+// and configured with a ResourceAudienceMap for refresh token audience tests.
+func newTestRefreshHandlerWithGitHub(t *testing.T, resourceMap map[string]string) (*Handler, *httptest.Server) {
 	t.Helper()
 	ghServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1541,11 +1541,11 @@ func newTestRefreshHandlerWithGitHub(t *testing.T, extraAudiences []string) (*Ha
 		HTTPClient:   ghServer.Client(),
 	})
 	h, err := NewHandler(Config{
-		BaseURL:          "http://localhost:8080",
-		SessionTTL:       10 * time.Minute,
-		CacheTTL:         5 * time.Minute,
-		ExpiresIn:        90 * 24 * time.Hour,
-		AllowedAudiences: extraAudiences,
+		BaseURL:             "http://localhost:8080",
+		SessionTTL:          10 * time.Minute,
+		CacheTTL:            5 * time.Minute,
+		ExpiresIn:           90 * 24 * time.Hour,
+		ResourceAudienceMap: resourceMap,
 	}, p)
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)
@@ -1556,15 +1556,15 @@ func newTestRefreshHandlerWithGitHub(t *testing.T, extraAudiences []string) (*Ha
 // TestTokenRefreshResourceSameAudience verifies that a resource matching the
 // original audience is accepted and returns 200.
 func TestTokenRefreshResourceSameAudience(t *testing.T) {
-	const audience = "http://localhost:8080/mcp/route-a"
-	h, _ := newTestRefreshHandlerWithGitHub(t, []string{audience})
+	const audience = "mcp-server"
+	h, _ := newTestRefreshHandlerWithGitHub(t, map[string]string{"route-a": audience})
 
 	rt, err := h.store.CreateRefreshToken("gha_token", audience, "", h.refreshTokenTTL())
 	if err != nil {
 		t.Fatalf("seeding refresh token: %v", err)
 	}
 
-	body := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(rt) + "&resource=" + url.QueryEscape(audience)
+	body := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(rt) + "&resource=route-a"
 	r := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()
@@ -1581,18 +1581,18 @@ func TestTokenRefreshResourceSameAudience(t *testing.T) {
 }
 
 // TestTokenRefreshResourceNarrowing verifies that a client may narrow a
-// gateway-wide audience to a per-route sub-path on refresh.
+// gateway-wide audience to a per-route audience on refresh.
 func TestTokenRefreshResourceNarrowing(t *testing.T) {
-	const routeAud = "http://localhost:8080/mcp/route-a"
-	h, _ := newTestRefreshHandlerWithGitHub(t, []string{routeAud})
+	const routeAud = "mcp-server"
+	h, _ := newTestRefreshHandlerWithGitHub(t, map[string]string{"route-a": routeAud})
 
-	// Original token is gateway-wide.
-	rt, err := h.store.CreateRefreshToken("gha_token", "http://localhost:8080", "", h.refreshTokenTTL())
+	// Original token is gateway-wide (mcp-gateway).
+	rt, err := h.store.CreateRefreshToken("gha_token", "mcp-gateway", "", h.refreshTokenTTL())
 	if err != nil {
 		t.Fatalf("seeding refresh token: %v", err)
 	}
 
-	body := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(rt) + "&resource=" + url.QueryEscape(routeAud)
+	body := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(rt) + "&resource=route-a"
 	r := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()
@@ -1604,19 +1604,19 @@ func TestTokenRefreshResourceNarrowing(t *testing.T) {
 }
 
 // TestTokenRefreshResourceCrossRoute verifies that switching from one route
-// audience to a sibling route is rejected with 400 invalid_target.
+// audience to a distinct sibling audience is rejected with 400 invalid_target.
 func TestTokenRefreshResourceCrossRoute(t *testing.T) {
-	h, _ := newTestRefreshHandlerWithGitHub(t, []string{
-		"http://localhost:8080/mcp/route-a",
-		"http://localhost:8080/mcp/route-b",
+	h, _ := newTestRefreshHandlerWithGitHub(t, map[string]string{
+		"route-a": "mcp-server",
+		"route-b": "external-mcp",
 	})
 
-	rt, err := h.store.CreateRefreshToken("gha_token", "http://localhost:8080/mcp/route-a", "", h.refreshTokenTTL())
+	rt, err := h.store.CreateRefreshToken("gha_token", "mcp-server", "", h.refreshTokenTTL())
 	if err != nil {
 		t.Fatalf("seeding refresh token: %v", err)
 	}
 
-	body := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(rt) + "&resource=" + url.QueryEscape("http://localhost:8080/mcp/route-b")
+	body := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(rt) + "&resource=route-b"
 	r := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()
@@ -1633,17 +1633,17 @@ func TestTokenRefreshResourceCrossRoute(t *testing.T) {
 }
 
 // TestTokenRefreshResourceWidening verifies that broadening a per-route
-// audience to gateway-wide is rejected with 400 invalid_target.
+// audience to the gateway-wide audience is rejected with 400 invalid_target.
 func TestTokenRefreshResourceWidening(t *testing.T) {
-	const routeAud = "http://localhost:8080/mcp/route-a"
-	h, _ := newTestRefreshHandlerWithGitHub(t, []string{routeAud})
+	const routeAud = "mcp-server"
+	h, _ := newTestRefreshHandlerWithGitHub(t, map[string]string{"route-a": routeAud})
 
 	rt, err := h.store.CreateRefreshToken("gha_token", routeAud, "", h.refreshTokenTTL())
 	if err != nil {
 		t.Fatalf("seeding refresh token: %v", err)
 	}
 
-	body := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(rt) + "&resource=" + url.QueryEscape("http://localhost:8080")
+	body := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(rt) + "&resource=mcp-gateway"
 	r := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()
@@ -1664,12 +1664,12 @@ func TestTokenRefreshResourceWidening(t *testing.T) {
 func TestTokenRefreshResourceUnknown(t *testing.T) {
 	h, _ := newTestRefreshHandlerWithGitHub(t, nil)
 
-	rt, err := h.store.CreateRefreshToken("gha_token", "http://localhost:8080", "", h.refreshTokenTTL())
+	rt, err := h.store.CreateRefreshToken("gha_token", "mcp-gateway", "", h.refreshTokenTTL())
 	if err != nil {
 		t.Fatalf("seeding refresh token: %v", err)
 	}
 
-	body := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(rt) + "&resource=" + url.QueryEscape("https://unknown.example/mcp")
+	body := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(rt) + "&resource=unknown-route"
 	r := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()
@@ -1692,8 +1692,8 @@ func TestTokenRefreshResourceUnknown(t *testing.T) {
 // TestTokenRefreshResourceLegacyToken verifies that a legacy token (empty
 // stored audience) accepts any registered resource as a valid narrowing.
 func TestTokenRefreshResourceLegacyToken(t *testing.T) {
-	const routeAud = "http://localhost:8080/mcp/route-a"
-	h, _ := newTestRefreshHandlerWithGitHub(t, []string{routeAud})
+	const routeAud = "mcp-server"
+	h, _ := newTestRefreshHandlerWithGitHub(t, map[string]string{"route-a": routeAud})
 
 	// Empty audience simulates a pre-audience (legacy) refresh token.
 	rt, err := h.store.CreateRefreshToken("gha_token", "", "", h.refreshTokenTTL())
@@ -1701,7 +1701,7 @@ func TestTokenRefreshResourceLegacyToken(t *testing.T) {
 		t.Fatalf("seeding refresh token: %v", err)
 	}
 
-	body := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(rt) + "&resource=" + url.QueryEscape(routeAud)
+	body := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(rt) + "&resource=route-a"
 	r := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()
@@ -1713,11 +1713,11 @@ func TestTokenRefreshResourceLegacyToken(t *testing.T) {
 }
 
 // TestTokenRefreshResourceEmptyValue verifies that resource= (empty value) is
-// rejected as invalid_target (RFC 8707 requires a non-empty absolute URI).
+// rejected as invalid_target.
 func TestTokenRefreshResourceEmptyValue(t *testing.T) {
-	h, _ := newTestRefreshHandlerWithGitHub(t, []string{"http://localhost:8080/mcp/route-a"})
+	h, _ := newTestRefreshHandlerWithGitHub(t, map[string]string{"route-a": "mcp-server"})
 
-	rt, err := h.store.CreateRefreshToken("gha_token", "http://localhost:8080", "", h.refreshTokenTTL())
+	rt, err := h.store.CreateRefreshToken("gha_token", "mcp-gateway", "", h.refreshTokenTTL())
 	if err != nil {
 		t.Fatalf("seeding refresh token: %v", err)
 	}
@@ -1738,19 +1738,18 @@ func TestTokenRefreshResourceEmptyValue(t *testing.T) {
 	}
 }
 
-// TestTokenRefreshResourceMultipleRaw verifies that resource=&resource=https://x
-// (one empty, one valid) is rejected  Eraw count check ignores empty filtering.
+// TestTokenRefreshResourceMultipleRaw verifies that resource=&resource=route-a
+// (one empty, one valid) is rejected — empty value check runs before multi-check.
 func TestTokenRefreshResourceMultipleRaw(t *testing.T) {
-	const routeAud = "http://localhost:8080/mcp/route-a"
-	h, _ := newTestRefreshHandlerWithGitHub(t, []string{routeAud})
+	const routeAud = "mcp-server"
+	h, _ := newTestRefreshHandlerWithGitHub(t, map[string]string{"route-a": routeAud})
 
-	rt, err := h.store.CreateRefreshToken("gha_token", "http://localhost:8080", "", h.refreshTokenTTL())
+	rt, err := h.store.CreateRefreshToken("gha_token", "mcp-gateway", "", h.refreshTokenTTL())
 	if err != nil {
 		t.Fatalf("seeding refresh token: %v", err)
 	}
 
-	// resource= (empty) is present first  Eshould be rejected before multi-check
-	body := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(rt) + "&resource=&resource=" + url.QueryEscape(routeAud)
+	body := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(rt) + "&resource=&resource=route-a"
 	r := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	w := httptest.NewRecorder()

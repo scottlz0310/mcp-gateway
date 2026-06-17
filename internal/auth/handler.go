@@ -68,6 +68,12 @@ type Config struct {
 	// AllowedAudiences is the set of RFC 8707 resource indicator values accepted
 	// by this gateway. BaseURL is always allowed.
 	AllowedAudiences []string
+	// ResourceAudienceMap maps resource parameter values (route names) to the aud
+	// claim to set in issued access tokens. Built from Route.RequiredAudience at
+	// startup by cmd/server. When a /token request includes resource=<key>, the
+	// corresponding value is used as the JWT aud claim.
+	// Example: {"mcp": "mcp-server", "external-mcp": "external-mcp"}
+	ResourceAudienceMap map[string]string
 	// AllowedRedirectSchemes is the set of custom URL schemes (RFC 8252) permitted
 	// as redirect_uri in addition to http and https. When empty, defaults to
 	// ["antigravity", "antigravity-insiders"]. Set explicitly to override.
@@ -98,12 +104,11 @@ const defaultGitHubRefreshLeeway = 5 * time.Minute
 // Handler implements the OAuth façade endpoints, delegating provider-specific
 // operations to a provider.Provider.
 type Handler struct {
-	cfg              Config
-	provider         provider.Provider
-	store            *Store
-	allowedAudiences map[string]struct{}
-	privateKey       *rsa.PrivateKey
-	audit            authaudit.Recorder
+	cfg        Config
+	provider   provider.Provider
+	store      *Store
+	privateKey *rsa.PrivateKey
+	audit      authaudit.Recorder
 	// rotationGroup serializes concurrent GitHub refresh-token rotations
 	// targeting the same access token. Without this, a burst of requests
 	// arriving inside the leeway window would race to call the provider's
@@ -136,7 +141,6 @@ func NewHandler(cfg Config, p provider.Provider, opts ...HandlerOption) (*Handle
 		return nil, fmt.Errorf("auth.NewHandler: provider must not be nil")
 	}
 	cfg.BaseURL = strings.TrimRight(cfg.BaseURL, "/")
-	cfg.AllowedAudiences = normalizeAllowedAudiences(cfg.BaseURL, cfg.AllowedAudiences)
 	if len(cfg.AllowedRedirectHosts) == 0 {
 		cfg.AllowedRedirectHosts = []string{"localhost", "127.0.0.1", "vscode.dev", "antigravity.google"}
 	}
@@ -187,11 +191,10 @@ func NewHandler(cfg Config, p provider.Provider, opts ...HandlerOption) (*Handle
 	}
 
 	handler := &Handler{
-		cfg:              cfg,
-		provider:         p,
-		store:            NewStore(cfg.SessionTTL, tokensTTL, ts, storeOpts...),
-		allowedAudiences: audienceSet(cfg.AllowedAudiences),
-		privateKey:       privateKey,
+		cfg:        cfg,
+		provider:   p,
+		store:      NewStore(cfg.SessionTTL, tokensTTL, ts, storeOpts...),
+		privateKey: privateKey,
 	}
 	for _, opt := range opts {
 		opt(handler)
@@ -1514,20 +1517,20 @@ func (h *Handler) resolveRequestedAudience(resources []string) (string, error) {
 		}
 	}
 	if len(resources) == 0 {
-		return h.cfg.BaseURL, nil
+		return "mcp-gateway", nil
 	}
 	if len(resources) > 1 {
 		return "", fmt.Errorf("multiple resource parameters are not supported")
 	}
-	resource := normalizeAudience(resources[0])
-	u, err := url.Parse(resource)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.Fragment != "" {
-		return "", fmt.Errorf("resource must be an absolute http/https URL without fragment")
+	resource := strings.TrimSpace(resources[0])
+	// "mcp-gateway" is the built-in default audience; always resolvable.
+	if resource == "mcp-gateway" {
+		return "mcp-gateway", nil
 	}
-	if _, ok := h.allowedAudiences[resource]; !ok {
-		return "", fmt.Errorf("resource is not registered with this gateway")
+	if aud, ok := h.cfg.ResourceAudienceMap[resource]; ok {
+		return aud, nil
 	}
-	return resource, nil
+	return "", fmt.Errorf("resource %q is not registered with this gateway", resource)
 }
 
 // validateAudience accepts the requested audience when any recorded audience
@@ -1566,44 +1569,29 @@ func (h *Handler) validateAudience(token string, record TokenRecord, audience st
 	return audienceCheckError{ErrTokenAudienceMismatch}
 }
 
-func normalizeAllowedAudiences(baseURL string, audiences []string) []string {
-	out := make([]string, 0, len(audiences)+1)
-	seen := map[string]struct{}{}
-	for _, audience := range append([]string{baseURL}, audiences...) {
-		audience = normalizeAudience(audience)
-		if audience == "" {
-			continue
-		}
-		if _, ok := seen[audience]; ok {
-			continue
-		}
-		seen[audience] = struct{}{}
-		out = append(out, audience)
-	}
-	return out
-}
-
-func audienceSet(audiences []string) map[string]struct{} {
-	set := make(map[string]struct{}, len(audiences))
-	for _, audience := range audiences {
-		set[audience] = struct{}{}
-	}
-	return set
-}
 
 func normalizeAudience(audience string) string {
 	return strings.TrimRight(strings.TrimSpace(audience), "/")
 }
 
-// isSubAudience reports whether requested is equal to or a strict narrowing of
-// original (i.e. requested starts with original+"/"). When original is empty
-// the token was issued without audience metadata (legacy grace-period token),
-// and any registered audience is accepted.
+// isSubAudience reports whether requested is equal to or a valid narrowing of
+// original. For URL-based audiences, narrowing means a strict path prefix.
+// For the identifier "mcp-gateway", any audience is a valid narrowing because
+// it represents gateway-wide access. When original is empty the token was
+// issued without audience metadata (legacy grace-period token), and any
+// audience is accepted.
 func isSubAudience(requested, original string) bool {
 	if original == "" {
 		return true
 	}
-	return requested == original || strings.HasPrefix(requested, original+"/")
+	if requested == original {
+		return true
+	}
+	// Gateway-wide audience may be narrowed to any per-route audience on refresh.
+	if original == "mcp-gateway" {
+		return true
+	}
+	return strings.HasPrefix(requested, original+"/")
 }
 
 func tokenFingerprint(token string) string {

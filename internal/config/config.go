@@ -23,6 +23,11 @@ type RouteConfig struct {
 	// UpstreamBearerTokenEnv names the env var whose value is injected as the
 	// upstream Authorization Bearer token. When empty, the client OAuth token is used.
 	UpstreamBearerTokenEnv string `yaml:"upstream_bearer_token_env,omitempty" json:"upstream_bearer_token_env,omitempty"`
+	// RequiredAudience is the aud claim value required in access tokens for this
+	// route (e.g. "mcp-server", "external-mcp"). Defaults to "mcp-gateway" when
+	// empty. Clients obtain a token with this audience by passing resource=<route-name>
+	// to the /token endpoint.
+	RequiredAudience string `yaml:"required_audience,omitempty" json:"required_audience,omitempty"`
 }
 
 // SetupConfig holds first-run wizard state.
