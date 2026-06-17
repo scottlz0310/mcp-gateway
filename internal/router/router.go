@@ -184,11 +184,16 @@ func parseRoutes(env []string) ([]Route, error) {
 func ParseFromConfig(cfgRoutes []appconfig.RouteConfig) ([]Route, error) {
 	var routes []Route
 	seen := make(map[string]struct{})
+	seenNames := make(map[string]struct{})
 	for _, r := range cfgRoutes {
 		name := strings.ToLower(strings.TrimSpace(r.Name))
 		if name == "" {
 			return nil, fmt.Errorf("route name must not be empty")
 		}
+		if _, dup := seenNames[name]; dup {
+			return nil, fmt.Errorf("route %q: duplicate route name", name)
+		}
+		seenNames[name] = struct{}{}
 		prefix := r.Prefix
 		if prefix != "/" {
 			prefix = strings.TrimRight(prefix, "/")

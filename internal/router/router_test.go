@@ -1,6 +1,7 @@
 package router
 
 import (
+	"strings"
 	"testing"
 
 	appconfig "github.com/scottlz0310/mcp-gateway/internal/config"
@@ -284,6 +285,20 @@ func TestParseFromConfig_DuplicatePrefix(t *testing.T) {
 	_, err := ParseFromConfig(cfgRoutes)
 	if err == nil {
 		t.Fatal("expected error for duplicate prefix")
+	}
+}
+
+func TestParseFromConfig_DuplicateName(t *testing.T) {
+	cfgRoutes := []appconfig.RouteConfig{
+		{Name: "mcp", Prefix: "/mcp/a", Upstream: "http://a:8080"},
+		{Name: "mcp", Prefix: "/mcp/b", Upstream: "http://b:8081"},
+	}
+	_, err := ParseFromConfig(cfgRoutes)
+	if err == nil {
+		t.Fatal("expected error for duplicate route name")
+	}
+	if !strings.Contains(err.Error(), "duplicate route name") {
+		t.Errorf("error should mention duplicate route name, got: %v", err)
 	}
 }
 
