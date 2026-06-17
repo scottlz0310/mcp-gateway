@@ -190,7 +190,7 @@ func (m *memTokenStore) Sweep() error {
 // it to the upstream OAuth provider on rotation. The file is written with
 // mode 0600, but operators should treat tokens.json as a long-lived
 // credential surface: any reader can hijack a logged-in user's GitHub session
-// until the refresh token is revoked (typically the OAuth App rotation
+// until the refresh token is revoked (typically the GitHub App rotation
 // window — months). Snapshot, backup, and access-control implications are
 // covered in docs/configuration.md under "Token Persistence".
 type fileEntry struct {

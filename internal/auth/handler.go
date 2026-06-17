@@ -340,7 +340,7 @@ func (h *Handler) Discovery(w http.ResponseWriter, r *http.Request) {
 }
 
 // Register implements RFC 7591 Dynamic Client Registration (pseudo).
-// Always returns the configured upstream OAuth App client_id.
+// Always returns the configured upstream GitHub App client_id.
 func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 
