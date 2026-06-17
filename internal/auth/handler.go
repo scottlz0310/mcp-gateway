@@ -497,7 +497,7 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 		h.store.DeleteSession(state)
 		h.auditSuccess("callback", "authorization callback completed", http.StatusOK)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprint(w, `<!DOCTYPE html>
+		_, _ = fmt.Fprint(w, `<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><title>Device Activated</title></head>
 <body>
 <h1>Device activated</h1>
