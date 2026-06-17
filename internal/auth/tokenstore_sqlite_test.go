@@ -168,3 +168,62 @@ func TestMigrateFileRefreshTokenStoreNoFile(t *testing.T) {
 		t.Errorf("expected nil for missing file, got %v", err)
 	}
 }
+
+// TestMigrateFileRefreshTokenStoreEmptyFile verifies that an empty legacy file
+// is renamed to .migrated without error.
+func TestMigrateFileRefreshTokenStoreEmptyFile(t *testing.T) {
+	dir := t.TempDir()
+	legacyPath := filepath.Join(dir, "tokens.json.refresh")
+	if err := os.WriteFile(legacyPath, []byte{}, 0o600); err != nil {
+		t.Fatalf("writing empty file: %v", err)
+	}
+	dst, err := NewSQLiteRefreshTokenStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewSQLiteRefreshTokenStore: %v", err)
+	}
+	if err := migrateFileRefreshTokenStore(legacyPath, dst); err != nil {
+		t.Fatalf("migrateFileRefreshTokenStore: %v", err)
+	}
+	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+		t.Error("empty legacy file should have been renamed")
+	}
+	if _, err := os.Stat(legacyPath + ".migrated"); err != nil {
+		t.Errorf(".migrated file not found: %v", err)
+	}
+}
+
+// TestSQLiteRefreshTokenStoreRevoke verifies that Revoke marks a specific token
+// as revoked without affecting sibling tokens in the same family.
+func TestSQLiteRefreshTokenStoreRevoke(t *testing.T) {
+	rts := newTestSQLiteStore(t)
+	exp := time.Now().Add(time.Hour)
+
+	if err := rts.Save("rt-a", "at-a", "aud", "fam", exp); err != nil {
+		t.Fatalf("Save rt-a: %v", err)
+	}
+	if err := rts.Save("rt-b", "at-b", "aud", "fam", exp); err != nil {
+		t.Fatalf("Save rt-b: %v", err)
+	}
+
+	if err := rts.Revoke("rt-a"); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+
+	// Revoked token must not be returned by Lookup.
+	if _, _, _, _, ok := rts.Lookup("rt-a"); ok {
+		t.Error("Lookup rt-a: expected miss after Revoke")
+	}
+	// LookupAny must still find it with revoked=true.
+	_, _, _, _, revoked, ok := rts.LookupAny("rt-a")
+	if !ok {
+		t.Error("LookupAny rt-a: expected hit after Revoke")
+	}
+	if !revoked {
+		t.Error("LookupAny rt-a: expected revoked=true")
+	}
+
+	// Sibling token in the same family must be unaffected.
+	if _, _, _, _, ok := rts.Lookup("rt-b"); !ok {
+		t.Error("Lookup rt-b: sibling must remain accessible after Revoke(rt-a)")
+	}
+}
