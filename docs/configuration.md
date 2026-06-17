@@ -222,11 +222,13 @@ Secrets and key material are not logged. A corrupt, empty, or unreadable
 
 ## Token Persistence
 
-By default, validated token state is stored in `/data/tokens.json`, which is
-created in the Docker image. For non-Docker runs, set a writable path:
+By default, validated token state is stored in `{state-dir}/tokens.json` (see
+the OS state directory table in the [Environment Variables](#environment-variables)
+section above). Docker deployments override this via `MCP_GATEWAY_TOKEN_STORE_PATH`
+in `docker-compose.yml`. To point to an explicit path:
 
 ```bash
-MCP_GATEWAY_TOKEN_STORE_PATH=./tokens.json
+MCP_GATEWAY_TOKEN_STORE_PATH=/var/lib/mcp-gateway/tokens.json
 ```
 
 Set the variable to an empty value to disable persistence:
