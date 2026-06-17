@@ -3417,6 +3417,66 @@ func TestDeviceCallbackValidateTokenError(t *testing.T) {
 	}
 }
 
+// TestCallbackDeviceFlowFallback verifies the fix for the case where GitHub
+// always redirects to /callback (because AuthorizeURL sets redirect_uri=/callback)
+// even during Device Flow. The Callback handler must detect device state and call
+// ApproveDevice directly instead of forwarding the code to /device_callback, which
+// would cause a bad_verification_code error on the second ExchangeCode attempt.
+func TestCallbackDeviceFlowFallback(t *testing.T) {
+	exchangeCalled := 0
+	p := &provider.Mock{
+		ClientIDValue: "test-client-id",
+		ExchangeCodeFunc: func(_ context.Context, code string) (provider.TokenResponse, error) {
+			exchangeCalled++
+			return provider.TokenResponse{AccessToken: "ghu_tok", Scopes: []string{"repo"}}, nil
+		},
+		ValidateFunc: func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Provider: "mock", Subject: "alice"}, nil
+		},
+	}
+	h, err := NewHandler(Config{
+		BaseURL:    "http://localhost:8080",
+		SessionTTL: 10 * time.Minute,
+		CacheTTL:   5 * time.Minute,
+		ExpiresIn:  90 * 24 * time.Hour,
+	}, p)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	// Set up a device session as /activate would.
+	deviceCode, err := h.store.CreateDevice("ABCD-1234", time.Now().Add(10*time.Minute), "mcp")
+	if err != nil {
+		t.Fatalf("CreateDevice: %v", err)
+	}
+	state := generateDeviceState(deviceCode)
+	h.store.SaveSession(state, "http://localhost:8080/device_callback", "", "mcp")
+
+	// Simulate GitHub redirecting to /callback with a device state (not /device_callback).
+	r := httptest.NewRequest(http.MethodGet, "/callback?code=github-code-abc&state="+url.QueryEscape(state), nil)
+	w := httptest.NewRecorder()
+	h.Callback(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: got %d want 200; body: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "Device activated") {
+		t.Errorf("body does not contain 'Device activated': %s", w.Body.String())
+	}
+	// ExchangeCode must be called exactly once (in Callback); DeviceCallback must NOT be called.
+	if exchangeCalled != 1 {
+		t.Errorf("ExchangeCode called %d times, want 1", exchangeCalled)
+	}
+	// Device session must be approved.
+	sess, ok := h.store.GetDevice(deviceCode)
+	if !ok {
+		t.Fatal("GetDevice: session not found")
+	}
+	if sess.AccessToken != "ghu_tok" {
+		t.Errorf("device session token: got %q want %q", sess.AccessToken, "ghu_tok")
+	}
+}
+
 func TestDeviceCallbackApproveDeviceFails(t *testing.T) {
 	p := &provider.Mock{
 		ClientIDValue: "test-client-id",
