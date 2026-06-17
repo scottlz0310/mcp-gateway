@@ -77,8 +77,8 @@ type GatewayConfig struct {
 	// Leave false during the migration grace period for tokens issued before #57.
 	TokenAudienceStrict bool `yaml:"token_audience_strict,omitempty"`
 	// GitHubRefreshEnabled turns on transparent rotation of expiring GitHub
-	// OAuth user access tokens (Phase A of issue #70). Safe to leave on when
-	// the OAuth App is configured for non-expiring tokens — the rotation path
+	// user access tokens (Phase A of issue #70). Safe to leave on when
+	// the GitHub App is configured for non-expiring tokens — the rotation path
 	// is dormant unless the upstream advertises refresh_token + expires_in.
 	GitHubRefreshEnabled bool `yaml:"github_refresh_enabled,omitempty"`
 	// AllowedRedirectHosts lists hostnames permitted in OAuth redirect_uris.

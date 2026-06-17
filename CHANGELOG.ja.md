@@ -7,6 +7,11 @@
 
 ### 追加
 
+- GitHub OAuth Apps から GitHub Apps（user-to-server OAuth）へのプロバイダー切り替え（[#139](https://github.com/scottlz0310/mcp-gateway/issues/139)）
+  - `ghu_` ユーザーアクセストークン（GitHub Apps）を `gho_`（OAuth Apps）と同様に受け入れ可能 — プレフィックス検証ロジックが存在しないためコード変更不要
+  - README / README.ja.md: Step 1 を「GitHub App を作成」に更新。`/callback` と `/device_callback` の両コールバック URL 登録手順、最小 Permissions（`Email addresses: Read-only`）、OAuth Apps からの移行手順を追記
+  - docs/configuration.md: "GitHub OAuth App" 参照を "GitHub App" に統一
+  - 内部: テストフィクスチャを `ghu_` プレフィックスに更新、factory エラーメッセージを "GitHub App credentials" に更新
 - OAuth 監査ログと診断機能を追加（[#102](https://github.com/scottlz0310/mcp-gateway/issues/102)）
   - authorize、callback、token exchange、identity resolution、refresh、provider rotation の成否を構造化イベントとして記録
   - OS のユーザー state 領域を既定とし、Git worktree 外へ機密情報を除外した JSON Lines をサイズ・日数・世代数でローテーション保存

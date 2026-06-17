@@ -43,7 +43,7 @@ func New(cfg Config) (Provider, error) {
 		}), nil
 	case "builtin":
 		if cfg.ClientID == "" || cfg.ClientSecret == "" {
-			return nil, fmt.Errorf("builtin provider requires ClientID and ClientSecret (GitHub OAuth App credentials)")
+			return nil, fmt.Errorf("builtin provider requires ClientID and ClientSecret (GitHub App credentials)")
 		}
 		if cfg.RedirectURI == "" {
 			return nil, fmt.Errorf("builtin provider requires RedirectURI")

@@ -80,7 +80,7 @@ type Config struct {
 	TokenAudienceStrict bool
 	// GitHubRefreshEnabled turns on transparent rotation of GitHub-issued access
 	// tokens when the upstream provider advertises a refresh token and an
-	// expires_in hint (OAuth Apps with "Expire user authorization tokens"
+	// expires_in hint (GitHub Apps with "Expire user authorization tokens"
 	// enabled). When the upstream is configured for non-expiring tokens this
 	// flag has no effect; it is safe to leave on.
 	GitHubRefreshEnabled bool
@@ -340,7 +340,7 @@ func (h *Handler) Discovery(w http.ResponseWriter, r *http.Request) {
 }
 
 // Register implements RFC 7591 Dynamic Client Registration (pseudo).
-// Always returns the configured upstream OAuth App client_id.
+// Always returns the configured upstream GitHub App client_id.
 func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 

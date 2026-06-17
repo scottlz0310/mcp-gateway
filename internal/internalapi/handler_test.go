@@ -77,7 +77,7 @@ func TestWhoamiHappyPath(t *testing.T) {
 	expiry := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
 	resolver := &fakeResolver{
 		result: auth.DelegatedAccessResult{
-			AccessToken:          "gho_fresh_xyz",
+			AccessToken:          "ghu_fresh_xyz",
 			ProviderAccessExpiry: expiry,
 			Scopes:               []string{"repo", "read:user"},
 		},
@@ -95,7 +95,7 @@ func TestWhoamiHappyPath(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if payload["access_token"] != "gho_fresh_xyz" {
+	if payload["access_token"] != "ghu_fresh_xyz" {
 		t.Errorf("access_token: got %v", payload["access_token"])
 	}
 	if payload["token_type"] != "bearer" {

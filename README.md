@@ -13,17 +13,33 @@ single HTTP entry point for MCP clients such as Claude Desktop and VS Code.
 
 ## Getting Started
 
-### 1. Create A GitHub OAuth App
+### 1. Create A GitHub App
 
-Open **GitHub -> Settings -> Developer settings -> OAuth Apps -> New OAuth App**.
+Open **GitHub -> Settings -> Developer settings -> GitHub Apps -> New GitHub App**.
 
-Use this callback URL for local development:
+Configure the following settings:
 
-```text
-http://127.0.0.1:8080/callback
-```
+- **Callback URLs** — register both endpoints:
+  ```text
+  http://127.0.0.1:8080/callback
+  http://127.0.0.1:8080/device_callback
+  ```
+  For deployed environments, replace `http://127.0.0.1:8080` with `<MCP_GATEWAY_PUBLIC_URL>`.
+- **Permissions** — set at minimum `Account permissions: Email addresses: Read-only`.
+  Add any additional permissions required by your MCP upstreams.
+- **Webhook** — leave disabled (not used by the OAuth flow).
+- **Where can this GitHub App be installed?** — `Only on this account` for personal use.
 
-For deployed environments, use `<MCP_GATEWAY_PUBLIC_URL>/callback`.
+After creation, generate a **Client secret** from the app settings page and copy the **Client ID**.
+
+> **Migrating from a GitHub OAuth App?** Replace `OAUTH_CLIENT_ID` and
+> `OAUTH_CLIENT_SECRET` with the new GitHub App credentials. No code or
+> config changes are needed — the gateway works with both `gho_` (OAuth App)
+> and `ghu_` (GitHub App) user access tokens.
+>
+> **Expiring tokens:** Leave "Expire user authorization tokens" disabled for
+> now. Support for rotating short-lived `ghu_` tokens will be added in a
+> follow-up release.
 
 ### 2. Run With Docker Compose
 

@@ -13,6 +13,24 @@
 
 ---
 
+## Issue #139 — GitHub Apps への切り替え本体（provider 差し替え・コールバック URL・ドキュメント）
+
+**目的**: GitHub OAuth Apps から GitHub Apps（user-to-server OAuth）へのプロバイダー切り替えを行う。トークン有効期限対応は Sub-Issue B（#138）に分離。
+
+### サブタスク
+
+- [x] `ghu_` プレフィックストークンの受け入れ確認 — プレフィックス検証ロジックが存在しないため既存コードで対応済み
+- [x] `internal/auth/provider/github.go` コメントを GitHub Apps に更新（`RefreshToken` の docstring）
+- [x] `internal/auth/provider/factory.go` エラーメッセージを "GitHub App credentials" に更新
+- [x] `internal/auth/handler.go` コメント更新（`GitHubRefreshEnabled` フィールド）
+- [x] `internal/internalapi/handler_test.go` テストフィクスチャを `ghu_` プレフィックスに更新
+- [x] `README.md` / `README.ja.md` を GitHub App 作成手順に更新（`/callback` + `/device_callback` 両 URL 登録、最小 Permissions、移行ガイド）
+- [x] `docs/configuration.md` の "GitHub OAuth App" 参照を "GitHub App" に統一
+- [x] `CHANGELOG.md` / `CHANGELOG.ja.md` の `Unreleased` を更新
+- [x] `tasks.md` に本 Issue を記録
+
+---
+
 ## Issue #105 — ルーティング先 MCP サーバーで報告される認証切れをログから調査する
 
 **目的**: mcp-gateway でルーティングしている複数の MCP サーバーから報告されている認証切れエラーについて、ログや設定ファイルを基に原因特定・境界分析を行い、対策を決定する。

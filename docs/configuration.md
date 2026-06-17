@@ -73,7 +73,7 @@ is logged that the legacy is ignored.
 | `MCP_GATEWAY_AUTH_AUDIT_MAX_BACKUPS` | `5` | 保持するローテーション済み監査ログの最大数。 |
 | `MCP_GATEWAY_AUTH_AUDIT_MAX_AGE_DAYS` | `30` | ローテーション済み監査ログの最大保持日数。 |
 | `MCP_GATEWAY_TOKEN_AUDIENCE_STRICT` | `false` | Reject legacy tokens that have no recorded audience metadata. Leave disabled during migration. |
-| `MCP_GATEWAY_GITHUB_REFRESH_ENABLED` | `false` | Enable transparent rotation of expiring GitHub OAuth user access tokens. Safe to leave on with non-expiring OAuth Apps; the rotation path stays dormant unless GitHub returns `refresh_token` + `expires_in`. See [GitHub OAuth Refresh Token Rotation](#github-oauth-refresh-token-rotation). |
+| `MCP_GATEWAY_GITHUB_REFRESH_ENABLED` | `false` | Enable transparent rotation of expiring GitHub user access tokens. Safe to leave on when token expiration is disabled on the GitHub App; the rotation path stays dormant unless GitHub returns `refresh_token` + `expires_in`. See [GitHub OAuth Refresh Token Rotation](#github-oauth-refresh-token-rotation). |
 | `MCP_GATEWAY_ALLOWED_REDIRECT_HOSTS` | none | Comma-separated list of hostnames permitted in OAuth redirect_uris. When set, replaces the built-in default list entirely. |
 | `MCP_GATEWAY_ALLOWED_REDIRECT_SCHEMES` | none | Comma-separated list of custom URL schemes (RFC 8252) permitted in OAuth redirect_uris in addition to `http` and `https`. When set, replaces the built-in default list entirely. Defaults to `antigravity,antigravity-insiders`. |
 | `LOG_LEVEL` | `info` | JSON log level: `debug`, `info`, `warn`, or `error`. |
@@ -126,8 +126,8 @@ setup:
 | `auth.provider` | OAuth provider kind (`github` or `oidc`). |
 | `auth.client_id` | Generic OAuth client ID. |
 | `auth.client_secret` | Generic OAuth client secret. May be encrypted as `ENC[age:]...`. |
-| `auth.github_client_id` | GitHub OAuth App client ID. |
-| `auth.github_client_secret` | GitHub OAuth App client secret. May be encrypted as `ENC[age:]...`. |
+| `auth.github_client_id` | GitHub App client ID. |
+| `auth.github_client_secret` | GitHub App client secret. May be encrypted as `ENC[age:]...`. |
 | `auth.oidc_issuer_url` | OIDC issuer URL. |
 | `auth.oidc_audience` | OIDC audience. Reserved for future local JWT validation; currently unused/no-op in UserInfo validation. |
 | `gateway.public_url` | Canonical public URL visible to OAuth and MCP clients. |
@@ -246,7 +246,7 @@ Operational implications of refresh-token persistence:
 - A reader of `tokens.json` can hijack the logged-in user's GitHub session for
   the lifetime of the refresh token. With GitHub's expiring-user-token
   configuration this is typically **six months** unless the user revokes the
-  authorization or the OAuth App is reconfigured.
+  authorization or the GitHub App is reconfigured.
 - Backups of `tokens.json` carry the same risk. Encrypt backup volumes at
   rest, or exclude `tokens.json` and `tokens.json.refresh` from broad backup
   scopes.
@@ -341,7 +341,7 @@ client secret、Authorization header、provider response body を保存しない
 
 ## GitHub OAuth Refresh Token Rotation
 
-When the GitHub OAuth App is configured with **Expire user authorization tokens**
+When the GitHub App is configured with **Expire user authorization tokens**
 enabled, GitHub returns a `refresh_token` and an `expires_in` value alongside
 each access token (typically 8 hours of access-token lifetime and 6 months of
 refresh-token lifetime). The gateway can transparently rotate these tokens
@@ -363,9 +363,10 @@ gateway:
   github_refresh_enabled: true
 ```
 
-Defaults to `false`. The flag is safe to leave on even with non-expiring OAuth
-Apps: the rotation path only fires when the cached token entry has a non-zero
-`expires_in` hint and a refresh token, which classic OAuth Apps do not provide.
+Defaults to `false`. The flag is safe to leave on even when token expiration is
+disabled on the GitHub App: the rotation path only fires when the cached token
+entry has a non-zero `expires_in` hint and a refresh token, which non-expiring
+configurations do not provide.
 
 ### Behavior
 
@@ -409,8 +410,8 @@ token, but does not retroactively patch background workers.
 
 | Symptom | Likely cause |
 |---------|--------------|
-| Log entry `rotation_failed err=bad_refresh_token` | The OAuth App revoked the refresh token (manually or because the user reset it). Clients must re-authenticate. |
-| Rotation never fires for any token | The OAuth App is not configured for expiring tokens, or `expires_in` is missing from the token response. Verify the app setting in GitHub Developer Settings. |
+| Log entry `rotation_failed err=bad_refresh_token` | The GitHub App revoked the refresh token (manually or because the user reset it). Clients must re-authenticate. |
+| Rotation never fires for any token | The GitHub App does not have "Expire user authorization tokens" enabled, or `expires_in` is missing from the token response. Verify the app setting in GitHub Developer Settings. |
 | Rotation fires but the upstream still sees 401 | The upstream cached the old bearer in its own state (e.g. a `review-raven` watch goroutine). Phase A intentionally does not patch upstream state — this is the Phase B scope. |
 
 ## OAuth Resource Parameters
