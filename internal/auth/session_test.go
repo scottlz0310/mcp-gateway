@@ -156,7 +156,7 @@ func TestStoreDeviceLifecycle(t *testing.T) {
 	}
 
 	// Approve then consume.
-	if !s.ApproveDevice(code, "gha_token", "repo,user", "alice") {
+	if !s.ApproveDevice(code, "gha_token", "repo,user", "alice", "", time.Time{}) {
 		t.Fatal("ApproveDevice should succeed")
 	}
 	consumed, ok := s.ConsumeApprovedDevice(code)
@@ -599,7 +599,7 @@ func TestConsumeApprovedDevicePreventsDoubleIssuance(t *testing.T) {
 		t.Fatal("ConsumeApprovedDevice must return false for pending session")
 	}
 
-	if !s.ApproveDevice(code, "tok", "scope", "user") {
+	if !s.ApproveDevice(code, "tok", "scope", "user", "", time.Time{}) {
 		t.Fatal("ApproveDevice failed")
 	}
 

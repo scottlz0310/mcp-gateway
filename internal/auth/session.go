@@ -44,16 +44,18 @@ const (
 
 // DeviceSession tracks a Device Authorization Grant (RFC 8628) flow and its current status.
 type DeviceSession struct {
-	InternalCode  string
-	UserCode      string    // XXXX-XXXX format shown to the user at /activate
-	ExpiresAt     time.Time
-	Interval      int // minimum seconds between client polls (RFC 8628 §3.5)
-	AccessToken   string
-	Scope         string
-	Subject       string
-	Audience      string
-	Status        deviceStatus
-	nextPollAfter time.Time
+	InternalCode         string
+	UserCode             string    // XXXX-XXXX format shown to the user at /activate
+	ExpiresAt            time.Time
+	Interval             int // minimum seconds between client polls (RFC 8628 §3.5)
+	AccessToken          string
+	ProviderRefreshToken string    // provider refresh token (e.g. ghr_) for rotation after exchange
+	ProviderAccessExpiry time.Time // provider access token expiry for rotation scheduling
+	Scope                string
+	Subject              string
+	Audience             string
+	Status               deviceStatus
+	nextPollAfter        time.Time
 }
 
 // Store holds OAuth flow state (sessions, codes, devices) and delegates token
@@ -290,7 +292,7 @@ func (s *Store) FindDeviceByUserCode(userCode string) (DeviceSession, bool) {
 
 // ApproveDevice records the provider access token and marks the session as approved
 // without deleting it so the client poll loop can still retrieve the token.
-func (s *Store) ApproveDevice(internalCode, accessToken, scope, subject string) bool {
+func (s *Store) ApproveDevice(internalCode, accessToken, scope, subject, providerRefreshToken string, providerAccessExpiry time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	d, ok := s.devices[internalCode]
@@ -298,6 +300,8 @@ func (s *Store) ApproveDevice(internalCode, accessToken, scope, subject string) 
 		return false
 	}
 	d.AccessToken = accessToken
+	d.ProviderRefreshToken = providerRefreshToken
+	d.ProviderAccessExpiry = providerAccessExpiry
 	d.Scope = scope
 	d.Subject = subject
 	d.Status = deviceApproved

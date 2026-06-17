@@ -488,22 +488,28 @@ func (h *Handler) Callback(w http.ResponseWriter, r *http.Request) {
 	// Device Flow fallback: when GitHub always redirects to /callback (because
 	// AuthorizeURL sets redirect_uri=/callback), detect device state here and
 	// approve the device session directly instead of forwarding to /device_callback.
+	// Only treat as device flow if a live device session for this code actually exists.
+	// Without this guard, any state value prefixed "device:" would be mistaken for a
+	// device flow even in a normal authorization code flow, causing ApproveDevice to
+	// fail and the authorization to break.
 	if internalDeviceCode, ok := parseDeviceState(state); ok {
-		if !h.store.ApproveDevice(internalDeviceCode, tokens.AccessToken, joinScopes(tokens.Scopes), id.Subject) {
-			h.auditFailure("callback", "store_error", "device session approval failed", nil, http.StatusBadRequest, "")
-			http.Error(w, "device session not found or expired", http.StatusBadRequest)
-			return
-		}
-		h.store.DeleteSession(state)
-		h.auditSuccess("callback", "authorization callback completed", http.StatusOK)
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = fmt.Fprint(w, `<!DOCTYPE html>
+		if _, deviceExists := h.store.GetDevice(internalDeviceCode); deviceExists {
+			if !h.store.ApproveDevice(internalDeviceCode, tokens.AccessToken, joinScopes(tokens.Scopes), id.Subject, tokens.RefreshToken, providerAccessExpiry(tokens.AccessTokenExpiresIn)) {
+				h.auditFailure("callback", "store_error", "device session approval failed", nil, http.StatusBadRequest, "")
+				http.Error(w, "device session not found or expired", http.StatusBadRequest)
+				return
+			}
+			h.store.DeleteSession(state)
+			h.auditSuccess("callback", "authorization callback completed", http.StatusOK)
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = fmt.Fprint(w, `<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><title>Device Activated</title></head>
 <body>
 <h1>Device activated</h1>
 <p>Your device has been authorized. You can close this browser tab and return to your device.</p>
 </body></html>`)
-		return
+			return
+		}
 	}
 
 	internalCode, err := h.store.CompleteCallback(state, tokens.AccessToken, joinScopes(tokens.Scopes), tokens.RefreshToken, providerAccessExpiry(tokens.AccessTokenExpiresIn), id.Subject)
@@ -664,6 +670,7 @@ func (h *Handler) tokenDeviceGrant(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		h.store.CacheToken(token, completed.Subject, completed.Audience)
+		h.persistProviderRefresh(completed.AccessToken, completed.ProviderRefreshToken, completed.ProviderAccessExpiry)
 		familyID, fidErr := generateCode()
 		if fidErr != nil {
 			slog.Warn("failed to generate refresh token family ID (device)", "err", fidErr)
@@ -993,7 +1000,7 @@ func (h *Handler) DeviceCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !h.store.ApproveDevice(internalCode, tokens.AccessToken, joinScopes(tokens.Scopes), id.Subject) {
+	if !h.store.ApproveDevice(internalCode, tokens.AccessToken, joinScopes(tokens.Scopes), id.Subject, tokens.RefreshToken, providerAccessExpiry(tokens.AccessTokenExpiresIn)) {
 		http.Error(w, "device session not found or expired", http.StatusBadRequest)
 		return
 	}
