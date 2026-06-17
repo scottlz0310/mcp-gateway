@@ -23,8 +23,18 @@ VS Code などの MCP クライアントから見た単一の HTTP エントリ�
   http://127.0.0.1:8080/device_callback
   ```
   デプロイ環境では `http://127.0.0.1:8080` を `<MCP_GATEWAY_PUBLIC_URL>` に置き換えてください。
-- **Permissions** — 最低限 `Account permissions: Email addresses: Read-only` を設定します。
-  上流 MCP サーバーが必要とする権限を追加してください。
+- **Permissions** — 推奨設定:
+
+  | カテゴリ | 権限 | アクセス |
+  |---------|------|---------|
+  | Repository | Metadata | Read-only（自動選択） |
+  | Repository | Contents | Read-only |
+  | Repository | Issues | Read and write |
+  | Repository | Pull requests | Read and write |
+  | Account | Email addresses | Read-only |
+
+  `Email addresses` はユーザー識別に必須です。Repository 権限は `review-raven` / `github-mcp-server`
+  upstream が必要とします。自分の MCP upstream に合わせて最小限の権限に調整してください。
 - **Webhook** — 無効のままにします（OAuth フローでは使用しません）。
 - **Where can this GitHub App be installed?** — 個人利用の場合は `Only on this account` を選択します。
 

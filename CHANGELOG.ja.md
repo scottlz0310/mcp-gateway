@@ -7,6 +7,12 @@
 
 ### 追加
 
+- 実行時状態ファイルのデフォルトパスを OS のユーザーデータディレクトリに変更（[#144](https://github.com/scottlz0310/mcp-gateway/issues/144)）
+  - `MCP_GATEWAY_KEY_PATH`・`MCP_CONFIG_FILE`・`MCP_GATEWAY_TOKEN_STORE_PATH` のデフォルトがプロセスのカレントディレクトリや Docker 専用の `/data/` から OS ユーザー状態ディレクトリ（Windows: `%LOCALAPPDATA%\mcp-gateway\`、Linux: `~/.local/share/mcp-gateway/`、macOS: `~/Library/Application Support/mcp-gateway/`）に変更
+  - Docker 環境では引き続き環境変数で上書きするため影響なし。変更が適用されるのは非コンテナ環境のみ
+- GitHub App 推奨 Permission 設定をドキュメントに追記（[#145](https://github.com/scottlz0310/mcp-gateway/issues/145)）
+  - `README.md`・`README.ja.md`: Permission セクションを拡充。`review-raven` / `github-mcp-server` upstream が必要とする Repository 権限（Contents / Issues / Pull requests / Metadata）と Account 権限（Email addresses）をテーブル形式で説明
+  - `examples/copilot-review-routing/.env.example`: GitHub App 作成コメントに同内容の推奨 Permission を追記
 - Device Authorization Grant のバグ修正: `/callback` が GitHub code を `/device_callback` に転送し、二重 ExchangeCode で `bad_verification_code` が発生する問題を修正（[#143](https://github.com/scottlz0310/mcp-gateway/issues/143)）
   - `Callback` ハンドラが `device:` プレフィックスの state を検出し、`ApproveDevice` を直接呼ぶことで二重 ExchangeCode を回避
   - 回帰防止のため `TestCallbackDeviceFlowFallback` を追加

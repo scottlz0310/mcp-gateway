@@ -25,8 +25,19 @@ Configure the following settings:
   http://127.0.0.1:8080/device_callback
   ```
   For deployed environments, replace `http://127.0.0.1:8080` with `<MCP_GATEWAY_PUBLIC_URL>`.
-- **Permissions** — set at minimum `Account permissions: Email addresses: Read-only`.
-  Add any additional permissions required by your MCP upstreams.
+- **Permissions** — recommended settings:
+
+  | Category | Permission | Access |
+  |----------|-----------|--------|
+  | Repository | Metadata | Read-only (auto-selected) |
+  | Repository | Contents | Read-only |
+  | Repository | Issues | Read and write |
+  | Repository | Pull requests | Read and write |
+  | Account | Email addresses | Read-only |
+
+  `Email addresses` is required for user identification. The repository permissions
+  are needed by `review-raven` / `github-mcp-server` upstreams. Adjust to the
+  minimum required by your own MCP upstreams.
 - **Webhook** — leave disabled (not used by the OAuth flow).
 - **Where can this GitHub App be installed?** — `Only on this account` for personal use.
 

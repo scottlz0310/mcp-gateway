@@ -8,6 +8,8 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -475,9 +477,9 @@ func loadConfig() config {
 		tokenExpiresInSec:    getEnvInt("TOKEN_EXPIRES_IN_SEC", 7776000), // 90 days
 		tokenAudienceStrict:  getEnvBool("MCP_GATEWAY_TOKEN_AUDIENCE_STRICT", false),
 		githubRefreshEnabled: getEnvBool("MCP_GATEWAY_GITHUB_REFRESH_ENABLED", false),
-		tokenStorePath:       lookupEnv("MCP_GATEWAY_TOKEN_STORE_PATH", "/data/tokens.json"),
-		keyPath:              getEnv("MCP_GATEWAY_KEY_PATH", "./gateway.key"),
-		configPath:           getEnv("MCP_CONFIG_FILE", "./config.yaml"),
+		tokenStorePath:       lookupEnv("MCP_GATEWAY_TOKEN_STORE_PATH", filepath.Join(gatewayStateDir(), "tokens.json")),
+		keyPath:              getEnv("MCP_GATEWAY_KEY_PATH", filepath.Join(gatewayStateDir(), "gateway.key")),
+		configPath:           getEnv("MCP_CONFIG_FILE", filepath.Join(gatewayStateDir(), "config.yaml")),
 		allowedRedirectHosts:   splitCSV(os.Getenv("MCP_GATEWAY_ALLOWED_REDIRECT_HOSTS")),
 		allowedRedirectSchemes: splitCSV(os.Getenv("MCP_GATEWAY_ALLOWED_REDIRECT_SCHEMES")),
 	}
@@ -508,6 +510,31 @@ func buildResourceAudienceMap(routes []router.Route) map[string]string {
 		m[route.Name] = route.RequiredAudience
 	}
 	return m
+}
+
+// gatewayStateDir returns the OS-appropriate user-owned directory for
+// mcp-gateway's runtime state files (gateway.key, config.yaml, tokens.json).
+// Docker operators override these paths via environment variables; this default
+// only affects bare-metal / non-containerised deployments.
+func gatewayStateDir() string {
+	switch runtime.GOOS {
+	case "windows":
+		if base := strings.TrimSpace(os.Getenv("LOCALAPPDATA")); base != "" {
+			return filepath.Join(base, "mcp-gateway")
+		}
+	case "darwin":
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			return filepath.Join(home, "Library", "Application Support", "mcp-gateway")
+		}
+	default:
+		if base := strings.TrimSpace(os.Getenv("XDG_DATA_HOME")); base != "" {
+			return filepath.Join(base, "mcp-gateway")
+		}
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			return filepath.Join(home, ".local", "share", "mcp-gateway")
+		}
+	}
+	return filepath.Join(".", ".mcp-gateway")
 }
 
 func getEnv(key, fallback string) string {

@@ -9,6 +9,12 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- OS-appropriate default paths for runtime state files ([#144](https://github.com/scottlz0310/mcp-gateway/issues/144))
+  - `MCP_GATEWAY_KEY_PATH`, `MCP_CONFIG_FILE`, `MCP_GATEWAY_TOKEN_STORE_PATH` now default to the OS user state directory (`%LOCALAPPDATA%\mcp-gateway\` on Windows, `~/.local/share/mcp-gateway/` on Linux, `~/Library/Application Support/mcp-gateway/` on macOS) instead of the process working directory or a Docker-only `/data/` path
+  - Docker operators continue to override via environment variables; this change only affects bare-metal / non-containerised deployments
+- Recommended GitHub App permission settings documented ([#145](https://github.com/scottlz0310/mcp-gateway/issues/145))
+  - `README.md`, `README.ja.md`: expanded Permissions section with a table covering Repository (Contents/Issues/Pull requests/Metadata) and Account (Email addresses) permissions needed by `review-raven` / `github-mcp-server` upstreams
+  - `examples/copilot-review-routing/.env.example`: updated GitHub App creation comment with the same permission table
 - Fix Device Authorization Grant: Callback handler incorrectly forwarded GitHub code to /device_callback causing bad_verification_code on double ExchangeCode ([#143](https://github.com/scottlz0310/mcp-gateway/issues/143))
   - `Callback` now detects `device:` state prefix and calls `ApproveDevice` directly, bypassing the second `ExchangeCode` call
   - Added `TestCallbackDeviceFlowFallback` to guard against regression
