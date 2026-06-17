@@ -9,6 +9,10 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Fix Device Authorization Grant: Callback handler incorrectly forwarded GitHub code to /device_callback causing bad_verification_code on double ExchangeCode ([#143](https://github.com/scottlz0310/mcp-gateway/issues/143))
+  - `Callback` now detects `device:` state prefix and calls `ApproveDevice` directly, bypassing the second `ExchangeCode` call
+  - Added `TestCallbackDeviceFlowFallback` to guard against regression
+  - `examples/copilot-review-routing/.env.example`: updated GitHub App callback URL instructions
 - GitHub Apps token expiration support (`ghu_`/`ghr_` token compatibility for `tryGitHubRotation`) ([#140](https://github.com/scottlz0310/mcp-gateway/issues/140))
   - `ghu_` (user access) and `ghr_` (refresh) tokens accepted by `RefreshToken` and `tryGitHubRotation` — no prefix validation present, compatible out of the box
   - `internal/auth/provider/github_test.go`: added test cases for `ghu_` access token exchange and `ghr_` → `ghu_` refresh rotation

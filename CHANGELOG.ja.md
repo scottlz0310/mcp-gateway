@@ -7,6 +7,10 @@
 
 ### 追加
 
+- Device Authorization Grant のバグ修正: `/callback` が GitHub code を `/device_callback` に転送し、二重 ExchangeCode で `bad_verification_code` が発生する問題を修正（[#143](https://github.com/scottlz0310/mcp-gateway/issues/143)）
+  - `Callback` ハンドラが `device:` プレフィックスの state を検出し、`ApproveDevice` を直接呼ぶことで二重 ExchangeCode を回避
+  - 回帰防止のため `TestCallbackDeviceFlowFallback` を追加
+  - `examples/copilot-review-routing/.env.example`: GitHub App callback URL 説明を更新
 - GitHub Apps トークン有効期限対応（`tryGitHubRotation` の `ghu_`/`ghr_` 互換）（[#140](https://github.com/scottlz0310/mcp-gateway/issues/140)）
   - `ghu_`（user access token）と `ghr_`（refresh token）が `RefreshToken` / `tryGitHubRotation` でプレフィックス検証なしにそのまま動作することを確認
   - `internal/auth/provider/github_test.go`: `ghu_` access token 取得と `ghr_` → `ghu_` リフレッシュローテーションのテストケースを追加
