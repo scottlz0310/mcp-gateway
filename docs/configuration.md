@@ -1,117 +1,105 @@
-# Configuration Reference
+# 設定リファレンス
 
-This page is the detailed configuration reference for mcp-gateway. The README
-keeps only the quick-start path and links here for full operational settings.
+このページは mcp-gateway の詳細な設定リファレンスです。README は初回起動手順とこのドキュメントへのリンクのみを掲載しています。
 
-## Required Startup Inputs
+## 起動に必要な入力
 
-mcp-gateway needs all of the following before it can run in normal mode:
+mcp-gateway を通常モードで起動するには、以下のすべてが揃っている必要があります。
 
-| Requirement | Environment source | `config.yaml` source |
-|-------------|--------------------|----------------------|
-| OAuth client ID | `OAUTH_CLIENT_ID` (legacy: `GITHUB_MCP_CLIENT_ID`) | `auth.github_client_id` |
-| OAuth client secret | `OAUTH_CLIENT_SECRET` for first-start seeding (legacy: `GITHUB_MCP_CLIENT_SECRET`) | `auth.github_client_secret` |
-| At least one route | `ROUTE_<NAME>` | `routes:` |
+| 必須項目 | 環境変数 | `config.yaml` |
+|---------|----------|---------------|
+| OAuth クライアント ID | `OAUTH_CLIENT_ID`（旧: `GITHUB_MCP_CLIENT_ID`） | `auth.github_client_id` |
+| OAuth クライアントシークレット | `OAUTH_CLIENT_SECRET`（初回起動時シード用、旧: `GITHUB_MCP_CLIENT_SECRET`） | `auth.github_client_secret` |
+| 1つ以上のルート | `ROUTE_<NAME>` | `routes:` |
 
-If any required value is missing, the gateway enters setup mode and prints a
-one-time `/setup` URL to stdout.
+いずれかの必須値が欠けている場合、ゲートウェイはセットアップモードに入り、ワンタイム `/setup` URL を stdout に出力します。
 
-## Precedence
+## 優先順位
 
-Configuration is resolved in this order:
+設定は以下の順序で解決されます。
 
-| Setting | Precedence |
-|---------|------------|
-| OAuth provider | `OAUTH_PROVIDER` > `auth.provider` > `github` (default) |
-| OAuth client ID | `OAUTH_CLIENT_ID` > deprecated `GITHUB_MCP_CLIENT_ID` > `auth.client_id` > `auth.github_client_id` |
-| OAuth client secret | encrypted/plain `auth.client_secret` > encrypted/plain `auth.github_client_secret` > non-empty `OAUTH_CLIENT_SECRET` > deprecated `GITHUB_MCP_CLIENT_SECRET` used to seed `config.yaml` |
-| Routes | `ROUTE_<NAME>` env vars > `routes:` in `config.yaml` > deprecated `GITHUB_MCP_UPSTREAM_URL` fallback |
-| Public URL | `MCP_GATEWAY_PUBLIC_URL` > deprecated `MCP_GATEWAY_BASE_URL` > `gateway.public_url` > deprecated `gateway.base_url` > default |
-| Bind address | `MCP_GATEWAY_BIND_ADDR` > `gateway.bind_addr` > `127.0.0.1:<resolved-port>` |
-| OAuth scopes | `OAUTH_SCOPES` > deprecated `GITHUB_MCP_OAUTH_SCOPES` > `gateway.oauth_scopes` > `repo,user` |
-| Trusted proxies | `MCP_GATEWAY_TRUSTED_PROXIES` > `gateway.trusted_proxies` > none |
-| Token audience strict mode | `MCP_GATEWAY_TOKEN_AUDIENCE_STRICT` > `gateway.token_audience_strict` > `false` |
-| GitHub refresh token rotation | `MCP_GATEWAY_GITHUB_REFRESH_ENABLED` > `gateway.github_refresh_enabled` > `false` |
-| Allowed redirect hosts | `MCP_GATEWAY_ALLOWED_REDIRECT_HOSTS` > `gateway.allowed_redirect_hosts` > `localhost, 127.0.0.1, vscode.dev, antigravity.google` (default) |
-| Allowed redirect schemes | `MCP_GATEWAY_ALLOWED_REDIRECT_SCHEMES` > `gateway.allowed_redirect_schemes` > `antigravity, antigravity-insiders` (default) |
+| 設定 | 優先順位 |
+|------|---------|
+| OAuth プロバイダー | `OAUTH_PROVIDER` > `auth.provider` > `github`（デフォルト） |
+| OAuth クライアント ID | `OAUTH_CLIENT_ID` > 非推奨 `GITHUB_MCP_CLIENT_ID` > `auth.client_id` > `auth.github_client_id` |
+| OAuth クライアントシークレット | 暗号化/平文 `auth.client_secret` > 暗号化/平文 `auth.github_client_secret` > 非空 `OAUTH_CLIENT_SECRET` > 非推奨 `GITHUB_MCP_CLIENT_SECRET`（`config.yaml` シード用） |
+| ルート | `ROUTE_<NAME>` 環境変数 > `config.yaml` の `routes:` > 非推奨 `GITHUB_MCP_UPSTREAM_URL` フォールバック |
+| 公開 URL | `MCP_GATEWAY_PUBLIC_URL` > 非推奨 `MCP_GATEWAY_BASE_URL` > `gateway.public_url` > 非推奨 `gateway.base_url` > デフォルト |
+| バインドアドレス | `MCP_GATEWAY_BIND_ADDR` > `gateway.bind_addr` > `127.0.0.1:<解決済みポート>` |
+| OAuth スコープ | `OAUTH_SCOPES` > 非推奨 `GITHUB_MCP_OAUTH_SCOPES` > `gateway.oauth_scopes` > `repo,user` |
+| 信頼済みプロキシ | `MCP_GATEWAY_TRUSTED_PROXIES` > `gateway.trusted_proxies` > なし |
+| トークン audience 厳格モード | `MCP_GATEWAY_TOKEN_AUDIENCE_STRICT` > `gateway.token_audience_strict` > `false` |
+| GitHub リフレッシュトークンローテーション | `MCP_GATEWAY_GITHUB_REFRESH_ENABLED` > `gateway.github_refresh_enabled` > `false` |
+| 許可リダイレクトホスト | `MCP_GATEWAY_ALLOWED_REDIRECT_HOSTS` > `gateway.allowed_redirect_hosts` > `localhost, 127.0.0.1, vscode.dev, antigravity.google`（デフォルト） |
+| 許可リダイレクトスキーム | `MCP_GATEWAY_ALLOWED_REDIRECT_SCHEMES` > `gateway.allowed_redirect_schemes` > `antigravity, antigravity-insiders`（デフォルト） |
 
-The OAuth client secret is intentionally special: once `config.yaml` contains a
-secret, `OAUTH_CLIENT_SECRET` / `GITHUB_MCP_CLIENT_SECRET` are ignored except
-during first-start seeding.
+OAuth クライアントシークレットは意図的に特別扱いです。`config.yaml` にシークレットが含まれると、`OAUTH_CLIENT_SECRET` / `GITHUB_MCP_CLIENT_SECRET` は初回起動シード時を除いて無視されます。
 
-When the legacy `GITHUB_MCP_*` variables are observed at startup, the gateway
-emits a one-time `slog.Warn` per legacy variable. If both the canonical
-`OAUTH_*` and its legacy counterpart are set, the canonical wins and a warning
-is logged that the legacy is ignored.
+起動時に旧 `GITHUB_MCP_*` 変数を検出した場合、ゲートウェイは変数ごとに1回 `slog.Warn` を出力します。正規の `OAUTH_*` と旧変数が両方設定されている場合は正規が優先され、旧変数が無視された旨の警告がログに記録されます。
 
-## Environment Variables
+## 環境変数
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `OAUTH_PROVIDER` | `github` | OAuth provider kind. Currently `github` and `oidc` are supported. |
-| `OAUTH_CLIENT_ID` | none | OAuth client ID. Required unless `auth.client_id` or `auth.github_client_id` is set. Supersedes `GITHUB_MCP_CLIENT_ID`. |
-| `OAUTH_CLIENT_SECRET` | none | OAuth client secret. Used to seed encrypted `config.yaml` when no config secret exists. Supersedes `GITHUB_MCP_CLIENT_SECRET`. |
-| `OAUTH_SCOPES` | `repo,user` | OAuth scopes requested by the gateway. Supersedes `GITHUB_MCP_OAUTH_SCOPES`. |
-| `OAUTH_ISSUER_URL` | none | OIDC issuer URL (required when `OAUTH_PROVIDER=oidc`). |
-| `OAUTH_AUDIENCE` | none | OIDC audience (optional when `OAUTH_PROVIDER=oidc`). Reserved for future local JWT validation; currently unused/no-op in UserInfo validation. |
-| `GITHUB_MCP_CLIENT_ID` | none | **Deprecated** — use `OAUTH_CLIENT_ID`. Still accepted with a startup warning. |
-| `GITHUB_MCP_CLIENT_SECRET` | none | **Deprecated** — use `OAUTH_CLIENT_SECRET`. Still accepted with a startup warning. |
-| `GITHUB_MCP_OAUTH_SCOPES` | none | **Deprecated** — use `OAUTH_SCOPES`. Still accepted with a startup warning. |
-| `ROUTE_<NAME>` | none | Route definition in `<prefix>|<upstream_url>[|auth=none]` form. At least one route is required unless configured in `config.yaml`. |
-| `MCP_CONFIG_FILE` | OS state dir¹ `/config.yaml` | Path to persisted YAML configuration. |
-| `MCP_GATEWAY_KEY_PATH` | OS state dir¹ `/gateway.key` | Path to the age X25519 identity used to encrypt `auth.github_client_secret`. |
-| `MCP_GATEWAY_MASTER_KEY` | none | Optional deterministic key seed. Use 32+ random bytes encoded as a string, for example `openssl rand -base64 32`. Used only when creating `gateway.key`. |
-| `MCP_MASTER_KEY` | none | Legacy alias for `MCP_GATEWAY_MASTER_KEY`. |
-| `MCP_GATEWAY_PUBLIC_URL` | `http://127.0.0.1:<port>` | Canonical client-visible URL used for OAuth callbacks, discovery metadata, and Protected Resource Metadata. |
-| `MCP_GATEWAY_BIND_ADDR` | `127.0.0.1:<port>` | TCP listener address. Use `0.0.0.0:<port>` inside Docker when publishing ports. |
-| `MCP_GATEWAY_PORT` | `8080` | Port used to derive default `public_url` and `bind_addr` when those settings are not explicit. |
-| `MCP_GATEWAY_BASE_URL` | none | Deprecated alias for `MCP_GATEWAY_PUBLIC_URL`. Emits a startup warning when set. |
-| `MCP_GATEWAY_TRUSTED_PROXIES` | none | Comma-separated CIDR list for immediate reverse proxies whose `X-Forwarded-*` headers are trusted. |
-| `MCP_GATEWAY_TOKEN_STORE_PATH` | OS state dir¹ `/tokens.json` | Persistent token store path. Set to an empty value to disable persistence. Docker deployments override this via env var. |
+| 変数 | デフォルト | 説明 |
+|------|-----------|------|
+| `OAUTH_PROVIDER` | `github` | OAuth プロバイダー種別。現在 `github` と `oidc` をサポート。 |
+| `OAUTH_CLIENT_ID` | なし | OAuth クライアント ID。`auth.client_id` または `auth.github_client_id` が設定されていない場合は必須。`GITHUB_MCP_CLIENT_ID` を上書き。 |
+| `OAUTH_CLIENT_SECRET` | なし | OAuth クライアントシークレット。設定シークレットが存在しない場合に暗号化 `config.yaml` のシードに使用。`GITHUB_MCP_CLIENT_SECRET` を上書き。 |
+| `OAUTH_SCOPES` | `repo,user` | ゲートウェイが要求する OAuth スコープ。`GITHUB_MCP_OAUTH_SCOPES` を上書き。 |
+| `OAUTH_ISSUER_URL` | なし | OIDC issuer URL（`OAUTH_PROVIDER=oidc` の場合は必須）。 |
+| `OAUTH_AUDIENCE` | なし | OIDC audience（`OAUTH_PROVIDER=oidc` の場合はオプション）。将来のローカル JWT 検証用に予約済み。現在は UserInfo 検証で未使用/no-op。 |
+| `GITHUB_MCP_CLIENT_ID` | なし | **非推奨** — `OAUTH_CLIENT_ID` を使用してください。起動時警告付きで引き続き受け入れ。 |
+| `GITHUB_MCP_CLIENT_SECRET` | なし | **非推奨** — `OAUTH_CLIENT_SECRET` を使用してください。起動時警告付きで引き続き受け入れ。 |
+| `GITHUB_MCP_OAUTH_SCOPES` | なし | **非推奨** — `OAUTH_SCOPES` を使用してください。起動時警告付きで引き続き受け入れ。 |
+| `ROUTE_<NAME>` | なし | `<prefix>\|<upstream_url>[|auth=none]` 形式のルート定義。`config.yaml` で設定されていない限り1つ以上必須。 |
+| `MCP_CONFIG_FILE` | OS state dir¹ `/config.yaml` | 永続化 YAML 設定ファイルのパス。 |
+| `MCP_GATEWAY_KEY_PATH` | OS state dir¹ `/gateway.key` | `auth.github_client_secret` の暗号化に使用する age X25519 identity のパス。 |
+| `MCP_GATEWAY_MASTER_KEY` | なし | オプションの決定論的キーシード。例: `openssl rand -base64 32` で生成した 32バイト以上のランダム文字列。`gateway.key` 作成時のみ使用。 |
+| `MCP_MASTER_KEY` | なし | `MCP_GATEWAY_MASTER_KEY` の旧エイリアス。 |
+| `MCP_GATEWAY_PUBLIC_URL` | `http://127.0.0.1:<port>` | OAuth コールバック・ディスカバリメタデータ・Protected Resource Metadata で使用するクライアントから見える正規 URL。 |
+| `MCP_GATEWAY_BIND_ADDR` | `127.0.0.1:<port>` | TCP リスナーアドレス。Docker でポートを公開する場合は `0.0.0.0:<port>` を使用。 |
+| `MCP_GATEWAY_PORT` | `8080` | `public_url` と `bind_addr` のデフォルト導出に使用するポート。 |
+| `MCP_GATEWAY_BASE_URL` | なし | `MCP_GATEWAY_PUBLIC_URL` の非推奨エイリアス。設定されると起動時警告を出力。 |
+| `MCP_GATEWAY_TRUSTED_PROXIES` | なし | `X-Forwarded-*` ヘッダーを信頼する直前のリバースプロキシの CIDR リスト（カンマ区切り）。 |
+| `MCP_GATEWAY_TOKEN_STORE_PATH` | OS state dir¹ `/tokens.json` | 永続トークンストアのパス。空値に設定すると永続化を無効化。Docker 環境は環境変数で上書き。 |
 | `MCP_GATEWAY_AUTH_AUDIT_LOG_PATH` | OS audit dir² | OAuth 監査 JSON Lines の絶対 path。相対 path と Git worktree 配下は起動時に拒否される。 |
-| `MCP_GATEWAY_AUTH_AUDIT_MAX_SIZE_MB` | `10` | 監査ログ1ファイルの最大サイズ（MiB）。 |
+| `MCP_GATEWAY_AUTH_AUDIT_MAX_SIZE_MB` | `10` | 監査ログ 1 ファイルの最大サイズ（MiB）。 |
 | `MCP_GATEWAY_AUTH_AUDIT_MAX_BACKUPS` | `5` | 保持するローテーション済み監査ログの最大数。 |
 | `MCP_GATEWAY_AUTH_AUDIT_MAX_AGE_DAYS` | `30` | ローテーション済み監査ログの最大保持日数。 |
-| `MCP_GATEWAY_TOKEN_AUDIENCE_STRICT` | `false` | Reject legacy tokens that have no recorded audience metadata. Leave disabled during migration. |
-| `MCP_GATEWAY_GITHUB_REFRESH_ENABLED` | `false` | Enable transparent rotation of expiring GitHub user access tokens. Safe to leave on when token expiration is disabled on the GitHub App; the rotation path stays dormant unless GitHub returns `refresh_token` + `expires_in`. See [GitHub OAuth Refresh Token Rotation](#github-oauth-refresh-token-rotation). |
-| `MCP_GATEWAY_ALLOWED_REDIRECT_HOSTS` | none | Comma-separated list of hostnames permitted in OAuth redirect_uris. When set, replaces the built-in default list entirely. |
-| `MCP_GATEWAY_ALLOWED_REDIRECT_SCHEMES` | none | Comma-separated list of custom URL schemes (RFC 8252) permitted in OAuth redirect_uris in addition to `http` and `https`. When set, replaces the built-in default list entirely. Defaults to `antigravity,antigravity-insiders`. |
-| `LOG_LEVEL` | `info` | JSON log level: `debug`, `info`, `warn`, or `error`. |
-| `SESSION_TTL_MIN` | `10` | OAuth authorization session lifetime in minutes. |
-| `TOKEN_CACHE_TTL_MIN` | `30` | In-memory validation cache TTL in minutes. Used when token persistence is disabled. |
-| `TOKEN_EXPIRES_IN_SEC` | `7776000` | Token lifetime advertised to clients and persistent token entry TTL. Default is 90 days. |
-| `GITHUB_MCP_UPSTREAM_URL` | none | Deprecated single-upstream fallback when no `ROUTE_*` or `routes:` entries exist. |
+| `MCP_GATEWAY_TOKEN_AUDIENCE_STRICT` | `false` | audience メタデータが記録されていない旧トークンを拒否する。移行中は無効のままにしてください。 |
+| `MCP_GATEWAY_GITHUB_REFRESH_ENABLED` | `false` | 期限切れ間近の GitHub ユーザーアクセストークンを透過的にローテーションする。GitHub App のトークン有効期限が無効でも安全に有効化できます（`refresh_token` と `expires_in` が返ってこない場合はローテーションパスが休眠状態になります）。[GitHub OAuth リフレッシュトークンローテーション](#github-oauth-リフレッシュトークンローテーション) を参照。 |
+| `MCP_GATEWAY_ALLOWED_REDIRECT_HOSTS` | なし | OAuth redirect_uri で許可するホスト名のカンマ区切りリスト。設定するとビルトインデフォルトリストを完全に置き換えます。 |
+| `MCP_GATEWAY_ALLOWED_REDIRECT_SCHEMES` | なし | `http`・`https` に加えて OAuth redirect_uri で許可するカスタム URL スキーム（RFC 8252）のカンマ区切りリスト。設定するとビルトインデフォルトリストを完全に置き換えます。デフォルト: `antigravity,antigravity-insiders`。 |
+| `LOG_LEVEL` | `info` | JSON ログレベル: `debug`、`info`、`warn`、`error`。 |
+| `SESSION_TTL_MIN` | `10` | OAuth 認証セッションの有効期間（分）。 |
+| `TOKEN_CACHE_TTL_MIN` | `30` | インメモリ検証キャッシュの TTL（分）。トークン永続化が無効な場合に使用。 |
+| `TOKEN_EXPIRES_IN_SEC` | `7776000` | クライアントへの通知トークン有効期間と永続トークンエントリの TTL。デフォルトは 90 日。 |
+| `GITHUB_MCP_UPSTREAM_URL` | なし | `ROUTE_*` も `routes:` エントリも存在しない場合の非推奨シングルアップストリームフォールバック。 |
 
-¹ **OS state directory** — resolved by `gatewayStateDir()` at startup:
+¹ **OS state directory** — `gatewayStateDir()` が起動時に解決するディレクトリ:
 
-| OS | Default state directory |
-|----|------------------------|
+| OS | デフォルト state ディレクトリ |
+|----|---------------------------|
 | Windows | `%LOCALAPPDATA%\mcp-gateway\` |
 | macOS | `~/Library/Application Support/mcp-gateway/` |
 | Linux / other | `$XDG_STATE_HOME/mcp-gateway/` → `~/.local/state/mcp-gateway/` |
-| Docker (official image) | `/data/mcp-gateway/` (via `XDG_STATE_HOME=/data`) |
+| Docker（公式 image） | `/data/mcp-gateway/`（`XDG_STATE_HOME=/data` 経由） |
 
-The directory is created automatically on startup (`MkdirAll 0700`). Docker and
-other containerised deployments should always pin paths explicitly via environment
-variables; the OS default applies to bare-metal installations only.
+ディレクトリは起動時に自動作成されます（`MkdirAll 0700`）。Docker やコンテナ化された環境では必ず環境変数でパスを明示的に指定してください。OS デフォルトはベアメタルインストール専用です。
 
-² **OS audit log directory** — resolved independently by `authaudit.defaultPath()`
-(separate from `gatewayStateDir()`):
+² **OS audit log directory** — `gatewayStateDir()` とは独立して `authaudit.defaultPath()` が解決するパス:
 
-| OS | Default audit log path |
-|----|------------------------|
+| OS | デフォルト監査ログパス |
+|----|----------------------|
 | Windows | `%LOCALAPPDATA%\mcp-gateway\logs\auth-audit.jsonl` |
 | macOS | `~/Library/Logs/mcp-gateway/auth-audit.jsonl` |
 | Linux / other | `$XDG_STATE_HOME/mcp-gateway/logs/auth-audit.jsonl` → `~/.local/state/mcp-gateway/logs/auth-audit.jsonl` |
-| Docker (official image) | `/data/mcp-gateway/logs/auth-audit.jsonl` (via `XDG_STATE_HOME=/data`) |
+| Docker（公式 image） | `/data/mcp-gateway/logs/auth-audit.jsonl`（`XDG_STATE_HOME=/data` 経由） |
 
-`MCP_GATEWAY_MASTER_KEY` is checked as the byte length of the supplied string
-after trimming whitespace. A base64 string generated with `openssl rand -base64
-32` is accepted as-is; the gateway does not base64-decode it before validation.
+`MCP_GATEWAY_MASTER_KEY` はホワイトスペース除去後の文字列バイト長で検証されます。`openssl rand -base64 32` で生成した base64 文字列はそのまま受け入れられます（ゲートウェイは検証前に base64 デコードしません）。
 
 ## `config.yaml`
 
-Example:
+例:
 
 ```yaml
 auth:
@@ -142,146 +130,127 @@ setup:
   completed: true
 ```
 
-### YAML Keys
+### YAML キー
 
-| Key | Description |
-|-----|-------------|
-| `auth.provider` | OAuth provider kind (`github` or `oidc`). |
-| `auth.client_id` | Generic OAuth client ID. |
-| `auth.client_secret` | Generic OAuth client secret. May be encrypted as `ENC[age:]...`. |
-| `auth.github_client_id` | GitHub App client ID. |
-| `auth.github_client_secret` | GitHub App client secret. May be encrypted as `ENC[age:]...`. |
-| `auth.oidc_issuer_url` | OIDC issuer URL. |
-| `auth.oidc_audience` | OIDC audience. Reserved for future local JWT validation; currently unused/no-op in UserInfo validation. |
-| `gateway.public_url` | Canonical public URL visible to OAuth and MCP clients. |
-| `gateway.bind_addr` | TCP listener address. |
-| `gateway.base_url` | Deprecated alias for `gateway.public_url`. |
-| `gateway.port` | Port used when deriving defaults. |
-| `gateway.oauth_scopes` | OAuth scopes requested from GitHub. |
-| `gateway.trusted_proxies` | CIDR list for trusted reverse proxy peers. |
-| `gateway.token_audience_strict` | Strict legacy-token audience enforcement. |
-| `gateway.github_refresh_enabled` | Enable transparent GitHub OAuth access token rotation; see [GitHub OAuth Refresh Token Rotation](#github-oauth-refresh-token-rotation). |
-| `gateway.allowed_redirect_hosts` | YAML list of hostnames permitted in OAuth redirect_uris. When set, replaces the built-in default list entirely. |
-| `gateway.allowed_redirect_schemes` | YAML list of custom URL schemes (RFC 8252) permitted in OAuth redirect_uris in addition to `http` and `https`. When set, replaces the built-in default list entirely. Defaults to `["antigravity", "antigravity-insiders"]`. |
-| `routes[].name` | Route name. Must be non-empty. |
-| `routes[].prefix` | URL path prefix. Must start with `/`; trailing slashes are trimmed except for `/`. |
-| `routes[].upstream` | Absolute `http` or `https` upstream URL. |
-| `routes[].no_auth` | When true, skips Bearer validation for this route. |
-| `setup.completed` | Setup wizard state written by the gateway. Operators normally do not edit it directly. |
+| キー | 説明 |
+|------|------|
+| `auth.provider` | OAuth プロバイダー種別（`github` または `oidc`）。 |
+| `auth.client_id` | 汎用 OAuth クライアント ID。 |
+| `auth.client_secret` | 汎用 OAuth クライアントシークレット。`ENC[age:]...` として暗号化可能。 |
+| `auth.github_client_id` | GitHub App クライアント ID。 |
+| `auth.github_client_secret` | GitHub App クライアントシークレット。`ENC[age:]...` として暗号化可能。 |
+| `auth.oidc_issuer_url` | OIDC issuer URL。 |
+| `auth.oidc_audience` | OIDC audience。将来のローカル JWT 検証用に予約済み。現在は UserInfo 検証で未使用/no-op。 |
+| `gateway.public_url` | OAuth および MCP クライアントに見える正規公開 URL。 |
+| `gateway.bind_addr` | TCP リスナーアドレス。 |
+| `gateway.base_url` | `gateway.public_url` の非推奨エイリアス。 |
+| `gateway.port` | デフォルト導出に使用するポート。 |
+| `gateway.oauth_scopes` | GitHub に要求する OAuth スコープ。 |
+| `gateway.trusted_proxies` | 信頼済みリバースプロキシの CIDR リスト。 |
+| `gateway.token_audience_strict` | 旧トークンの audience 厳格強制。 |
+| `gateway.github_refresh_enabled` | GitHub OAuth アクセストークンの透過的ローテーションを有効化。[GitHub OAuth リフレッシュトークンローテーション](#github-oauth-リフレッシュトークンローテーション) を参照。 |
+| `gateway.allowed_redirect_hosts` | OAuth redirect_uri で許可するホスト名の YAML リスト。設定するとビルトインデフォルトリストを完全に置き換えます。 |
+| `gateway.allowed_redirect_schemes` | `http`・`https` に加えて OAuth redirect_uri で許可するカスタム URL スキーム（RFC 8252）の YAML リスト。設定するとビルトインデフォルトリストを完全に置き換えます。デフォルト: `["antigravity", "antigravity-insiders"]`。 |
+| `routes[].name` | ルート名。空でない必要があります。 |
+| `routes[].prefix` | URL パスプレフィックス。`/` で始まる必要があります。末尾スラッシュは `/` を除いて除去されます。 |
+| `routes[].upstream` | 絶対 `http` または `https` upstream URL。 |
+| `routes[].no_auth` | true の場合、このルートの Bearer 検証をスキップします。 |
+| `setup.completed` | ゲートウェイが書き込むセットアップウィザード状態。オペレーターが直接編集することは通常ありません。 |
 
-Unknown YAML fields and comments are not preserved when the gateway rewrites
-`config.yaml` during secret migration or setup completion.
+ゲートウェイがシークレット移行またはセットアップ完了時に `config.yaml` を書き直す際、未知の YAML フィールドとコメントは保持されません。
 
-## Route Configuration
+## ルート設定
 
-Environment routes use:
+環境変数によるルート設定:
 
 ```bash
 ROUTE_<NAME>=<prefix>|<upstream_url>
 ```
 
-Examples:
+例:
 
 ```bash
 ROUTE_GITHUB=/mcp/github|http://github-mcp:8082
 ROUTE_REVIEW_RAVEN=/mcp/review-raven|http://review-raven:8083
 ```
 
-Rules:
+ルール:
 
-- `NAME` must not be empty.
-- `prefix` must start with `/`.
-- `prefix` must not contain whitespace.
-- `upstream_url` must be an absolute `http` or `https` URL.
-- Duplicate prefixes are rejected.
-- Routes are sorted by longest prefix first.
+- `NAME` は空でないこと。
+- `prefix` は `/` で始まること。
+- `prefix` にホワイトスペースを含まないこと。
+- `upstream_url` は絶対 `http` または `https` URL であること。
+- 重複プレフィックスは拒否されます。
+- ルートは最長プレフィックス優先でソートされます。
 
-Disable auth for a route by adding `|auth=none`:
+ルートの認証を無効にするには `|auth=none` を追加します:
 
 ```bash
 ROUTE_PUBLIC=/public|http://public-svc:8083|auth=none
 ```
 
-Use `auth=oauth` only when you need to be explicit; it is the default.
+`auth=oauth` は明示的に指定する必要がある場合のみ使用します。デフォルトです。
 
-## Secret Encryption
+## シークレット暗号化
 
-The gateway stores `auth.github_client_secret` encrypted at rest with
-`filippo.io/age` X25519.
+ゲートウェイは `auth.github_client_secret` を `filippo.io/age` X25519 で暗号化して保存します。
 
-Startup behavior:
+起動時の動作:
 
-1. Load or generate `gateway.key` from `MCP_GATEWAY_KEY_PATH`.
-2. Load `config.yaml` from `MCP_CONFIG_FILE`.
-3. Resolve the secret:
-   - `ENC[age:]...` in config: decrypt and use.
-   - Plaintext in config: encrypt, rewrite config, and use.
-   - No config secret plus `OAUTH_CLIENT_SECRET` (or legacy `GITHUB_MCP_CLIENT_SECRET`): encrypt, save to config, and use.
-   - No source: fail startup.
+1. `MCP_GATEWAY_KEY_PATH` から `gateway.key` をロードまたは生成する。
+2. `MCP_CONFIG_FILE` から `config.yaml` をロードする。
+3. シークレットを解決する:
+   - config に `ENC[age:]...`: 復号して使用。
+   - config に平文: 暗号化・config 書き直し・使用。
+   - config シークレットなし + `OAUTH_CLIENT_SECRET`（または旧 `GITHUB_MCP_CLIENT_SECRET`）: 暗号化・config 保存・使用。
+   - ソースなし: 起動失敗。
 
-Key generation priority:
+キー生成の優先順位:
 
-| Condition | Result |
-|-----------|--------|
-| `gateway.key` exists | Load and use it; `MCP_GATEWAY_MASTER_KEY` is ignored. |
-| `gateway.key` absent and `MCP_GATEWAY_MASTER_KEY` set | Derive the X25519 identity with HKDF-SHA256 and save it. |
-| `gateway.key` absent and no master key | Generate a random X25519 identity and save it. |
+| 条件 | 結果 |
+|------|------|
+| `gateway.key` が存在する | ロードして使用。`MCP_GATEWAY_MASTER_KEY` は無視。 |
+| `gateway.key` が存在せず `MCP_GATEWAY_MASTER_KEY` が設定されている | HKDF-SHA256 で X25519 identity を導出して保存。 |
+| `gateway.key` が存在せずマスターキーもない | ランダムな X25519 identity を生成して保存。 |
 
-Secrets and key material are not logged. A corrupt, empty, or unreadable
-`gateway.key` is fatal; it is not regenerated automatically.
+シークレットとキーマテリアルはログに出力されません。破損・空・読み取り不可の `gateway.key` は致命的エラーになります。自動再生成はされません。
 
-## Token Persistence
+## トークン永続化
 
-By default, validated token state is stored in `{state-dir}/tokens.json` (see
-the OS state directory table in the [Environment Variables](#environment-variables)
-section above). Docker deployments override this via `MCP_GATEWAY_TOKEN_STORE_PATH`
-in `docker-compose.yml`. To point to an explicit path:
+デフォルトでは、検証済みトークン状態は `{state-dir}/tokens.json` に保存されます（上記[環境変数](#環境変数)セクションの OS state directory テーブルを参照）。Docker 環境は `docker-compose.yml` の `MCP_GATEWAY_TOKEN_STORE_PATH` で上書きします。明示的なパスを指定する場合:
 
 ```bash
 MCP_GATEWAY_TOKEN_STORE_PATH=/var/lib/mcp-gateway/tokens.json
 ```
 
-Set the variable to an empty value to disable persistence:
+永続化を無効にするには空値に設定します:
 
 ```bash
 MCP_GATEWAY_TOKEN_STORE_PATH=
 ```
 
-The primary token store:
+プライマリトークンストアの動作:
 
-- Loads token-to-identity mappings on startup.
-- Saves mappings after successful authentication.
-- Sweeps expired entries every minute.
-- Writes with mode `0600` where supported.
-- Stores SHA-256-hashed token keys, not raw token values.
+- 起動時にトークンと identity のマッピングをロード。
+- 認証成功後にマッピングを保存。
+- 毎分、期限切れエントリをスイープ。
+- サポートされる環境ではモード `0600` で書き込み。
+- SHA-256 でハッシュ化したトークンキーを保存（生トークン値は保存しない）。
 
-When token persistence is enabled, refresh tokens are stored in
-`<path>.refresh`. That file stores hashed refresh token keys and the associated
-access token value in plaintext because the gateway must re-present the access
-token to GitHub during refresh. Treat it as sensitive data.
+トークン永続化が有効な場合、リフレッシュトークンは `<path>.refresh` に保存されます。このファイルはハッシュ化されたリフレッシュトークンキーと、対応するアクセストークン値を平文で保存します（ゲートウェイがリフレッシュ時に GitHub へアクセストークンを再提示する必要があるため）。機密データとして扱ってください。
 
-When `MCP_GATEWAY_GITHUB_REFRESH_ENABLED=true` (or `gateway.github_refresh_enabled: true`),
-the gateway also stores the GitHub OAuth **refresh token** in `tokens.json`
-(the primary store, not the `.refresh` sibling) so rotation continues to work
-across restarts. The refresh token is written as plaintext because the
-gateway must replay it to GitHub's `/login/oauth/access_token` endpoint.
+`MCP_GATEWAY_GITHUB_REFRESH_ENABLED=true`（または `gateway.github_refresh_enabled: true`）の場合、ゲートウェイは GitHub OAuth **リフレッシュトークン**を（`.refresh` サイドファイルではなく）プライマリストアの `tokens.json` にも保存します。再起動をまたいでローテーションを継続するためです。リフレッシュトークンは GitHub の `/login/oauth/access_token` エンドポイントへの再送が必要なため平文で書き込まれます。
 
-Operational implications of refresh-token persistence:
+リフレッシュトークン永続化の運用上の注意:
 
-- A reader of `tokens.json` can hijack the logged-in user's GitHub session for
-  the lifetime of the refresh token. With GitHub's expiring-user-token
-  configuration this is typically **six months** unless the user revokes the
-  authorization or the GitHub App is reconfigured.
-- Backups of `tokens.json` carry the same risk. Encrypt backup volumes at
-  rest, or exclude `tokens.json` and `tokens.json.refresh` from broad backup
-  scopes.
-- Container images and snapshots should not bake either file in.
-- If you do not need rotation across restarts, leave `github_refresh_enabled`
-  off; the refresh token is then never written to disk.
+- `tokens.json` の読者はリフレッシュトークンの有効期間中、ログイン済みユーザーの GitHub セッションを乗っ取れます。GitHub の expiring-user-token 設定では通常**6ヶ月**（ユーザーが認可を取り消すか GitHub App が再設定されるまで）。
+- `tokens.json` のバックアップも同じリスクを持ちます。バックアップボリュームを保存時暗号化するか、広いバックアップスコープから `tokens.json` と `tokens.json.refresh` を除外してください。
+- コンテナイメージやスナップショットにいずれのファイルも含めないこと。
+- 再起動をまたいだローテーションが不要な場合は `github_refresh_enabled` を無効にしてください。リフレッシュトークンはディスクに書き込まれません。
 
-## Reverse Proxy Headers
+## リバースプロキシヘッダー
 
-When TLS terminates before mcp-gateway:
+mcp-gateway の前で TLS を終端する場合:
 
 ```bash
 MCP_GATEWAY_PUBLIC_URL=https://mcp.example.com
@@ -289,52 +258,46 @@ MCP_GATEWAY_BIND_ADDR=127.0.0.1:8080
 MCP_GATEWAY_TRUSTED_PROXIES=127.0.0.1/32,10.0.0.0/8
 ```
 
-Only requests whose immediate peer IP is in `trusted_proxies` may affect:
+直前のピア IP が `trusted_proxies` に含まれるリクエストのみ以下に影響できます:
 
-| Header | Effect |
-|--------|--------|
-| `X-Forwarded-Proto` | Sets the request scheme when the value is `http` or `https`. |
-| `X-Forwarded-Host` | Sets `r.Host` after basic host validation. |
-| `X-Forwarded-For` | Sets `r.RemoteAddr` to the rightmost valid IP supplied by the trusted proxy. |
+| ヘッダー | 効果 |
+|---------|------|
+| `X-Forwarded-Proto` | 値が `http` または `https` の場合にリクエストスキームを設定。 |
+| `X-Forwarded-Host` | 基本的なホスト検証後に `r.Host` を設定。 |
+| `X-Forwarded-For` | 信頼済みプロキシが提供する最右端の有効 IP を `r.RemoteAddr` に設定。 |
 
-Untrusted forwarded headers are stripped before auth, setup checks, access logs,
-and proxying run.
+信頼されていない転送ヘッダーは、認証・セットアップチェック・アクセスログ・プロキシ処理の前にすべて除去されます。
 
-## OAuth And MCP Endpoints
+## OAuth および MCP エンドポイント
 
-| Path | Method | Description |
-|------|--------|-------------|
-| `/.well-known/oauth-authorization-server` | GET | RFC 8414 authorization server metadata. |
-| `/.well-known/oauth-protected-resource` | GET | Gateway-wide RFC 9728 Protected Resource Metadata. Also covers root-prefix routes. |
-| `/.well-known/oauth-protected-resource/<prefix>` | GET | Per-route Protected Resource Metadata for authenticated non-root routes, e.g. `/.well-known/oauth-protected-resource/mcp/github`. |
-| `/authorize` | GET | OAuth 2.0 authorization endpoint. |
-| `/callback` | GET | GitHub OAuth callback. |
-| `/device_authorization` | POST | Device Authorization Grant endpoint (RFC 8628). |
-| `/token` | POST | Token endpoint for authorization code + PKCE, device code, and refresh token grants. |
-| `/register` | POST | RFC 7591-style dynamic client registration. |
-| `/setup` | GET/POST | First-run setup wizard endpoint, available only in setup mode. |
-| `/health` | GET | Health check in normal mode. |
-| `/<prefix>` | ANY | Reverse proxy to the matched upstream. Bearer-validated unless `auth=none` is set. |
+| パス | メソッド | 説明 |
+|------|---------|------|
+| `/.well-known/oauth-authorization-server` | GET | RFC 8414 authorization server メタデータ。 |
+| `/.well-known/oauth-protected-resource` | GET | ゲートウェイ全体の RFC 9728 Protected Resource Metadata。ルートプレフィックスルートもカバー。 |
+| `/.well-known/oauth-protected-resource/<prefix>` | GET | 認証済み非ルートルートのルート単位 Protected Resource Metadata。例: `/.well-known/oauth-protected-resource/mcp/github`。 |
+| `/authorize` | GET | OAuth 2.0 authorization エンドポイント。 |
+| `/callback` | GET | GitHub OAuth コールバック。 |
+| `/device_authorization` | POST | Device Authorization Grant エンドポイント（RFC 8628）。 |
+| `/token` | POST | authorization code + PKCE・device code・refresh token grant 用トークンエンドポイント。 |
+| `/register` | POST | RFC 7591 形式の動的クライアント登録。 |
+| `/setup` | GET/POST | 初回起動セットアップウィザードエンドポイント（セットアップモード時のみ利用可能）。 |
+| `/health` | GET | 通常モードのヘルスチェック。 |
+| `/<prefix>` | ANY | マッチした upstream へのリバースプロキシ。`auth=none` が設定されていない限り Bearer 検証が行われます。 |
 
 ## OAuth 監査ログ
 
-認証開始、callback、token exchange、identity resolution、refresh、provider
-token rotation の成功・失敗を、標準出力と専用 JSON Lines ファイルの両方へ
-記録する。ファイルは1行1イベントで、`jq`、PowerShell、AI エージェントから
-そのまま解析できる。
+認証開始、callback、token exchange、identity resolution、refresh、provider token rotation の成功・失敗を、標準出力と専用 JSON Lines ファイルの両方へ記録します。ファイルは 1 行 1 イベントで、`jq`、PowerShell、AI エージェントからそのまま解析できます。
 
-### 既定 path
+### 既定パス
 
-| 実行環境 | 既定 path |
-|----------|-----------|
+| 実行環境 | 既定パス |
+|----------|---------|
 | Windows | `%LOCALAPPDATA%\mcp-gateway\logs\auth-audit.jsonl` |
 | Linux | `$XDG_STATE_HOME/mcp-gateway/logs/auth-audit.jsonl`。`XDG_STATE_HOME` 未設定時は `$HOME/.local/state/mcp-gateway/logs/auth-audit.jsonl` |
 | macOS | `$HOME/Library/Logs/mcp-gateway/auth-audit.jsonl` |
-| 公式 container image | `/data/mcp-gateway/logs/auth-audit.jsonl` |
+| 公式コンテナイメージ | `/data/mcp-gateway/logs/auth-audit.jsonl` |
 
-公式 image は Linux 標準の `XDG_STATE_HOME=/data` を設定済みである。
-compose を使わない `docker run` でも起動でき、`/data` に volume を mount
-すると container 再作成後も保持できる。
+公式イメージは Linux 標準の `XDG_STATE_HOME=/data` を設定済みです。compose を使わない `docker run` でも起動でき、`/data` に volume をマウントするとコンテナ再作成後も保持できます。
 
 ```bash
 docker run --rm -p 8080:8080 \
@@ -346,122 +309,81 @@ docker run --rm -p 8080:8080 \
   ghcr.io/scottlz0310/mcp-gateway:latest
 ```
 
-ネイティブ実行ではリポジトリを汚さないよう、相対 path、current working
-directory への fallback、Git worktree 配下の明示 path を拒否する。OS の
-ユーザー領域を解決できない場合や、保存先を作成・追記できない場合は起動失敗と
-なる。
+ネイティブ実行ではリポジトリを汚さないよう、相対パス・カレントワーキングディレクトリへのフォールバック・Git worktree 配下の明示パスを拒否します。OS のユーザー領域を解決できない場合や、保存先を作成・追記できない場合は起動失敗となります。
 
 ### ローテーション
 
-- 現行ファイルが `MCP_GATEWAY_AUTH_AUDIT_MAX_SIZE_MB` に達すると UTC timestamp
-  付きファイルへローテーションする。
-- `MCP_GATEWAY_AUTH_AUDIT_MAX_BACKUPS` を超えた世代と、
-  `MCP_GATEWAY_AUTH_AUDIT_MAX_AGE_DAYS` を超えたファイルを削除する。
-- ローテーション済みファイルは AI 解析時に直接読めるよう圧縮しない。
-- ファイルは owner のみ読み書き可能な permission で作成する。
+- 現行ファイルが `MCP_GATEWAY_AUTH_AUDIT_MAX_SIZE_MB` に達すると UTC タイムスタンプ付きファイルへローテーションします。
+- `MCP_GATEWAY_AUTH_AUDIT_MAX_BACKUPS` を超えた世代と、`MCP_GATEWAY_AUTH_AUDIT_MAX_AGE_DAYS` を超えたファイルを削除します。
+- ローテーション済みファイルは AI 解析時に直接読めるよう圧縮しません。
+- ファイルはオーナーのみ読み書き可能な permission で作成します。
 
-監査イベントには token、authorization code、device code、OAuth `state`、
-client secret、Authorization header、provider response body を保存しない。
-相関が必要な token は短い SHA-256 fingerprint のみを記録する。
+監査イベントには token、authorization code、device code、OAuth `state`、client secret、Authorization ヘッダー、provider レスポンスボディを保存しません。相関が必要なトークンは短い SHA-256 フィンガープリントのみを記録します。
 
-## GitHub OAuth Refresh Token Rotation
+## GitHub OAuth リフレッシュトークンローテーション
 
-When the GitHub App is configured with **Expire user authorization tokens**
-enabled, GitHub returns a `refresh_token` and an `expires_in` value alongside
-each access token (typically 8 hours of access-token lifetime and 6 months of
-refresh-token lifetime). The gateway can transparently rotate these tokens
-before they expire, so a long-running upstream operation does not see the
-access token become invalid mid-request.
+GitHub App で **Expire user authorization tokens** が有効な場合、GitHub は各アクセストークンとともに `refresh_token` と `expires_in` を返します（通常アクセストークン有効期間 8 時間、リフレッシュトークン有効期間 6 ヶ月）。ゲートウェイはこれらのトークンを有効期限前に透過的にローテーションできるため、長時間実行の upstream 操作中にアクセストークンが無効になりません。
 
-GitHub Apps issue tokens with `ghu_` prefix (user-to-server access tokens) and
-`ghr_` prefix (refresh tokens). The gateway handles both prefixes identically to
-classic `gho_` OAuth App tokens — no additional configuration is required.
+GitHub Apps は `ghu_` プレフィックス（user-to-server アクセストークン）と `ghr_` プレフィックス（リフレッシュトークン）のトークンを発行します。ゲートウェイは両プレフィックスを従来の `gho_` OAuth App トークンと同様に処理します。追加設定は不要です。
 
-### Enabling Token Expiration on the GitHub App
+### GitHub App でのトークン有効期限設定
 
-To enable expiring tokens on your GitHub App:
+GitHub App にトークン有効期限を設定するには:
 
-1. Open **GitHub -> Settings -> Developer settings -> GitHub Apps -> Your App -> General**.
-2. Scroll to **"User authorization tokens"** and check **"Expire user authorization tokens"**.
-3. Save changes.
+1. **GitHub -> Settings -> Developer settings -> GitHub Apps -> Your App -> General** を開く。
+2. **"User authorization tokens"** までスクロールし、**"Expire user authorization tokens"** にチェックを入れる。
+3. 変更を保存する。
 
-After this, every OAuth exchange will return `expires_in` (8 hours) and
-`refresh_token` (`ghr_…`, valid for ~6 months) alongside the `ghu_` access token.
+この設定後、すべての OAuth 交換で `expires_in`（8 時間）と `refresh_token`（`ghr_…`、約 6 ヶ月有効）が `ghu_` アクセストークンとともに返されます。
 
-### Enabling Rotation in the Gateway
+### ゲートウェイでのローテーション有効化
 
-Set one of:
+以下のいずれかを設定します:
 
 ```bash
 MCP_GATEWAY_GITHUB_REFRESH_ENABLED=true
 ```
 
-or in `config.yaml`:
+または `config.yaml` で:
 
 ```yaml
 gateway:
   github_refresh_enabled: true
 ```
 
-Defaults to `false`. The flag is safe to leave on even when token expiration is
-disabled on the GitHub App: the rotation path only fires when the cached token
-entry has a non-zero `expires_in` hint and a refresh token, which non-expiring
-configurations do not provide.
+デフォルトは `false` です。GitHub App のトークン有効期限が無効でも安全に有効化できます（キャッシュされたトークンエントリに `expires_in` ヒントとリフレッシュトークンがある場合のみローテーションパスが起動します。非期限切れ設定ではこれらは提供されません）。
 
-### Behavior
+### 動作
 
-When the flag is on, every `ValidateToken` call inspects the cached provider
-metadata for the bearer token:
+フラグが有効な場合、すべての `ValidateToken` 呼び出しがベアラートークンのキャッシュされたプロバイダーメタデータを検査します:
 
-1. If the provider access expiry is more than ~5 minutes away, rotation is
-   skipped and the cached subject is returned as usual.
-2. If the access expiry is within the leeway window, the gateway calls the
-   GitHub token endpoint with `grant_type=refresh_token`.
-3. On success, the new access token is cached under its own key and the
-   rotated token is forwarded to the upstream MCP server via the request
-   context. The original token's cache entry is **kept** (MCP clients
-   continue presenting the original bearer), and its provider refresh
-   metadata is updated to the freshly issued refresh token / expiry so the
-   next in-window request from the same client triggers another rotation.
-4. On any provider failure the gateway logs `rotation_failed`, leaves the
-   cache as-is, and continues with the original token. If the upstream
-   subsequently returns 401, the existing cache-invalidation path handles
-   re-authentication.
+1. プロバイダーアクセス有効期限まで約 5 分以上ある場合はローテーションをスキップし、通常通りキャッシュされた subject を返す。
+2. アクセス有効期限がリードウィンドウ内の場合、ゲートウェイは `grant_type=refresh_token` で GitHub トークンエンドポイントを呼び出す。
+3. 成功した場合、新しいアクセストークンは独自のキーでキャッシュされ、ローテーション済みトークンがリクエストコンテキスト経由で upstream MCP サーバーに転送される。元のトークンのキャッシュエントリは**保持**され（MCP クライアントは引き続き元のベアラーを提示）、プロバイダーリフレッシュメタデータが新たに発行されたリフレッシュトークン/有効期限に更新されます。
+4. プロバイダー失敗時はゲートウェイが `rotation_failed` をログに記録し、キャッシュをそのままにして元のトークンで処理を続行。upstream がその後 401 を返した場合は既存のキャッシュ無効化パスが再認証を処理。
 
-The rotation is bound to whichever request happens to trigger it; in-flight
-upstream operations on the old token are not interrupted. The
-`review-raven` watch goroutines (issue #70) still see only the token they
-captured at watch start — Phase A makes follow-on requests use the rotated
-token, but does not retroactively patch background workers.
+ローテーションはそれをトリガーしたリクエストに束縛されます。古いトークンでの進行中の upstream 操作は中断されません。`review-raven` の watch goroutine（issue #70）は watch 開始時にキャプチャしたトークンのみを参照します。Phase A は後続リクエストがローテーション済みトークンを使用するようにしますが、バックグラウンドワーカーに遡及的にパッチを当てません。
 
-### Limitations
+### 制限事項
 
-- A gateway restart loses the refresh token if `MCP_GATEWAY_TOKEN_STORE_PATH`
-  is unset. Persist token state to disk to keep rotation working across
-  restarts.
-- The rotation lead time is fixed at ~5 minutes. Operators with significantly
-  longer upstream operations should consider Phase B (delegated background
-  access) instead of widening the leeway.
-- Rotation requires `gateway.github_client_secret` because GitHub's refresh
-  endpoint authenticates the rotation request the same way as the initial
-  exchange.
+- `MCP_GATEWAY_TOKEN_STORE_PATH` が未設定の場合、ゲートウェイ再起動時にリフレッシュトークンが失われます。再起動をまたいでローテーションを継続するにはトークン状態をディスクに永続化してください。
+- ローテーションリードタイムは約 5 分に固定されています。上流操作が著しく長いオペレーターは、リードタイムを拡大するより Phase B（委任バックグラウンドアクセス）を検討してください。
+- ローテーションには `gateway.github_client_secret` が必要です。GitHub のリフレッシュエンドポイントが初回交換と同様にローテーションリクエストを認証するためです。
 
-### Troubleshooting
+### トラブルシューティング
 
-| Symptom | Likely cause |
-|---------|--------------|
-| Log entry `rotation_failed err=bad_refresh_token` | The GitHub App revoked the refresh token (manually or because the user reset it). Clients must re-authenticate. |
-| Rotation never fires for any token | The GitHub App does not have "Expire user authorization tokens" enabled, or `expires_in` is missing from the token response. Verify the app setting in GitHub Developer Settings. |
-| Rotation fires but the upstream still sees 401 | The upstream cached the old bearer in its own state (e.g. a `review-raven` watch goroutine). Phase A intentionally does not patch upstream state — this is the Phase B scope. |
+| 症状 | 原因の可能性 |
+|------|------------|
+| ログに `rotation_failed err=bad_refresh_token` | GitHub App がリフレッシュトークンを失効させた（手動またはユーザーがリセットしたため）。クライアントは再認証が必要。 |
+| すべてのトークンでローテーションが発生しない | GitHub App の "Expire user authorization tokens" が有効でないか、トークンレスポンスに `expires_in` がない。GitHub Developer Settings でアプリ設定を確認してください。 |
+| ローテーションは発生するが upstream が引き続き 401 を返す | upstream が独自の状態で古いベアラーをキャッシュしている（例: `review-raven` の watch goroutine）。Phase A は意図的に upstream 状態をパッチしません — これは Phase B のスコープです。 |
 
-## OAuth Resource Parameters
+## OAuth リソースパラメーター
 
-The gateway supports RFC 8707 `resource` parameters on:
+ゲートウェイは RFC 8707 `resource` パラメーターを以下でサポートします:
 
 - `/authorize`
 - `/device_authorization`
-- `/token` with `grant_type=refresh_token`
+- `grant_type=refresh_token` を使用した `/token`
 
-The resource must match a registered gateway or route audience. During the
-migration grace period, legacy tokens without recorded audience metadata are
-accepted while `MCP_GATEWAY_TOKEN_AUDIENCE_STRICT=false`.
+resource は登録済みのゲートウェイまたはルート audience と一致する必要があります。移行猶予期間中は `MCP_GATEWAY_TOKEN_AUDIENCE_STRICT=false` の間、audience メタデータが記録されていない旧トークンが受け入れられます。
