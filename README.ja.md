@@ -11,17 +11,31 @@ VS Code などの MCP クライアントから見た単一の HTTP エントリ�
 
 ## はじめに
 
-### 1. GitHub OAuth App を作成
+### 1. GitHub App を作成
 
-**GitHub -> Settings -> Developer settings -> OAuth Apps -> New OAuth App** を開きます。
+**GitHub -> Settings -> Developer settings -> GitHub Apps -> New GitHub App** を開きます。
 
-ローカル開発では callback URL に次を設定します。
+以下の設定を行います。
 
-```text
-http://127.0.0.1:8080/callback
-```
+- **Callback URLs** — 次の 2 つを両方登録します。
+  ```text
+  http://127.0.0.1:8080/callback
+  http://127.0.0.1:8080/device_callback
+  ```
+  デプロイ環境では `http://127.0.0.1:8080` を `<MCP_GATEWAY_PUBLIC_URL>` に置き換えてください。
+- **Permissions** — 最低限 `Account permissions: Email addresses: Read-only` を設定します。
+  上流 MCP サーバーが必要とする権限を追加してください。
+- **Webhook** — 無効のままにします（OAuth フローでは使用しません）。
+- **Where can this GitHub App be installed?** — 個人利用の場合は `Only on this account` を選択します。
 
-デプロイ環境では `<MCP_GATEWAY_PUBLIC_URL>/callback` を設定します。
+作成後、アプリ設定ページで **Client secret** を生成し、**Client ID** と合わせてコピーします。
+
+> **GitHub OAuth App からの移行**: `OAUTH_CLIENT_ID` と `OAUTH_CLIENT_SECRET` を新しい
+> GitHub App の認証情報に置き換えるだけで移行できます。コードや設定ファイルの変更は不要です。
+> ゲートウェイは `gho_`（OAuth App）と `ghu_`（GitHub App）の両トークンに対応しています。
+>
+> **トークン有効期限について**: "Expire user authorization tokens" は現時点では無効のまま
+> にしてください。短命 `ghu_` トークンのローテーション対応は次のリリースで追加予定です。
 
 ### 2. Docker Compose で起動
 

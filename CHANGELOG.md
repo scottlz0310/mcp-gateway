@@ -9,6 +9,11 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Switch provider from GitHub OAuth Apps to GitHub Apps (user-to-server OAuth) ([#139](https://github.com/scottlz0310/mcp-gateway/issues/139))
+  - `ghu_` user access tokens (GitHub Apps) accepted alongside classic `gho_` tokens — no code changes required, no prefix validation present
+  - README and README.ja.md: Step 1 updated to "Create A GitHub App" with both `/callback` and `/device_callback` callback URL registration instructions, minimum permissions (`Email addresses: Read-only`), and migration note from OAuth Apps
+  - docs/configuration.md: "GitHub OAuth App" references updated to "GitHub App" throughout
+  - Internal: test fixture updated to `ghu_` prefix; factory error message updated to "GitHub App credentials"
 - Device Authorization Grant (RFC 8628) fully implemented as gateway-native flow ([#130](https://github.com/scottlz0310/mcp-gateway/issues/130))
   - `POST /device_authorization` now generates a gateway-own `device_code` and `user_code` (XXXX-XXXX format); no longer delegates to GitHub's device flow
   - `GET /activate` renders a user_code entry form; `POST /activate` validates the code and redirects to the standard `/authorize` flow

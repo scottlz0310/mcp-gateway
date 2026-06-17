@@ -94,8 +94,8 @@ func (p *githubProvider) ExchangeCode(ctx context.Context, code string) (TokenRe
 	return p.postToken(ctx, form, "exchange")
 }
 
-// RefreshToken rotates a GitHub OAuth refresh token (RFC 6749 §6).  Only
-// works when the OAuth App is configured with expiring user access tokens;
+// RefreshToken rotates a GitHub user access token (RFC 6749 §6).  Only
+// works when the GitHub App is configured with expiring user authorization tokens;
 // otherwise GitHub returns an OAuth error which is surfaced verbatim.
 func (p *githubProvider) RefreshToken(ctx context.Context, refreshToken string) (TokenResponse, error) {
 	if strings.TrimSpace(refreshToken) == "" {
