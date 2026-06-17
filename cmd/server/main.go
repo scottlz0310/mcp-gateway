@@ -249,7 +249,7 @@ func main() {
 		CacheTTL:             time.Duration(cfg.tokenCacheTTLMin) * time.Minute,
 		ExpiresIn:            time.Duration(cfg.tokenExpiresInSec) * time.Second,
 		TokenStorePath:       cfg.tokenStorePath,
-		AllowedAudiences:     routeAudiences(strings.TrimRight(cfg.publicURL, "/"), routes),
+		ResourceAudienceMap:  buildResourceAudienceMap(routes),
 		TokenAudienceStrict:  cfg.tokenAudienceStrict,
 		GitHubRefreshEnabled: cfg.githubRefreshEnabled,
 		OIDCPrivateKey:       oidcPrivateKey,
@@ -296,6 +296,8 @@ func main() {
 		if route.NoAuth {
 			wrapped = h
 		} else {
+			// routeResource is the RFC 9728 PRM identifier (URL form) — used
+			// only for discovery metadata, not for JWT aud validation.
 			routeResource := publicURL
 			if route.Prefix != "/" {
 				routeResource = publicURL + route.Prefix
@@ -308,7 +310,7 @@ func main() {
 			// gateway-wide resource_metadata URL via WithBaseURL.
 			authOpts := []middleware.AuthOption{
 				middleware.WithBaseURL(cfg.publicURL),
-				middleware.WithAudience(routeResource),
+				middleware.WithAudience(route.RequiredAudience),
 			}
 			if route.Prefix != "/" {
 				routePRMPath := "/.well-known/oauth-protected-resource" + route.Prefix
@@ -490,24 +492,19 @@ func splitCSV(value string) []string {
 	return out
 }
 
-func routeAudiences(publicURL string, routes []router.Route) []string {
-	audiences := []string{publicURL}
-	seen := map[string]struct{}{publicURL: {}}
+// buildResourceAudienceMap builds the map from route name → required_audience
+// used by auth.Handler to resolve the resource parameter in /token requests.
+// The "mcp-gateway" default is always reachable via resource=mcp-gateway (or
+// by omitting the resource parameter entirely).
+func buildResourceAudienceMap(routes []router.Route) map[string]string {
+	m := make(map[string]string, len(routes))
 	for _, route := range routes {
 		if route.NoAuth {
 			continue
 		}
-		audience := publicURL
-		if route.Prefix != "/" {
-			audience += route.Prefix
-		}
-		if _, ok := seen[audience]; ok {
-			continue
-		}
-		seen[audience] = struct{}{}
-		audiences = append(audiences, audience)
+		m[route.Name] = route.RequiredAudience
 	}
-	return audiences
+	return m
 }
 
 func getEnv(key, fallback string) string {
