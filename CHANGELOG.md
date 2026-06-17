@@ -7,6 +7,8 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-06-17
+
 ### Added
 
 - OS-appropriate default paths for runtime state files ([#144](https://github.com/scottlz0310/mcp-gateway/issues/144))
@@ -100,6 +102,9 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 - `docs/architecture.md`: define mcp-gateway's role as MCP reverse proxy / routing gateway / auth boundary within the review platform; document responsibility boundaries with thread-owl, mcp-resource-subscriber, review-raven, and Mcp-Docker ([#92](https://github.com/scottlz0310/mcp-gateway/issues/92))
 - `README.md`: expand Repository Stack table to the full five-repo review infrastructure ([#92](https://github.com/scottlz0310/mcp-gateway/issues/92))
 - `docs/spike-105-auth-issue-investigation.md`: add spike investigation report on 401 authentication errors across routed MCP servers ([#105](https://github.com/scottlz0310/mcp-gateway/issues/105))
+- docs/ 全ファイルを日本語化 ([#150](https://github.com/scottlz0310/mcp-gateway/issues/150))
+  - `docs/README.md`, `docs/architecture.md`, `docs/configuration.md`, `docs/operations.md`, `docs/auth-error-contract.md`, `docs/spike-72-delegated-background-access.md`, `docs/phase-b-adoption-report.md` を全面日本語化
+  - `docs/runbook-e2e-v0.1.0.md`, `docs/tasks-archive-v0.3.0.md`, `docs/spike-18-copilot-api-auth.md`, `docs/spike-105-auth-issue-investigation.md` はすでに日本語のため対象外
 
 ## [0.5.2] - 2026-06-10
 
@@ -317,7 +322,8 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 - Removed GitHub-specific HTTP calls from `auth.Handler`; delegated to `provider.Provider`.
 - Renamed middleware context key `github_login` → `authenticated_user` (internal only; external compatibility maintained).
 
-[Unreleased]: https://github.com/scottlz0310/mcp-gateway/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/scottlz0310/mcp-gateway/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/scottlz0310/mcp-gateway/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/scottlz0310/mcp-gateway/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.4.0...v0.5.0
