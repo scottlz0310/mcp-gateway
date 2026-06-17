@@ -334,6 +334,9 @@ func TestMigrateOIDCPrivateKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MigrateOIDCPrivateKey (load): %v", err)
 	}
+	if privKey2 == nil {
+		t.Fatal("expected non-nil loaded private key")
+	}
 
 	// Keys should be identical (same N and D for RSA key)
 	if privKey1.N.Cmp(privKey2.N) != 0 || privKey1.D.Cmp(privKey2.D) != 0 {
