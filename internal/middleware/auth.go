@@ -23,7 +23,7 @@ const ContextKeyToken contextKey = "auth_token"
 //
 // The second return value (rotatedToken) is non-empty when the underlying
 // provider transparently rotated the upstream access token during validation
-// (e.g. GitHub OAuth Apps with expiring tokens). When non-empty, Auth
+// (e.g. GitHub Apps with expiring tokens). When non-empty, Auth
 // middleware substitutes it for the original bearer token in the request
 // context so that the reverse proxy forwards the fresh token to the upstream
 // MCP server.
