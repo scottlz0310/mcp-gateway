@@ -1,315 +1,254 @@
-# Auth Error Contract
+# 認証エラーコントラクト
 
-> **Phase C — Structured Error Contract** (Issue #73)
+> **Phase C — 構造化エラーコントラクト** (Issue #73)
 >
-> This document is the authoritative reference for the error code contract between mcp-gateway
-> and its consumers: MCP clients (public API), upstream MCP servers (internal API), and
-> operator tooling. It covers trigger conditions, wire representation, and the mapping to
-> copilot-review-mcp's internal error taxonomy.
+> このドキュメントは、mcp-gateway とその利用者（MCP クライアント（公開 API）・upstream MCP サーバー（内部 API）・オペレーターツール）間のエラーコードコントラクトの権威的なリファレンスです。トリガー条件・ワイヤー表現・copilot-review-mcp の内部エラー分類へのマッピングを扱います。
 
 ---
 
-## 1. Public Client Contract
+## 1. 公開クライアントコントラクト
 
-MCP clients authenticate against gateway-protected routes via RFC 6750 Bearer tokens. All
-error responses carry a JSON body `{"error": "<code>", "error_description": "..."}` and the
-headers below.
+MCP クライアントは RFC 6750 Bearer トークンを使用してゲートウェイ保護ルートに対して認証します。すべてのエラーレスポンスは JSON ボディ `{"error": "<code>", "error_description": "..."}` と以下のヘッダーを含みます。
 
-### 1.1 Error Codes
+### 1.1 エラーコード
 
-| Error code | HTTP status | `WWW-Authenticate error=` | Trigger | Recommended client action |
+| エラーコード | HTTP ステータス | `WWW-Authenticate error=` | トリガー | 推奨クライアントアクション |
 |---|---|---|---|---|
-| `invalid_request` | 401 | **omitted** (intentional — see §1.2) | No `Authorization` header, or header is not in `Bearer <token>` form | Start the gateway OAuth flow (follow the `resource_metadata` URL in the `WWW-Authenticate` header) |
-| `invalid_token` | 401 | `error="invalid_token"` | Token is expired, cryptographically invalid, or addressed to the wrong audience | Re-authenticate via the gateway OAuth flow |
-| `upstream_error` | 503 | *(no `WWW-Authenticate` header)* | The upstream OAuth provider (GitHub) returned 5xx or was unreachable during token validation | Retry with exponential backoff; no credential change required |
+| `invalid_request` | 401 | **省略**（意図的 — §1.2 参照） | `Authorization` ヘッダーなし、またはヘッダーが `Bearer <token>` 形式でない | ゲートウェイ OAuth フローを開始する（`WWW-Authenticate` ヘッダーの `resource_metadata` URL に従う） |
+| `invalid_token` | 401 | `error="invalid_token"` | トークンが期限切れ・暗号的に無効・または誤った audience 宛て | ゲートウェイ OAuth フローで再認証する |
+| `upstream_error` | 503 | *（`WWW-Authenticate` ヘッダーなし）* | upstream OAuth プロバイダー（GitHub）がトークン検証中に 5xx を返したか、到達不能だった | 指数バックオフで再試行する。認証情報の変更は不要 |
 
-### 1.2 `error=` Omission for `invalid_request` — Security Design
+### 1.2 `invalid_request` での `error=` 省略 — セキュリティ設計
 
-RFC 6750 §3.1 permits omitting `error=` when the request lacked credentials entirely. The
-gateway applies the same omission when the `Authorization` header is malformed (not in
-`Bearer <token>` form) — `extractBearer()` returns `""` in both cases, and both result in
-`invalid_request`:
+RFC 6750 §3.1 は、リクエストに認証情報がまったくない場合に `error=` を省略することを許可しています。ゲートウェイは `Authorization` ヘッダーが不正形式（`Bearer <token>` 形式でない）の場合にも同じ省略を適用します。`extractBearer()` はどちらの場合も `""` を返し、どちらも `invalid_request` になります:
 
 ```
-# invalid_request — no error= attribute
+# invalid_request — error= 属性なし
 WWW-Authenticate: Bearer realm="mcp-gateway", resource_metadata="<url>"
 
-# invalid_token — error= is present
+# invalid_token — error= あり
 WWW-Authenticate: Bearer realm="mcp-gateway", error="invalid_token", error_description="...", resource_metadata="<url>"
 ```
 
-**Rationale:** Omitting `error="invalid_request"` avoids revealing whether the request was malformed
-versus simply unauthenticated. The response still advertises the Bearer challenge and the
-`resource_metadata` URL needed by legitimate MCP clients — the Bearer scheme itself is not hidden.
+**理由:** `error="invalid_request"` を省略することで、リクエストが不正形式なのか単に未認証なのかを明かさないようにしています。レスポンスは引き続き Bearer チャレンジと正規の MCP クライアントが必要とする `resource_metadata` URL を広告しています。Bearer スキーム自体は隠されていません。
 
-Implementation reference: `internal/middleware/auth.go:writeUnauthorized()` — the condition
-`if errCode == "invalid_token"` gates the `error=` attribute.
+実装参照: `internal/middleware/auth.go:writeUnauthorized()` — 条件 `if errCode == "invalid_token"` が `error=` 属性の出力を制御します。
 
-### 1.3 Backward Compatibility Guarantee
+### 1.3 後方互換性保証
 
-The three codes above (`invalid_request`, `invalid_token`, `upstream_error`) are covered by tests
-in `internal/middleware/auth_test.go` (`TestAuthMissingToken`, `TestAuthInvalidToken`,
-`TestAuthUpstreamError`). Any change to their wire shape requires updating those tests and
-incrementing the semver minor version.
+上記の 3 つのコード（`invalid_request`、`invalid_token`、`upstream_error`）は `internal/middleware/auth_test.go` のテスト（`TestAuthMissingToken`、`TestAuthInvalidToken`、`TestAuthUpstreamError`）でカバーされています。それらのワイヤー形状を変更する場合は、これらのテストを更新し semver マイナーバージョンをインクリメントする必要があります。
 
 ---
 
-## 2. Internal Delegated Access Contract
+## 2. 内部委任アクセスコントラクト
 
-Upstream MCP servers (e.g. copilot-review-mcp) obtain a fresh gateway-managed access token by
-calling `POST /internal/v1/whoami` on the internal listener. This endpoint is **loopback-only**
-and authenticates via a pre-shared secret.
+upstream MCP サーバー（例: copilot-review-mcp）は、内部リスナーで `POST /internal/v1/whoami` を呼び出すことで、ゲートウェイが管理する新鮮なアクセストークンを取得します。このエンドポイントは**ループバックのみ**で、事前共有シークレットで認証します。
 
-Error responses carry `{"error": "<code>"}` (no `error_description` field) to reduce the
-information surface on this trust boundary.
+エラーレスポンスはこのトラスト境界での情報露出を抑えるため `{"error": "<code>"}` のみ（`error_description` フィールドなし）です。
 
-### 2.1 Error Codes
+### 2.1 エラーコード
 
-| Error code | HTTP status | Trigger | Caller action |
+| エラーコード | HTTP ステータス | トリガー | 呼び出し元アクション |
 |---|---|---|---|
-| `method_not_allowed` | 405 | Non-`POST` method | Fix the HTTP method; this is a caller bug |
-| `loopback_required` | 403 | Request originated from a non-loopback address | Ensure the caller connects to the internal API on loopback — the listener always binds to `127.0.0.1:${MCP_GATEWAY_INTERNAL_PORT}` |
-| `invalid_authorization` | 401 | `Authorization: Bearer` secret missing or does not match `MCP_GATEWAY_INTERNAL_SECRET` | Fix the shared secret configuration |
-| `invalid_body` | 400 | Malformed JSON, body exceeds 4 KiB, unknown fields, or trailing bytes after the JSON object | Fix the request body |
-| `missing_subject` | 400 | `subject` field is omitted or empty (including whitespace-only) | Supply a non-empty subject |
-| `subject_not_found` | 404 | No entry in the in-memory subject index for the requested subject — the user has never authenticated on this instance, the session was purged, or the process was recently restarted (the in-memory index starts empty after restart and re-seeds as bearer tokens are validated on protected routes) | Trigger the user to re-authenticate; after a process restart the error may be transient — the index rebuilds as users access protected routes |
-| `rotation_failed` | 502 | Token is near expiry, rotation was attempted but did not yield a fresh token (covers both transient provider/network errors and explicit rejection by GitHub's token endpoint) | Retry after a brief delay; if the error persists, trigger the user to re-authenticate — the refresh token may have been revoked |
-| `upstream_failure` | 502 | Any other resolver error, or the resolver returned an empty access token | Retry after a brief delay; if persistent, treat as `subject_not_found` and prompt re-auth |
+| `method_not_allowed` | 405 | `POST` 以外のメソッド | HTTP メソッドを修正する。呼び出し元のバグ |
+| `loopback_required` | 403 | ループバック以外のアドレスからのリクエスト | 呼び出し元が内部 API にループバック経由で接続していることを確認する。リスナーは常に `127.0.0.1:${MCP_GATEWAY_INTERNAL_PORT}` にバインド |
+| `invalid_authorization` | 401 | `Authorization: Bearer` シークレットが欠けているか `MCP_GATEWAY_INTERNAL_SECRET` と一致しない | 共有シークレットの設定を修正する |
+| `invalid_body` | 400 | 不正な JSON・ボディが 4 KiB を超える・未知のフィールド・JSON オブジェクト後の余分なバイト | リクエストボディを修正する |
+| `missing_subject` | 400 | `subject` フィールドが省略または空（ホワイトスペースのみを含む） | 空でない subject を提供する |
+| `subject_not_found` | 404 | 要求された subject のインメモリ subject インデックスにエントリーがない。ユーザーがこのインスタンスで一度も認証していない・セッションがパージされた・プロセスが最近再起動した（インメモリインデックスは再起動後に空から始まり、保護ルートで Bearer トークンが検証されるたびに再シードされる） | ユーザーに再認証を促す。プロセス再起動後はエラーが一時的な場合がある。ユーザーが保護ルートにアクセスするとインデックスが再構築される |
+| `rotation_failed` | 502 | トークンが有効期限間近でローテーションを試みたが新鮮なトークンが得られなかった（一時的なプロバイダー/ネットワークエラーと GitHub トークンエンドポイントによる明示的な拒否を含む） | 短時間後に再試行する。エラーが続く場合はユーザーに再認証を促す。リフレッシュトークンが失効している可能性がある |
+| `upstream_failure` | 502 | その他のリゾルバーエラー、またはリゾルバーが空のアクセストークンを返した | 短時間後に再試行する。継続する場合は `subject_not_found` として扱い再認証を促す |
 
-### 2.2 Naming Note: `upstream_error` vs `upstream_failure`
+### 2.2 命名の注記: `upstream_error` vs `upstream_failure`
 
-These are **two distinct codes at two different layers**, not aliases:
+これらは**異なるレイヤーの 2 つの別コード**であり、エイリアスではありません:
 
-| Code | Layer | HTTP status | Meaning |
+| コード | レイヤー | HTTP ステータス | 意味 |
 |---|---|---|---|
-| `upstream_error` | Public API (`middleware/auth.go`) | 503 | The *OAuth provider* (GitHub) is unreachable when validating the incoming Bearer token |
-| `upstream_failure` | Internal API (`internalapi/handler.go`) | 502 | The *gateway resolver* failed to produce a usable access token for the requested subject |
+| `upstream_error` | 公開 API（`middleware/auth.go`） | 503 | 受信 Bearer トークン検証時に *OAuth プロバイダー*（GitHub）に到達できない |
+| `upstream_failure` | 内部 API（`internalapi/handler.go`） | 502 | *ゲートウェイリゾルバー* が要求された subject に使用可能なアクセストークンを生成できなかった |
 
-The asymmetry in naming is deliberate: the two codes appear in separate subsystems, serve
-different audiences, and have different retry semantics. They should not be merged.
+命名の非対称性は意図的です。2 つのコードは別々のサブシステムに存在し、異なる対象者に向けられ、異なる再試行セマンティクスを持っています。統合すべきではありません。
 
-### 2.3 Conceptual Category: AUTH_CONTEXT_UNAVAILABLE
+### 2.3 概念カテゴリー: AUTH_CONTEXT_UNAVAILABLE
 
-Issue #72 (Phase B) considered introducing a single error code `auth_context_unavailable` to
-cover the condition "the gateway has no usable auth context for this subject." After the Phase B
-go/no-go verdict this was **decided against** — no new error code was added to the codebase.
+Issue #72（Phase B）では、「ゲートウェイがこの subject に使用可能な認証コンテキストを持っていない」という状態をカバーする単一のエラーコード `auth_context_unavailable` の導入が検討されました。Phase B の go/no-go 決定後、これは**却下**されました。コードベースに新しいエラーコードは追加されていません。
 
-Instead, the two existing codes cover the concept:
+代わりに、既存の 2 つのコードがその概念をカバーしています:
 
-| Code | Why the context is unavailable |
+| コード | コンテキストが利用不可な理由 |
 |---|---|
-| `subject_not_found` | No token has ever been cached for this subject (user never authenticated on this gateway instance, or cache was purged) |
-| `rotation_failed` | A token exists but rotation did not yield a fresh token — may be a transient provider/network error or permanent refresh-token rejection |
+| `subject_not_found` | この subject のトークンがキャッシュされていない（ユーザーがこのゲートウェイインスタンスで認証したことがない、またはキャッシュがパージされた） |
+| `rotation_failed` | トークンは存在するがローテーションが新鮮なトークンを生成できなかった。一時的なプロバイダー/ネットワークエラーまたはリフレッシュトークンの永続的な拒否の可能性がある |
 
-`subject_not_found` always requires re-authentication. `rotation_failed` should be retried first;
-if the error persists, trigger the end-user to re-authenticate via the gateway's public OAuth flow.
-Callers **SHOULD** treat persistent `rotation_failed` as "prompt re-authentication," but a single
-transient occurrence warrants a retry before escalating.
+`subject_not_found` は常に再認証が必要です。`rotation_failed` はまず再試行すべきです。エラーが続く場合はエンドユーザーにゲートウェイの公開 OAuth フローで再認証を促してください。呼び出し元は継続的な `rotation_failed` を「再認証を促す」として扱う**べき**ですが、単発の一時的な発生は昇格前に再試行を保証します。
 
-Implementation reference: `internal/auth/handler.go:EnsureFreshAccessTokenForSubject()` —
-returns `auth.ErrSubjectNotFound` and `auth.ErrRotationFailed` as distinct typed errors;
-`internalapi/handler.go` maps them to the codes above.
+実装参照: `internal/auth/handler.go:EnsureFreshAccessTokenForSubject()` — 別個の型付きエラーとして `auth.ErrSubjectNotFound` と `auth.ErrRotationFailed` を返します。`internalapi/handler.go` がそれらを上記のコードにマッピングします。
 
 ---
 
-### 2.4 OAuth 失敗診断 endpoint
+### 2.4 OAuth 失敗診断エンドポイント
 
-`GET /internal/v1/auth/failures` は、既存の loopback + shared secret 境界で
-直近100件の OAuth 失敗を最新順に返す。`limit=1..100` で件数を縮小できる。
+`GET /internal/v1/auth/failures` は、既存のループバック + 共有シークレット境界で直近 100 件の OAuth 失敗を最新順に返します。`limit=1..100` で件数を縮小できます。
 
-| Error code | HTTP status | Trigger |
+| エラーコード | HTTP ステータス | トリガー |
 |---|---|---|
 | `method_not_allowed` | 405 | `GET` 以外 |
-| `loopback_required` | 403 | loopback 以外からの接続 |
-| `invalid_authorization` | 401 | shared secret 不一致 |
-| `invalid_limit` | 400 | `limit` が1から100の整数ではない |
+| `loopback_required` | 403 | ループバック以外からの接続 |
+| `invalid_authorization` | 401 | 共有シークレット不一致 |
+| `invalid_limit` | 400 | `limit` が 1 から 100 の整数でない |
 | `diagnostics_unavailable` | 503 | failure reader が設定されていない |
 
-応答イベントには token、authorization code、OAuth `state`、secret、provider
-response body を含めない。永続的な解析の正本は OAuth 監査 JSON Lines
-ファイルであり、この endpoint のメモリ履歴は process 再起動時に消失する。
+レスポンスイベントにはトークン・authorization code・OAuth `state`・シークレット・プロバイダーレスポンスボディを含みません。永続的な解析の正本は OAuth 監査 JSON Lines ファイルであり、このエンドポイントのメモリ履歴はプロセス再起動時に消失します。
 
 ---
 
-## 3. copilot-review-mcp Mapping Contract
+## 3. copilot-review-mcp マッピングコントラクト
 
-This section documents how gateway error codes propagate through copilot-review-mcp's internal
-error taxonomy. It is primarily useful for maintainers of both services.
+このセクションはゲートウェイのエラーコードが copilot-review-mcp の内部エラー分類を通じてどのように伝播するかを説明します。両サービスのメンテナーに主に有用です。
 
-### 3.1 Gateway Internal API → Sentinel Errors
+### 3.1 ゲートウェイ内部 API → センチネルエラー
 
-`copilot-review-mcp/internal/github/gateway_token_source.go` maps the HTTP status codes of
-`/internal/v1/whoami` responses to Go sentinel errors:
+`copilot-review-mcp/internal/github/gateway_token_source.go` は `/internal/v1/whoami` レスポンスの HTTP ステータスコードを Go センチネルエラーにマッピングします:
 
-| `/whoami` HTTP status | Gateway error code | Sentinel error |
+| `/whoami` HTTP ステータス | ゲートウェイエラーコード | センチネルエラー |
 |---|---|---|
-| 200 | *(success)* | — |
-| 200 (malformed body) | `expires_at` missing or unparseable | `ErrGatewayInvalidExpiry` |
+| 200 | *（成功）* | — |
+| 200（不正なボディ） | `expires_at` が欠けているか解析不能 | `ErrGatewayInvalidExpiry` |
 | 401 | `invalid_authorization` | `ErrGatewayUnauthorized` |
 | 403 | `loopback_required` | `ErrGatewayLoopbackRequired` |
 | 404 | `subject_not_found` | `ErrGatewaySubjectGone` |
 | 502 | `rotation_failed` | `ErrGatewayRotationFailed` |
-| 502 | `upstream_failure` (or unrecognised body) | `ErrGatewayUpstreamFailure` |
-| other 4xx | `method_not_allowed` / `invalid_body` / `missing_subject` | `ErrGatewayBadRequest` |
+| 502 | `upstream_failure`（または認識不能なボディ） | `ErrGatewayUpstreamFailure` |
+| その他 4xx | `method_not_allowed` / `invalid_body` / `missing_subject` | `ErrGatewayBadRequest` |
 
-`ErrGatewayUnauthorized`, `ErrGatewayLoopbackRequired`, and `ErrGatewayBadRequest` always
-indicate configuration errors; they should never occur in a correctly configured deployment.
+`ErrGatewayUnauthorized`・`ErrGatewayLoopbackRequired`・`ErrGatewayBadRequest` は常に設定エラーを示します。正しく設定されたデプロイでは発生しないはずです。
 
-`ErrGatewayRotationFailed` and `ErrGatewayUpstreamFailure` are distinct sentinels since
-copilot-review-mcp PR #34 (Issue #33): `gatewayTokenSource.Token()` now parses the JSON `error`
-body of HTTP 502 responses to emit the appropriate sentinel.
+`ErrGatewayRotationFailed` と `ErrGatewayUpstreamFailure` は copilot-review-mcp PR #34（Issue #33）以降の別々のセンチネルです。`gatewayTokenSource.Token()` が HTTP 502 レスポンスの JSON `error` ボディを解析して適切なセンチネルを発行するようになりました。
 
-### 3.2 Watch Manager: Sentinel Errors → `FailureReason`
+### 3.2 ウォッチマネージャー: センチネルエラー → `FailureReason`
 
-`copilot-review-mcp/internal/watch/manager.go` classifies polling failures into three
-`FailureReason` values:
+`copilot-review-mcp/internal/watch/manager.go` はポーリング失敗を 3 つの `FailureReason` 値に分類します:
 
-| `FailureReason` | Meaning |
+| `FailureReason` | 意味 |
 |---|---|
-| `AUTH_EXPIRED` | The auth context expired; the watch cannot continue until the user re-authenticates |
-| `GITHUB_ERROR` | A GitHub API error that is not an auth expiry (may be transient) |
-| `INTERNAL_ERROR` | Watch setup or database failure |
+| `AUTH_EXPIRED` | 認証コンテキストが期限切れ。ユーザーが再認証するまでウォッチを継続できない |
+| `GITHUB_ERROR` | 認証期限切れでない GitHub API エラー（一時的な可能性あり） |
+| `INTERNAL_ERROR` | ウォッチのセットアップまたはデータベース障害 |
 
-The manager uses `ghclient.IsAuthError(err)` and `ghclient.IsGatewayAuthError(err)` to
-distinguish `AUTH_EXPIRED` from `GITHUB_ERROR`. `IsAuthError` detects HTTP 401 errors from
-the **GitHub API**. `IsGatewayAuthError` recognises the gateway sentinels that require
-re-authentication. `ErrGatewayUpstreamFailure` is handled separately by a consecutive-failure
-budget: after `N` consecutive failures the watch escalates to `AUTH_EXPIRED`.
+マネージャーは `ghclient.IsAuthError(err)` と `ghclient.IsGatewayAuthError(err)` を使用して `AUTH_EXPIRED` と `GITHUB_ERROR` を区別します。`IsAuthError` は **GitHub API** からの HTTP 401 エラーを検出します。`IsGatewayAuthError` は再認証が必要なゲートウェイセンチネルを認識します。`ErrGatewayUpstreamFailure` は連続障害予算によって別途処理されます。`N` 回の連続障害後にウォッチは `AUTH_EXPIRED` に昇格します。
 
-**Current (actual) mapping:**
+**現在の（実際の）マッピング:**
 
-| Sentinel error | `IsGatewayAuthError(err)` | `FailureReason` (current) | Semantically correct? |
+| センチネルエラー | `IsGatewayAuthError(err)` | `FailureReason`（現在） | 意味的に正確か |
 |---|---|---|---|
-| `ErrGatewaySubjectGone` | `true` | `AUTH_EXPIRED` | ✅ Fixed ([scottlz0310/copilot-review-mcp PR #36](https://github.com/scottlz0310/copilot-review-mcp/pull/36)) |
-| `ErrGatewayRotationFailed` | `true` | `AUTH_EXPIRED` | ✅ Fixed ([scottlz0310/copilot-review-mcp PR #36](https://github.com/scottlz0310/copilot-review-mcp/pull/36)) |
-| `ErrGatewayUpstreamFailure` (transient, below threshold) | `false` | `GITHUB_ERROR` (continues watch) | ✅ Fixed ([scottlz0310/copilot-review-mcp PR #38](https://github.com/scottlz0310/copilot-review-mcp/pull/38)) |
-| `ErrGatewayUpstreamFailure` (persistent, above threshold) | `false` → escalated | `AUTH_EXPIRED` | ✅ Fixed ([scottlz0310/copilot-review-mcp PR #38](https://github.com/scottlz0310/copilot-review-mcp/pull/38)) |
-| GitHub API 401 | *(IsAuthError)* `true` | `AUTH_EXPIRED` | ✅ |
-| GitHub API 5xx / other | `false` | `GITHUB_ERROR` | ✅ |
+| `ErrGatewaySubjectGone` | `true` | `AUTH_EXPIRED` | ✅ 修正済み ([scottlz0310/copilot-review-mcp PR #36](https://github.com/scottlz0310/copilot-review-mcp/pull/36)) |
+| `ErrGatewayRotationFailed` | `true` | `AUTH_EXPIRED` | ✅ 修正済み ([scottlz0310/copilot-review-mcp PR #36](https://github.com/scottlz0310/copilot-review-mcp/pull/36)) |
+| `ErrGatewayUpstreamFailure`（一時的、閾値未満） | `false` | `GITHUB_ERROR`（ウォッチ継続） | ✅ 修正済み ([scottlz0310/copilot-review-mcp PR #38](https://github.com/scottlz0310/copilot-review-mcp/pull/38)) |
+| `ErrGatewayUpstreamFailure`（継続的、閾値超過） | `false` → 昇格 | `AUTH_EXPIRED` | ✅ 修正済み ([scottlz0310/copilot-review-mcp PR #38](https://github.com/scottlz0310/copilot-review-mcp/pull/38)) |
+| GitHub API 401 | *（IsAuthError）* `true` | `AUTH_EXPIRED` | ✅ |
+| GitHub API 5xx / その他 | `false` | `GITHUB_ERROR` | ✅ |
 
-### 3.3 Tool Call Path: `AuthErrorType`
+### 3.3 ツール呼び出しパス: `AuthErrorType`
 
-When a copilot-review-mcp **tool call** fails (not a background watch), errors are classified by
-`ClassifyGitHubError()` into `autherr.AuthErrorType`:
+copilot-review-mcp の**ツール呼び出し**が失敗した場合（バックグラウンドウォッチではなく）、エラーは `ClassifyGitHubError()` によって `autherr.AuthErrorType` に分類されます:
 
-| `AuthErrorType` | Meaning |
+| `AuthErrorType` | 意味 |
 |---|---|
-| `AUTH_REQUIRED` | No credentials present at all |
-| `REAUTH_REQUIRED` | Credentials expired (GitHub 401) |
-| `TOKEN_REFRESH_FAILED` | Refresh token was explicitly rejected |
+| `AUTH_REQUIRED` | 認証情報がまったく存在しない |
+| `REAUTH_REQUIRED` | 認証情報が期限切れ（GitHub 401） |
+| `TOKEN_REFRESH_FAILED` | リフレッシュトークンが明示的に拒否された |
 | `PERMISSION_DENIED` | GitHub 403 |
-| `RATE_LIMITED` | GitHub rate limit (primary or secondary) |
+| `RATE_LIMITED` | GitHub レート制限（プライマリまたはセカンダリ） |
 | `NOT_FOUND` | GitHub 404 |
 | `VALIDATION_ERROR` | GitHub 400 / 422 |
-| `TRANSIENT_UPSTREAM_ERROR` | GitHub 5xx (retryable) |
+| `TRANSIENT_UPSTREAM_ERROR` | GitHub 5xx（再試行可能） |
 
-`ClassifyGitHubError` is built around both GitHub API HTTP status codes and gateway sentinel
-errors. Gateway sentinels are checked first (before generic HTTP-status checks) because they
-carry more precise semantics.
+`ClassifyGitHubError` は GitHub API HTTP ステータスコードとゲートウェイセンチネルエラーの両方に基づいて構築されています。ゲートウェイセンチネルはより正確なセマンティクスを持つため、汎用的な HTTP ステータスチェックより先にチェックされます。
 
-**Gateway sentinel → `AuthErrorType` mapping (as of PR #32):**
+**ゲートウェイセンチネル → `AuthErrorType` マッピング（PR #32 時点）:**
 
-| Sentinel | `AuthErrorType` | Rationale |
+| センチネル | `AuthErrorType` | 理由 |
 |---|---|---|
-| `ErrGatewayRotationFailed` | `TOKEN_REFRESH_FAILED` | Gateway reported `rotation_failed` (may indicate token rejection, transient provider failure, or malformed provider response); re-auth recommended if persistent |
-| `ErrGatewaySubjectGone` | `REAUTH_REQUIRED` | Subject removed or revoked; re-auth required |
-| `ErrGatewayUpstreamFailure` | `TRANSIENT_UPSTREAM_ERROR` | Transient resolver failure; retry may succeed |
-| `ErrGatewayUnauthorized` | `AUTH_REQUIRED` | Shared-secret misconfiguration; no usable token |
-| `ErrGatewayLoopbackRequired` | `AUTH_REQUIRED` | Endpoint not on loopback; configuration error |
-| `ErrGatewayBadRequest` | `VALIDATION_ERROR` | Request arguments rejected; do not retry |
-| `ErrGatewayInvalidExpiry` | `TRANSIENT_UPSTREAM_ERROR` | Malformed whoami response (missing/invalid `expires_at`); retry may succeed |
+| `ErrGatewayRotationFailed` | `TOKEN_REFRESH_FAILED` | ゲートウェイが `rotation_failed` を報告（トークン拒否・一時的なプロバイダー障害・不正なプロバイダーレスポンスを示す可能性あり）。継続する場合は再認証を推奨 |
+| `ErrGatewaySubjectGone` | `REAUTH_REQUIRED` | Subject が削除または失効。再認証が必要 |
+| `ErrGatewayUpstreamFailure` | `TRANSIENT_UPSTREAM_ERROR` | 一時的なリゾルバー障害。再試行で成功する可能性あり |
+| `ErrGatewayUnauthorized` | `AUTH_REQUIRED` | 共有シークレットの設定ミス。使用可能なトークンなし |
+| `ErrGatewayLoopbackRequired` | `AUTH_REQUIRED` | エンドポイントがループバック上にない。設定エラー |
+| `ErrGatewayBadRequest` | `VALIDATION_ERROR` | リクエスト引数が拒否された。再試行しないこと |
+| `ErrGatewayInvalidExpiry` | `TRANSIENT_UPSTREAM_ERROR` | 不正な whoami レスポンス（`expires_at` が欠けているか無効）。再試行で成功する可能性あり |
 
 ---
 
-## 4. Known Gaps — All Resolved
+## 4. 既知のギャップ — すべて解決済み
 
-All three gaps identified at Phase C document creation have been resolved in
-copilot-review-mcp. The sections below are preserved for historical reference and
-cross-linked to the relevant PRs.
+Phase C ドキュメント作成時に特定された 3 つのギャップはすべて copilot-review-mcp で解決されました。以下のセクションは歴史的参照として保存されており、関連する PR にクロスリンクされています。
 
-### Gap 1 — ✅ Resolved (scottlz0310/copilot-review-mcp PR #36)
+### ギャップ 1 — ✅ 解決済み (scottlz0310/copilot-review-mcp PR #36)
 
-**`ErrGatewaySubjectGone` was classified as `GITHUB_ERROR` not `AUTH_EXPIRED`**
+**`ErrGatewaySubjectGone` が `AUTH_EXPIRED` ではなく `GITHUB_ERROR` に分類されていた**
 
-**Location:** `copilot-review-mcp/internal/watch/manager.go`
+**場所:** `copilot-review-mcp/internal/watch/manager.go`
 
-When a watch's `gatewayTokenSource.Token()` call returned `ErrGatewaySubjectGone` (HTTP 404
-from gateway), `IsAuthError` returned `false` because it only recognised GitHub API 401
-patterns. The watch therefore set `FailureReason = GITHUB_ERROR`.
+ウォッチの `gatewayTokenSource.Token()` 呼び出しが `ErrGatewaySubjectGone`（ゲートウェイからの HTTP 404）を返した場合、`IsAuthError` が GitHub API 401 パターンのみを認識するため `false` を返していました。ウォッチはそのため `FailureReason = GITHUB_ERROR` を設定していました。
 
-**Resolution:** `ghclient.IsGatewayAuthError` was introduced and wired into the watch manager.
-It returns `true` for `ErrGatewaySubjectGone` and `ErrGatewayRotationFailed`, causing the watch
-to set `FailureReason = AUTH_EXPIRED` for both.
-Fixed by [scottlz0310/copilot-review-mcp#31](https://github.com/scottlz0310/copilot-review-mcp/issues/31),
-landed in [scottlz0310/copilot-review-mcp PR #36](https://github.com/scottlz0310/copilot-review-mcp/pull/36).
+**解決:** `ghclient.IsGatewayAuthError` が導入されウォッチマネージャーに組み込まれました。`ErrGatewaySubjectGone` と `ErrGatewayRotationFailed` に対して `true` を返し、ウォッチが両方に対して `FailureReason = AUTH_EXPIRED` を設定するようになりました。
+[scottlz0310/copilot-review-mcp#31](https://github.com/scottlz0310/copilot-review-mcp/issues/31) で修正され、[scottlz0310/copilot-review-mcp PR #36](https://github.com/scottlz0310/copilot-review-mcp/pull/36) でリリースされました。
 
-### Gap 2 — ✅ Resolved (scottlz0310/copilot-review-mcp PR #32)
+### ギャップ 2 — ✅ 解決済み (scottlz0310/copilot-review-mcp PR #32)
 
-**Gateway sentinel errors had no `AuthErrorType` mapping**
+**ゲートウェイセンチネルエラーに `AuthErrorType` マッピングがなかった**
 
-**Location:** `copilot-review-mcp/internal/github/classify.go`
+**場所:** `copilot-review-mcp/internal/github/classify.go`
 
-When a tool call failed due to a gateway sentinel error, `ClassifyGitHubError` did not produce
-an `AuthErrorType`.
+ツール呼び出しがゲートウェイセンチネルエラーで失敗した場合、`ClassifyGitHubError` が `AuthErrorType` を生成しませんでした。
 
-**Resolution:** Explicit cases for all gateway sentinel errors were added to
-`ClassifyGitHubError`. See §3.3 for the current mapping table.
-Fixed by [scottlz0310/copilot-review-mcp#32](https://github.com/scottlz0310/copilot-review-mcp/issues/32).
+**解決:** すべてのゲートウェイセンチネルエラーの明示的なケースが `ClassifyGitHubError` に追加されました。現在のマッピングテーブルは §3.3 を参照してください。
+[scottlz0310/copilot-review-mcp#32](https://github.com/scottlz0310/copilot-review-mcp/issues/32) で修正されました。
 
-### Gap 3 — ✅ Resolved (scottlz0310/copilot-review-mcp PR #34, Issue #33)
+### ギャップ 3 — ✅ 解決済み (scottlz0310/copilot-review-mcp PR #34, Issue #33)
 
-**`ErrGatewayUpstreamFailure` conflated `rotation_failed` and `upstream_failure`**
+**`ErrGatewayUpstreamFailure` が `rotation_failed` と `upstream_failure` を混在させていた**
 
-**Location:** `copilot-review-mcp/internal/github/gateway_token_source.go`
+**場所:** `copilot-review-mcp/internal/github/gateway_token_source.go`
 
-`gatewayTokenSource.Token()` mapped **all** HTTP 502 responses from the gateway to the same
-sentinel `ErrGatewayUpstreamFailure`, without reading the JSON `error` body.
+`gatewayTokenSource.Token()` がゲートウェイからのすべての HTTP 502 レスポンスを、JSON `error` ボディを読まずに同じセンチネル `ErrGatewayUpstreamFailure` にマッピングしていました。
 
-**Resolution:** `gatewayTokenSource.Token()` now parses the JSON `error` field of HTTP 502
-responses and emits `ErrGatewayRotationFailed` for `{"error":"rotation_failed"}` and
-`ErrGatewayUpstreamFailure` for `{"error":"upstream_failure"}` (or any unrecognised body).
-The persistent `ErrGatewayUpstreamFailure` escalation to `AUTH_EXPIRED` after `N` consecutive
-failures was also added ([scottlz0310/copilot-review-mcp PR #38](https://github.com/scottlz0310/copilot-review-mcp/pull/38)).
-Fixed by [scottlz0310/copilot-review-mcp#33](https://github.com/scottlz0310/copilot-review-mcp/issues/33),
-landed in [scottlz0310/copilot-review-mcp PR #34](https://github.com/scottlz0310/copilot-review-mcp/pull/34).
+**解決:** `gatewayTokenSource.Token()` が HTTP 502 レスポンスの JSON `error` フィールドを解析し、`{"error":"rotation_failed"}` に対して `ErrGatewayRotationFailed` を、`{"error":"upstream_failure"}`（または認識不能なボディ）に対して `ErrGatewayUpstreamFailure` を発行するようになりました。`N` 回の連続障害後の `ErrGatewayUpstreamFailure` の `AUTH_EXPIRED` への昇格も追加されました（[scottlz0310/copilot-review-mcp PR #38](https://github.com/scottlz0310/copilot-review-mcp/pull/38)）。
+[scottlz0310/copilot-review-mcp#33](https://github.com/scottlz0310/copilot-review-mcp/issues/33) で修正され、[scottlz0310/copilot-review-mcp PR #34](https://github.com/scottlz0310/copilot-review-mcp/pull/34) でリリースされました。
 
 ---
 
-## 5. Operator Notes
+## 5. オペレーターノート
 
-### 5.1 Log Fields
+### 5.1 ログフィールド
 
-Structured logs in this repo use the field key `"err"` (not `"error"`) for error values. All
-log entries below are emitted with `slog.Error` or `slog.Warn`.
+このリポジトリの構造化ログはエラー値に `"error"` ではなく `"err"` フィールドキーを使用します。以下のすべてのログエントリは `slog.Error` または `slog.Warn` で出力されます。
 
-| Log message | Level | Key fields | Meaning |
+| ログメッセージ | レベル | キーフィールド | 意味 |
 |---|---|---|---|
-| `"upstream error during auth"` | Error | `err`, `path` | GitHub OAuth provider returned 5xx or network failure during token validation; maps to `upstream_error` (503) |
-| `"auth failed"` | Warn | `err`, `path` | Token validation failed; maps to `invalid_token` (401) |
-| `"internalapi: whoami rotation failed"` | Warn | `subject`, `err` | Refresh rotation failed; maps to `rotation_failed` (502) |
-| `"internalapi: whoami lookup failed"` | Warn | `subject`, `err` | Other resolver failure; maps to `upstream_failure` (502) |
-| `"internalapi: whoami returned empty access token despite no error"` | Warn | `subject` | Defensive path; maps to `upstream_failure` (502) |
+| `"upstream error during auth"` | Error | `err`、`path` | GitHub OAuth プロバイダーがトークン検証中に 5xx を返すかネットワーク障害。`upstream_error`（503）にマッピング |
+| `"auth failed"` | Warn | `err`、`path` | トークン検証失敗。`invalid_token`（401）にマッピング |
+| `"internalapi: whoami rotation failed"` | Warn | `subject`、`err` | リフレッシュローテーション失敗。`rotation_failed`（502）にマッピング |
+| `"internalapi: whoami lookup failed"` | Warn | `subject`、`err` | その他のリゾルバー障害。`upstream_failure`（502）にマッピング |
+| `"internalapi: whoami returned empty access token despite no error"` | Warn | `subject` | 防御的パス。`upstream_failure`（502）にマッピング |
 
-### 5.2 Re-authentication Triggers
+### 5.2 再認証トリガー
 
-A user must complete a fresh OAuth flow when either of the following is observed:
+以下のいずれかが観測された場合、ユーザーは新鮮な OAuth フローを完了する必要があります:
 
-1. The public API returns `invalid_token` — the gateway Bearer token is expired, invalid, or
-   not valid for the requested resource (e.g., audience mismatch). Any `invalid_token` response
-   requires re-authentication regardless of the specific `error_description`.
-2. The internal API returns `subject_not_found` — the user has no cached session on this gateway
-   instance (new deployment, cache purge, or the user never authenticated here).
-3. The internal API returns `rotation_failed` — token rotation did not yield a fresh access token (may be transient; retry before triggering re-authentication).
+1. 公開 API が `invalid_token` を返す — ゲートウェイ Bearer トークンが期限切れ・無効・または要求されたリソースに対して有効でない（audience 不一致など）。`error_description` に関わらず `invalid_token` レスポンスはすべて再認証が必要です。
+2. 内部 API が `subject_not_found` を返す — ユーザーがこのゲートウェイインスタンスでキャッシュされたセッションを持っていない（新しいデプロイ・キャッシュのパージ・またはユーザーがここで認証したことがない）。
+3. 内部 API が `rotation_failed` を返す — トークンローテーションが新鮮なアクセストークンを生成できなかった（一時的な可能性あり。再認証を促す前に再試行してください）。
 
-Operators can surface the re-authentication URL from the `resource_metadata` parameter in the
-`WWW-Authenticate` header of any `401` response.
+オペレーターは `401` レスポンスの `WWW-Authenticate` ヘッダーの `resource_metadata` パラメーターから再認証 URL を取得できます。
 
-### 5.3 Configuration Hints
+### 5.3 設定ヒント
 
-| Symptom | Likely cause | Check |
+| 症状 | 原因の可能性 | 確認事項 |
 |---|---|---|
-| `loopback_required` (403) on internal API | Caller is not connecting via loopback | Ensure upstream MCP server calls `127.0.0.1:${MCP_GATEWAY_INTERNAL_PORT}`; the listener always binds to `127.0.0.1` only (IPv6 loopback `[::1]` is not supported) |
-| `invalid_authorization` (401) on internal API | Mismatched shared secret | `MCP_GATEWAY_INTERNAL_SECRET` in both gateway and upstream server env |
-| Persistent `upstream_failure` (502) | Transient resolver or GitHub API failure; or the resolver returned an empty access token | Check GitHub status and retry; inspect gateway logs for resolver errors (`"err"` field) |
-| `subject_not_found` (404) after process restart | In-memory subject index starts empty after restart and re-seeds as bearer tokens are validated | Set `MCP_GATEWAY_TOKEN_STORE_PATH` for durable storage so sessions survive restart; the index rebuilds on the first bearer token validation per subject |
-| `upstream_error` (503) on every request | GitHub OAuth provider unreachable | Check GitHub status and outbound network access to the OAuth provider (configured via `OAUTH_PROVIDER`, default `github`) |
+| 内部 API で `loopback_required`（403） | 呼び出し元がループバック経由で接続していない | upstream MCP サーバーが `127.0.0.1:${MCP_GATEWAY_INTERNAL_PORT}` を呼び出していることを確認する。リスナーは常に `127.0.0.1` のみにバインドされる（IPv6 ループバック `[::1]` は非対応） |
+| 内部 API で `invalid_authorization`（401） | 共有シークレットが一致しない | ゲートウェイと upstream サーバーの両方の env で `MCP_GATEWAY_INTERNAL_SECRET` を確認する |
+| `upstream_failure`（502）が継続する | 一時的なリゾルバーまたは GitHub API 障害、またはリゾルバーが空のアクセストークンを返した | GitHub のステータスを確認して再試行する。リゾルバーエラーのゲートウェイログ（`"err"` フィールド）を確認する |
+| プロセス再起動後に `subject_not_found`（404） | インメモリ subject インデックスは再起動後に空から始まり Bearer トークン検証のたびに再シードされる | セッションが再起動後も維持されるように `MCP_GATEWAY_TOKEN_STORE_PATH` を永続ストレージに設定する。インデックスは subject ごとの最初の Bearer トークン検証で再構築される |
+| すべてのリクエストで `upstream_error`（503） | GitHub OAuth プロバイダーに到達できない | GitHub のステータスと OAuth プロバイダー（`OAUTH_PROVIDER` で設定、デフォルト `github`）への外部ネットワークアクセスを確認する |

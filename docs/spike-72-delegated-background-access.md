@@ -1,64 +1,43 @@
-# Spike #72: Delegated Background Access (Phase B PoC)
+# Spike #72: 委任バックグラウンドアクセス（Phase B PoC）
 
-**Status**: PoC / spike. Not for production use.
-**Refs**: #70 (overall plan), #71 (Phase A: rotation in request path), #72 (this PoC)
+**ステータス**: PoC / スパイク。本番環境での使用不可。
+**参照**: #70（全体計画）、#71（Phase A: リクエストパスでのローテーション）、#72（この PoC）
 
-## Problem
+## 問題
 
-Phase A (#71) introduced transparent GitHub access-token rotation on the
-**client request path** through the gateway. Each inbound proxied request
-calls `tryGitHubRotation`, so the bearer presented by an MCP client is
-swapped for a fresh one inside the leeway window before it is forwarded.
+Phase A（#71）はゲートウェイの**クライアントリクエストパス**での透過的な GitHub アクセストークンローテーションを導入しました。各インバウンドのプロキシされたリクエストが `tryGitHubRotation` を呼び出すため、MCP クライアントが提示する Bearer はリードウィンドウ内で upstream に転送される前に新鮮なものに交換されます。
 
-However, upstream MCP servers (notably `copilot-review-mcp`) run
-**background workflows** (a `watch` goroutine for the Copilot review
-poller) that bypass the per-request path entirely. They snapshot a
-bearer into an `oauth2.StaticTokenSource` at watch-start time and keep
-using it for the entire watch lifetime — even after rotation has issued
-a new access token.
+しかし、upstream MCP サーバー（特に `copilot-review-mcp`）はリクエストごとのパスを完全にバイパスする**バックグラウンドワークフロー**（Copilot レビューポーラーの `watch` goroutine）を実行しています。これらはウォッチ開始時に Bearer を `oauth2.StaticTokenSource` にスナップショットし、ローテーションで新しいアクセストークンが発行された後もウォッチ全体の存続期間中それを使い続けます。
 
-The Phase A rotation does cache *both* the old and new bearer for the
-gateway's own cache TTL (so MCP requests presenting either bearer continue
-to validate inside the gateway), but the underlying **GitHub-side access
-token validity** is independent of that cache: once the original GitHub
-access token actually expires, the old bearer presented by the background
-goroutine starts returning `401` from GitHub and the watch dies.
+Phase A のローテーションはゲートウェイ独自のキャッシュ TTL の間、古い Bearer と新しい Bearer の*両方*をキャッシュします（どちらの Bearer を提示する MCP リクエストもゲートウェイ内で引き続き検証されます）が、基盤となる **GitHub 側のアクセストークン有効性**はそのキャッシュとは独立しています。元の GitHub アクセストークンが実際に期限切れになると、バックグラウンド goroutine が提示する古い Bearer は GitHub から `401` を返し始め、ウォッチが終了します。
 
-## Goal
+## ゴール
 
-Provide a **gateway-internal API** that upstream MCP servers can call from
-their background goroutines to fetch the **current valid access token for a
-known subject**, with the gateway transparently rotating if the token is
-close to expiry. The upstream stores no tokens.
+upstream MCP サーバーがバックグラウンド goroutine から呼び出せる**ゲートウェイ内部 API** を提供し、トークンが有効期限間近の場合にゲートウェイが透過的にローテーションしながら**既知の subject の現在の有効なアクセストークン**を取得できるようにします。upstream はトークンを保存しません。
 
-This is the Option C ("gateway-managed delegated access") candidate from
-#70. The PoC validates the shape; production decisions remain open.
+これは #70 のオプション C（「ゲートウェイ管理の委任アクセス」）候補です。PoC は形状を検証します。本番環境向けの決定は未解決のままです。
 
-## Non-goals (for this spike)
+## 非ゴール（このスパイクの範囲外）
 
-- Persistent subject→token index across gateway restarts.
-- Hardened multi-tenant authorization between multiple upstreams.
-- UNIX domain socket / mTLS trust boundary (compared but deferred).
-- `copilot-review-mcp` production client implementation (drafted separately).
+- ゲートウェイ再起動をまたいだ subject→token インデックスの永続化。
+- 複数 upstream 間のハードニングされたマルチテナント認可。
+- UNIX ドメインソケット / mTLS トラスト境界（比較したが延期）。
+- `copilot-review-mcp` 本番クライアント実装（別途ドラフト済み）。
 
-## Trust boundary: comparison
+## トラスト境界: 比較
 
-| Option | Pros | Cons |
+| オプション | 長所 | 短所 |
 |---|---|---|
-| **A. UNIX domain socket** | OS-level permission isolation. No secret distribution. No network exposure. | Awkward on Windows; needs sidecar bind-mount in Docker. Two code paths to maintain. |
-| **B. loopback + shared secret** (chosen) | Trivial implementation. Cross-platform. Aligns with existing `gateway.key` / env-var patterns. | Secret distribution, rotation, and constant-time comparison must be handled. |
-| **C. mTLS** | Strong mutual authentication. Clean cert rotation. | Heavy for a PoC. CA/cert distribution design cost. |
-| **D. Hybrid (A + B fallback)** | Platform-optimal. | Doubles the test matrix. Out of PoC scope. |
+| **A. UNIX ドメインソケット** | OS レベルの権限分離。シークレット配布不要。ネットワーク露出なし。 | Windows では不便。Docker でサイドカーバインドマウントが必要。2 つのコードパスを保守する必要がある。 |
+| **B. ループバック + 共有シークレット**（選択） | 実装が簡単。クロスプラットフォーム。既存の `gateway.key` / env 変数パターンに合致。 | シークレットの配布・ローテーション・定数時間比較を処理する必要がある。 |
+| **C. mTLS** | 強力な相互認証。クリーンな証明書ローテーション。 | PoC には重すぎる。CA/証明書配布の設計コストがある。 |
+| **D. ハイブリッド（A + B フォールバック）** | プラットフォーム最適。 | テストマトリックスが倍増する。PoC のスコープ外。 |
 
-**Chosen: B**. Rationale: smallest PoC surface that still answers the
-"is delegated access useful?" question. Migration to A (Unix socket) is
-mostly straightforward later: the listener wiring changes, and the
-handler's loopback re-validation needs to become socket-aware (peer
-credential / `SO_PEERCRED`-style check instead of `r.RemoteAddr`).
+**選択: B**。理由: 「委任アクセスは有用か？」という問いに答えられる最小の PoC サーフェス。A（Unix ソケット）への移行は後から比較的容易です。リスナーの配線が変わり、ハンドラーのループバック再検証が `r.RemoteAddr` の代わりにソケットを認識する必要があります（`SO_PEERCRED` スタイルのチェック）。
 
 ## API
 
-### Endpoint
+### エンドポイント
 
 ```
 POST /internal/v1/whoami
@@ -69,12 +48,9 @@ Content-Type: application/json
 { "subject": "alice" }
 ```
 
-The endpoint is named `whoami` (rather than `token/refresh`) so the
-upstream semantics stay "give me the latest valid token", with rotation
-policy hidden inside the gateway. This avoids upstream-side
-over-rotation and keeps the upstream stateless.
+エンドポイントは `token/refresh` ではなく `whoami` と命名されているため、upstream のセマンティクスは「最新の有効なトークンをください」となり、ローテーションポリシーはゲートウェイ内部に隠蔽されます。これにより upstream 側の過剰なローテーションを避け、upstream をステートレスに保ちます。
 
-### Response (200)
+### レスポンス (200)
 
 ```json
 {
@@ -85,212 +61,105 @@ over-rotation and keeps the upstream stateless.
 }
 ```
 
-`refresh_token` is intentionally absent: the upstream MUST NOT persist
-refresh tokens. The `scopes` field is the gateway's configured scope
-list (best-effort identifier for what the access token can do).
+`refresh_token` は意図的に省略されています。upstream はリフレッシュトークンを永続化しては**なりません**。`scopes` フィールドはゲートウェイで設定されたスコープリストです（アクセストークンで実行できることのベストエフォート識別子）。
 
-### Error responses
+### エラーレスポンス
 
-| Status | Reason |
+| ステータス | 理由 |
 |---|---|
-| 400 | malformed body, missing `subject`, or trailing data after JSON object |
-| 401 | missing/invalid `Authorization` (constant-time compared) |
-| 403 | request did not originate from a loopback address |
-| 404 | no cached token record for this subject |
-| 405 | non-POST method (response includes `Allow: POST`) |
-| 502 | provider rotation was required (cached token inside the leeway window) but did not produce a fresh token (`error: "rotation_failed"`) |
-| 502 | upstream resolver failed for a non-rotation reason, or returned an empty access token despite reporting success (`error: "upstream_failure"`) |
+| 400 | 不正なボディ・`subject` が欠けている・JSON オブジェクト後の余分なデータ |
+| 401 | `Authorization` が欠けているか無効（定数時間比較） |
+| 403 | リクエストがループバックアドレスから発生していない |
+| 404 | この subject のキャッシュされたトークンレコードがない |
+| 405 | POST 以外のメソッド（レスポンスに `Allow: POST` を含む） |
+| 502 | プロバイダーローテーションが必要だった（キャッシュされたトークンがリードウィンドウ内）が新鮮なトークンを生成できなかった（`error: "rotation_failed"`） |
+| 502 | ローテーション以外の理由で upstream リゾルバーが失敗した、またはリゾルバーが成功を報告したにもかかわらず空のアクセストークンを返した（`error: "upstream_failure"`） |
 
-## Security model
+## セキュリティモデル
 
-1. **Listener bind**: 127.0.0.1 (IPv4 loopback) only in the current PoC. Binding 0.0.0.0 / a non-loopback interface is a startup error. IPv6 loopback (`::1`) is not bound today; adding it is straightforward (`net.Listen` on `[::1]:<port>`) but out of PoC scope.
-2. **Defense in depth**: handler re-validates `r.RemoteAddr` is a loopback IP.
-3. **Shared secret**:
-   - Env var `MCP_GATEWAY_INTERNAL_SECRET`. Must be ≥ 32 chars; shorter is a startup error.
-   - Compared with `crypto/subtle.ConstantTimeCompare`.
-   - Internal listener is **not started** unless both the secret and port are set (fail-closed).
-4. **Body cap**: `http.MaxBytesReader` at 4 KiB.
-5. **Logging**: access tokens never appear in logs. Subject is logged in clear (it is the GitHub login, which is already non-sensitive in the gateway's threat model); the upstream listener emits the same structured fields as the public HTTP server.
-6. **Limited enumeration resistance**: 404 is returned for "subject not present in the cache". An attacker who has already obtained the shared secret can use timing or status to probe which subjects currently have an active session — this PoC does not attempt to flatten that signal. The mitigation is the shared-secret + loopback boundary, not response-shape obfuscation.
+1. **リスナーバインド**: 現在の PoC では 127.0.0.1（IPv4 ループバック）のみ。0.0.0.0 / ループバック以外のインターフェースへのバインドは起動エラーです。IPv6 ループバック（`::1`）は現在バインドされていません。追加は容易（`[::1]:<port>` での `net.Listen`）ですが PoC のスコープ外です。
+2. **多層防御**: ハンドラーが `r.RemoteAddr` がループバック IP であることを再検証します。
+3. **共有シークレット**:
+   - env 変数 `MCP_GATEWAY_INTERNAL_SECRET`。32 文字以上必須。それより短い場合は起動エラー。
+   - `crypto/subtle.ConstantTimeCompare` で比較。
+   - シークレットとポートの両方が設定されていない限り内部リスナーは**起動しない**（フェイルクローズド）。
+4. **ボディキャップ**: `http.MaxBytesReader` で 4 KiB。
+5. **ログ**: アクセストークンはログに出力されません。Subject は平文でログされます（GitHub ログインであり、ゲートウェイの脅威モデルでは既に非機密）。upstream リスナーは公開 HTTP サーバーと同じ構造化フィールドを出力します。
+6. **限定的な列挙耐性**: `subject` がキャッシュに存在しない場合 404 を返します。既に共有シークレットを取得した攻撃者はタイミングまたはステータスを使用してどの subject が現在アクティブなセッションを持っているかを探索できます。この PoC はそのシグナルをフラット化しようとしません。緩和策はレスポンス形状の難読化ではなく共有シークレット + ループバック境界です。
 
-## Subject → token index
+## Subject → トークンインデックス
 
-Internal lookup design: `auth.Store` gains an **in-memory** secondary
-index `subject → []indexEntry{rawToken, expiresAt}`. The
-authoritative `ProviderAccessExpiry` is read from the underlying
-`TokenRecord` at lookup time so the index stays minimal.
+内部ルックアップ設計: `auth.Store` に**インメモリ**のセカンダリインデックス `subject → []indexEntry{rawToken, expiresAt}` を追加します。権威ある `ProviderAccessExpiry` はルックアップ時に基盤の `TokenRecord` から読み取られるため、インデックスは最小限に保たれます。
 
-- Updated whenever `CacheToken` is called (sign-up, rotation).
-- Pruned lazily on read: expired entries removed.
-- **Not persisted to disk** by design — the existing `fileTokenStore`
-  hashes tokens precisely so raw tokens never reach disk; we preserve
-  that invariant. A gateway restart forces upstream MCP servers to wait
-  for the next client request to re-seed the cache.
+- `CacheToken` が呼び出されるたびに更新（サインアップ・ローテーション）。
+- 読み取り時に遅延プルーニング: 期限切れエントリーを削除。
+- **設計上ディスクには永続化しない** — 既存の `fileTokenStore` がトークンをハッシュ化することで生のトークンがディスクに到達しないようにしています。この不変条件を維持します。ゲートウェイの再起動により upstream MCP サーバーは次のクライアントリクエストがキャッシュを再シードするまで待機する必要があります。
 
-Trade-off: this is a PoC compromise. A production implementation might
-add an encrypted persistent index, or migrate to a model where the
-upstream presents its current (possibly stale) token plus subject and
-the gateway returns the rotated successor. Documented for follow-up.
+トレードオフ: これは PoC 上の妥協です。本番実装では暗号化された永続的なインデックスを追加するか、upstream が現在の（古い可能性のある）トークンと subject を提示しゲートウェイがローテーション後継を返すモデルに移行する可能性があります。フォローアップのために文書化済みです。
 
-## Configuration
+## 設定
 
-| Env var | Required for internal API | Default | Purpose |
+| env 変数 | 内部 API に必須 | デフォルト | 用途 |
 |---|---|---|---|
-| `MCP_GATEWAY_INTERNAL_SECRET` | Yes | (unset → disabled) | Bearer secret. ≥ 32 chars. |
-| `MCP_GATEWAY_INTERNAL_PORT` | Yes | (unset → disabled) | TCP port for the loopback listener. |
+| `MCP_GATEWAY_INTERNAL_SECRET` | 必須 | （未設定 → 無効） | Bearer シークレット。32 文字以上必須。 |
+| `MCP_GATEWAY_INTERNAL_PORT` | 必須 | （未設定 → 無効） | ループバックリスナーの TCP ポート。 |
 
-Both must be set to enable the API. Either missing → internal listener
-is silently not started, with one `slog.Info` line documenting why.
+両方を設定すると API が有効になります。どちらかが欠けている → 内部リスナーは起動しない（なぜ起動しないかを文書化する 1 行の `slog.Info`）。
 
-### Prerequisite for rotating GitHub tokens
+### GitHub トークンローテーションの前提条件
 
-The internal API only triggers transparent rotation when the existing
-GitHub refresh flag is on. Set it together with the internal API env
-vars when you expect expiring GitHub OAuth tokens:
+内部 API は既存の GitHub リフレッシュフラグが有効な場合のみ透過的なローテーションをトリガーします。期限切れ GitHub OAuth トークンを期待する場合は内部 API env 変数と一緒に設定してください:
 
-| Setting | Required for rotation | Effect |
+| 設定 | ローテーションに必須 | 効果 |
 |---|---|---|
-| `MCP_GATEWAY_GITHUB_REFRESH_ENABLED` / `gateway.github_refresh_enabled` | Yes (for rotating tokens) | Persists provider refresh metadata and lets `tryGitHubRotation` actually call the GitHub refresh endpoint. Defaults to **false**. |
+| `MCP_GATEWAY_GITHUB_REFRESH_ENABLED` / `gateway.github_refresh_enabled` | 必須（ローテーションするトークンの場合） | プロバイダーリフレッシュメタデータを永続化し、`tryGitHubRotation` が実際に GitHub リフレッシュエンドポイントを呼び出せるようにします。デフォルトは **false**。 |
 
-If the flag is off, `/internal/v1/whoami` still works but only ever
-returns the cached access token — useful for classic non-expiring PATs,
-but **not** for expiring OAuth tokens, where the gateway will keep
-handing back the same (eventually dead) bearer.
+フラグがオフの場合、`/internal/v1/whoami` は引き続き動作しますが、キャッシュされたアクセストークンを返すだけです。クラシックな非期限切れ PAT には便利ですが、**期限切れ OAuth トークンには不適切**です。ゲートウェイは同じ（やがて無効になる）Bearer を返し続けます。
 
-## Rotation policy
+## ローテーションポリシー
 
-On `POST /internal/v1/whoami`:
+`POST /internal/v1/whoami` 時:
 
-1. Look up subject. If absent → 404.
-2. Pick the entry with the latest `ProviderAccessExpiry`.
-3. Delegate to the existing `tryGitHubRotation` code path, which itself
-   compares `time.Until(expiry)` against `Handler.githubRefreshLeeway()`
-   (the same Phase A policy used on the client request path). If the
-   token is still outside the leeway window, the current raw token is
-   returned unchanged; otherwise rotation is attempted.
-4. If rotation was required (cached token inside the leeway window) but
-   did not produce a fresh token — whether the provider returned a
-   transient error or a permanent one that cleared the refresh metadata —
-   the response is **502 `rotation_failed`**. The gateway never hands
-   back a cached bearer that is at or past the rotation threshold; the
-   caller is expected to surface the failure to the user.
+1. subject を検索。存在しない場合 → 404。
+2. `ProviderAccessExpiry` が最も新しいエントリーを選択。
+3. 既存の `tryGitHubRotation` コードパスに委任。このコードパス自体が `time.Until(expiry)` を `Handler.githubRefreshLeeway()`（Phase A クライアントリクエストパスで使用されるのと同じポリシー）と比較します。トークンがまだリードウィンドウの外にある場合、現在の生のトークンをそのまま返します。それ以外の場合はローテーションを試みます。
+4. ローテーションが必要だった（キャッシュされたトークンがリードウィンドウ内）が新鮮なトークンを生成できなかった場合（プロバイダーが一時的なエラーを返したかリフレッシュメタデータをクリアした永続的なエラーの場合）、レスポンスは **502 `rotation_failed`**。ゲートウェイはローテーション閾値に達した・または超えたキャッシュされた Bearer を返しません。呼び出し元は障害をユーザーに伝えることが期待されます。
 
-The Phase B PoC deliberately does **not** introduce a dedicated leeway
-constant for delegated background access. It reuses the same GitHub
-refresh leeway policy as Phase A (default 5 minutes, overridable via
-`Handler.githubRefreshLeeway()`), so a single tunable governs rotation
-behaviour across both the client request path and the internal API.
-Splitting the leeway out per code path — e.g. a tighter window for
-long-running watch goroutines — is intentionally deferred (see Future
-work).
+Phase B PoC は委任バックグラウンドアクセス専用のリードウィンドウ定数を意図的に導入していません。Phase A と同じ GitHub リフレッシュリードウィンドウポリシー（デフォルト 5 分、`Handler.githubRefreshLeeway()` でオーバーライド可能）を再利用するため、クライアントリクエストパスと内部 API の両方でローテーション動作を 1 つの設定値で制御できます。コードパスごとにリードウィンドウを分割すること（長時間実行の watch goroutine にはより厳しいウィンドウなど）は意図的に延期されています（将来の作業を参照）。
 
-## Deployment and limitations
+## デプロイと制限事項
 
-- **Loopback-only by design.** The listener binds 127.0.0.1 only (IPv4
-  loopback). The request handler additionally accepts `::1` for
-  defense-in-depth, but no IPv6 listener is started in this PoC, so
-  upstream clients must connect over IPv4. The upstream must share the
-  gateway's network namespace.
-  Concretely:
-  - **Same host, bare binary**: works as-is — the upstream connects to
-    `127.0.0.1:<INTERNAL_PORT>`.
-  - **Docker bridge network**: a container running on the default bridge
-    cannot reach the gateway container's loopback. The upstream
-    container must be started with `--network=container:<gateway>` (or
-    the same compose `network_mode: "service:<gateway>"`), or be
-    co-located in the same pod / network namespace.
-  - **Reverse proxies**: do not route the internal API through any
-    public-facing reverse proxy; the loopback re-validation in the
-    handler will reject forwarded requests.
-- **No persistence across gateway restart.** The subject index is
-  in-memory; after a restart, the upstream watch goroutine will get 404
-  for that subject until the user issues a fresh client request that
-  re-seeds the cache. The upstream is expected to treat 404 as
-  "session-not-yet-ready" rather than a hard failure.
-- **Single shared secret.** All upstream consumers share one secret. A
-  compromised upstream effectively has the keys to every cached
-  subject's access token. Per-upstream identities are listed under
-  Future work.
+- **設計上ループバックのみ。** リスナーは 127.0.0.1 のみにバインドします（IPv4 ループバック）。リクエストハンドラーは多層防御として `::1` も追加で受け入れますが、この PoC では IPv6 リスナーは起動しないため、upstream クライアントは IPv4 で接続する必要があります。upstream はゲートウェイのネットワーク名前空間を共有している必要があります。
+  具体的に:
+  - **同一ホスト、ベアバイナリ**: そのまま動作します。upstream は `127.0.0.1:<INTERNAL_PORT>` に接続します。
+  - **Docker ブリッジネットワーク**: デフォルトブリッジで実行されているコンテナはゲートウェイコンテナのループバックに到達できません。upstream コンテナは `--network=container:<gateway>`（または同じ compose の `network_mode: "service:<gateway>"`）で起動するか、同じポッド / ネットワーク名前空間に配置する必要があります。
+  - **リバースプロキシ**: 内部 API を公開向けリバースプロキシ経由でルーティングしないでください。ハンドラーのループバック再検証が転送されたリクエストを拒否します。
+- **ゲートウェイ再起動をまたいで永続化しない。** Subject インデックスはインメモリです。再起動後、upstream の watch goroutine はユーザーが新しいクライアントリクエストを発行してキャッシュを再シードするまでその subject に対して 404 を受け取ります。upstream は 404 を「セッションがまだ準備できていない」ではなくハード障害として扱うことが期待されます。
+- **単一の共有シークレット。** すべての upstream コンシューマーが 1 つのシークレットを共有します。侵害された upstream はすべてのキャッシュされた subject のアクセストークンへのアクセス権を実質的に持ちます。upstream ごとの identity は将来の作業として挙げられています。
 
-## Known limitations (PoC scope)
+## 既知の制限事項（PoC のスコープ）
 
-The Copilot review on PR #76 surfaced two rotation-correctness gaps
-that are **not** addressed in this PoC because each requires a design
-change larger than the PoC envelope. They are accepted as risks because
-the loopback + shared-secret trust boundary keeps the blast radius
-inside the host, and because background watch goroutines tolerate
-transient 401s by re-issuing the delegated call. They are tracked
-under Future work and should be resolved before this API leaves PoC
-status.
+PR #76 での Copilot レビューで、この PoC では対処**しない** 2 つのローテーション正確性のギャップが明らかになりました。ループバック + 共有シークレットのトラスト境界がブラスト半径をホスト内に限定し、バックグラウンド watch goroutine が委任呼び出しを再発行することで一時的な 401 を許容するため、リスクとして受け入れられています。これらは将来の作業として追跡されており、この API が PoC ステータスを脱する前に解決すべきです。
 
-Note that the **temporal** blast radius depends on which token store is
-configured:
+なお、**時間的な**ブラスト半径は設定されているトークンストアによって異なります:
 
-- In-memory store (default for short-lived dev): bounded by
-  `cfg.CacheTTL` (a few minutes).
-- Persistent store (`auth.NewHandler` with a non-nil TokenStore):
-  bounded by `cfg.ExpiresIn` — **90 days by default** — because that
-  value drives both the issued session expiry and the cache TTL
-  applied to saved token records. A dead bearer / old-bearer
-  preference can therefore persist for days unless the operator
-  invalidates the entry manually or the user re-authenticates.
+- インメモリストア（短命の開発環境のデフォルト）: `cfg.CacheTTL`（数分）で制限される。
+- 永続ストア（非 nil の TokenStore を持つ `auth.NewHandler`）: `cfg.ExpiresIn` で制限される（デフォルトで **90 日**）。この値が発行されたセッション有効期限と保存されたトークンレコードに適用されるキャッシュ TTL の両方を決定するためです。したがって、死んだ Bearer / 古い Bearer の優先は、オペレーターが手動でエントリーを無効化するかユーザーが再認証するまで数日間継続する可能性があります。
 
-1. **Dead bearer after permanent rotation failure.** When
-   `runGitHubRotation` hits a *permanent* failure (`bad_refresh_token`
-   or an upstream response that reports success but returns an empty
-   `access_token`) it calls `ClearProviderRefresh` on the token entry.
-   The next `/internal/v1/whoami` call then finds no provider-refresh
-   metadata and falls into the lenient "no rotation contract" branch,
-   which returns the cached bearer with `200`. That bearer is almost
-   certainly already invalid on GitHub's side. Note that *transient*
-   upstream failures (5xx, network errors surfaced as
-   `auth.UpstreamError`) do **not** trigger `ClearProviderRefresh`;
-   they return `502 upstream_failure` with rotation metadata preserved
-   so the next call still takes the rotation path
-   (`action=retry_next`). The dead-bearer pitfall therefore applies
-   only to the permanent-failure subset. **Recovery does not happen
-   by simply re-issuing the delegated call on the next polling cycle**:
-   subsequent calls keep taking the same lenient branch and return the
-   same dead bearer until the underlying token-store/index TTL expires
-   (see the per-store bounds above) or the user re-authenticates.
-   Background callers will observe a `401` from GitHub on every use
-   and the gateway has no in-band recovery path. Proper fix: persist a
-   `RotationFailed` (or equivalent) flag on `TokenRecord` and surface
-   `ErrRotationFailed` on the next call.
+1. **永続的なローテーション失敗後の死んだ Bearer。** `runGitHubRotation` が*永続的な*失敗（`bad_refresh_token`、またはすべてが成功を報告したが空の `access_token` を返す upstream レスポンス）に遭遇した場合、トークンエントリーの `ClearProviderRefresh` を呼び出します。次の `/internal/v1/whoami` 呼び出しはプロバイダーリフレッシュメタデータを見つけられず、キャッシュされた Bearer を `200` で返す寛大な「ローテーションコントラクトなし」ブランチに入ります。その Bearer は GitHub 側では既にほぼ確実に無効です。*一時的な* upstream 障害（5xx、`auth.UpstreamError` として表面化したネットワークエラー）は `ClearProviderRefresh` をトリガー**しない**ことに注意してください。これらはローテーションメタデータを保持したまま `502 upstream_failure` を返すため、次の呼び出しはローテーションパスを取り続けます（`action=retry_next`）。死んだ Bearer の落とし穴は永続的な失敗のサブセットにのみ適用されます。**次のポーリングサイクルで委任呼び出しを再発行するだけでは回復は起こりません**。後続の呼び出しは同じ寛大なブランチを取り続け、基盤のトークンストア/インデックス TTL が期限切れになる（上記の各ストアの境界を参照）かユーザーが再認証するまで同じ死んだ Bearer を返し続けます。バックグラウンド呼び出し元はすべての使用で GitHub から `401` を観察し、ゲートウェイにはインバンドのリカバリパスがありません。適切な修正: `TokenRecord` に `RotationFailed`（または同等の）フラグを永続化し、次の呼び出しで `ErrRotationFailed` を表面化する。
 
-2. **Old/new bearer tie-break in `LatestBySubject`.** On successful
-   rotation, `runGitHubRotation` updates the *old* token entry's
-   `ProviderAccessExpiry` to the same value as the new entry (so a
-   client that keeps presenting the old bearer can still be rotated on
-   the next request). `LatestBySubject` walks the subject-index slice
-   in deterministic insertion order and ranks candidates by strict
-   `.After(...)`; when both entries carry an equal `ProviderAccessExpiry`
-   the strict comparison fails for the later-visited entry, so the
-   *first-inserted* (i.e. older) bearer keeps the lead and is returned
-   — even though only the *new* bearer is actually valid against
-   GitHub's original access token. The hazard is therefore the
-   insertion-order + equal-expiry combination, not map iteration
-   non-determinism. Proper fix: break ties in favour of the newest
-   index entry, or track the currently-active access token explicitly
-   on the rotation chain.
+2. **`LatestBySubject` での古い/新しい Bearer のタイブレーク。** ローテーションが成功すると、`runGitHubRotation` は*古い*トークンエントリーの `ProviderAccessExpiry` を新しいエントリーと同じ値に更新します（古い Bearer を提示し続けるクライアントが次のリクエストでローテーションされるように）。`LatestBySubject` は決定論的な挿入順序で subject インデックスのスライスを走査し、厳密な `.After(...)` で候補をランク付けします。両エントリーが等しい `ProviderAccessExpiry` を持つ場合、後から訪問されるエントリーに対して厳密な比較が失敗するため、*最初に挿入された*（すなわち古い）Bearer がトップに留まり返されます。実際に GitHub のオリジナルアクセストークンに対して有効なのは*新しい* Bearer だけであるにもかかわらずです。したがって、危険なのはマップ反復の非決定論ではなく、挿入順序 + 等しい有効期限の組み合わせです。適切な修正: 最新のインデックスエントリーを優先してタイを解決するか、ローテーションチェーン上の現在アクティブなアクセストークンを明示的に追跡する。
 
-## Future work
+## 将来の作業
 
-- Move trust boundary to Unix socket (Option A) once Linux-only
-  upstream sidecars are the canonical deployment.
-- Add a `POST /internal/v1/token/refresh` that *forces* rotation
-  regardless of expiry (separate semantics from whoami).
-- Split the refresh leeway per code path / make it configurable —
-  long-running watch goroutines may want a tighter window than the
-  Phase A client request path. Today both reuse `Handler.githubRefreshLeeway()`.
-- Persistent encrypted subject index.
-- Per-upstream secret/identity (today: one shared secret for all upstreams).
-- Telemetry / metrics for delegated-access call rate vs rotation rate.
+- Linux 専用の upstream サイドカーが標準的なデプロイになったら Unix ソケット（オプション A）にトラスト境界を移動する。
+- 有効期限に関わらずローテーションを*強制する* `POST /internal/v1/token/refresh` を追加する（whoami とは別のセマンティクス）。
+- コードパスごとにリフレッシュリードウィンドウを分割 / 設定可能にする。長時間実行の watch goroutine は Phase A クライアントリクエストパスより厳しいウィンドウを必要とする場合がある。現在は両方とも `Handler.githubRefreshLeeway()` を再利用。
+- 暗号化された永続的な subject インデックス。
+- upstream ごとのシークレット/identity（現在: すべての upstream で 1 つの共有シークレット）。
+- 委任アクセス呼び出し率 vs ローテーション率のテレメトリー / メトリクス。
 
-## Open questions
+## 未解決の質問
 
-- Should the gateway emit a structured event (audit log) per internal
-  call? Probably yes for production; out of PoC scope.
-- Should `scopes` reflect the actual GitHub-granted scopes rather than
-  the configured request scopes? Requires storing scopes on the
-  `TokenRecord`, which is a separate change.
+- ゲートウェイは内部呼び出しごとに構造化イベント（監査ログ）を出力すべきか？本番環境ではおそらく yes。PoC のスコープ外。
+- `scopes` は設定されたリクエストスコープではなく実際の GitHub が付与したスコープを反映すべきか？`TokenRecord` にスコープを保存する必要があり、これは別の変更です。
