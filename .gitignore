@@ -26,3 +26,10 @@ Thumbs.db
 # coverage artifacts
 *.out
 coverage
+
+# Runtime-generated secrets and token state (never commit)
+gateway.key
+config.yaml
+tokens.json
+tokens.json.refresh.db
+*.db

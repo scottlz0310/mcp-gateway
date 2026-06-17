@@ -1048,7 +1048,7 @@ func TestTokenDeviceGrantSuccess(t *testing.T) {
 	}
 
 	// Simulate /device_callback approving the device.
-	if !h.store.ApproveDevice(internalCode, "gha_success_token", "repo,user", "octocat") {
+	if !h.store.ApproveDevice(internalCode, "gha_success_token", "repo,user", "octocat", "", time.Time{}) {
 		t.Fatal("ApproveDevice failed")
 	}
 
@@ -3298,7 +3298,7 @@ func TestTokenDeviceGrantAlreadyConsumed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateDevice: %v", err)
 	}
-	h.store.ApproveDevice(internalCode, "tok", "repo", "alice")
+	h.store.ApproveDevice(internalCode, "tok", "repo", "alice", "", time.Time{})
 	// Consume once — simulates first poll having already taken the token.
 	h.store.ConsumeApprovedDevice(internalCode)
 
@@ -3414,6 +3414,218 @@ func TestDeviceCallbackValidateTokenError(t *testing.T) {
 
 	if w.Code != http.StatusBadGateway {
 		t.Fatalf("status: got %d, want 502", w.Code)
+	}
+}
+
+// TestCallbackDeviceFlowFallback verifies the fix for the case where GitHub
+// always redirects to /callback (because AuthorizeURL sets redirect_uri=/callback)
+// even during Device Flow. The Callback handler must detect device state and call
+// ApproveDevice directly instead of forwarding the code to /device_callback, which
+// would cause a bad_verification_code error on the second ExchangeCode attempt.
+func TestCallbackDeviceFlowFallback(t *testing.T) {
+	exchangeCalled := 0
+	p := &provider.Mock{
+		ClientIDValue: "test-client-id",
+		ExchangeCodeFunc: func(_ context.Context, code string) (provider.TokenResponse, error) {
+			exchangeCalled++
+			return provider.TokenResponse{AccessToken: "ghu_tok", Scopes: []string{"repo"}}, nil
+		},
+		ValidateFunc: func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Provider: "mock", Subject: "alice"}, nil
+		},
+	}
+	h, err := NewHandler(Config{
+		BaseURL:    "http://localhost:8080",
+		SessionTTL: 10 * time.Minute,
+		CacheTTL:   5 * time.Minute,
+		ExpiresIn:  90 * 24 * time.Hour,
+	}, p)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	// Set up a device session as /activate would.
+	deviceCode, err := h.store.CreateDevice("ABCD-1234", time.Now().Add(10*time.Minute), "mcp")
+	if err != nil {
+		t.Fatalf("CreateDevice: %v", err)
+	}
+	state := generateDeviceState(deviceCode)
+	h.store.SaveSession(state, "http://localhost:8080/device_callback", "", "mcp")
+
+	// Simulate GitHub redirecting to /callback with a device state (not /device_callback).
+	r := httptest.NewRequest(http.MethodGet, "/callback?code=github-code-abc&state="+url.QueryEscape(state), nil)
+	w := httptest.NewRecorder()
+	h.Callback(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: got %d want 200; body: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "Device activated") {
+		t.Errorf("body does not contain 'Device activated': %s", w.Body.String())
+	}
+	// ExchangeCode must be called exactly once (in Callback); DeviceCallback must NOT be called.
+	if exchangeCalled != 1 {
+		t.Errorf("ExchangeCode called %d times, want 1", exchangeCalled)
+	}
+	// Device session must be approved.
+	sess, ok := h.store.GetDevice(deviceCode)
+	if !ok {
+		t.Fatal("GetDevice: session not found")
+	}
+	if sess.AccessToken != "ghu_tok" {
+		t.Errorf("device session token: got %q want %q", sess.AccessToken, "ghu_tok")
+	}
+}
+
+// TestCallbackDeviceStateNoMatchFallsToNormalFlow verifies that a state value
+// prefixed "device:" falls through to the normal Authorization Code Flow when no
+// live device session exists for the embedded code. This guards against legitimate
+// opaque state values (e.g. from an MCP client) being misidentified as device flow.
+func TestCallbackDeviceStateNoMatchFallsToNormalFlow(t *testing.T) {
+	exchangeCalled := 0
+	p := &provider.Mock{
+		ClientIDValue: "test-client-id",
+		ExchangeCodeFunc: func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			exchangeCalled++
+			return provider.TokenResponse{AccessToken: "ghu_tok", Scopes: []string{"repo"}}, nil
+		},
+		ValidateFunc: func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Provider: "mock", Subject: "alice"}, nil
+		},
+	}
+	h, err := NewHandler(Config{
+		BaseURL:    "http://localhost:8080",
+		SessionTTL: 10 * time.Minute,
+		CacheTTL:   5 * time.Minute,
+		ExpiresIn:  90 * 24 * time.Hour,
+	}, p)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	// State looks like a device state but has no matching device session in the store.
+	state := "device:no-such-device-code"
+	h.store.SaveSession(state, "http://localhost:8080/callback", "", "mcp")
+
+	r := httptest.NewRequest(http.MethodGet, "/callback?code=gh-code&state="+url.QueryEscape(state), nil)
+	w := httptest.NewRecorder()
+	h.Callback(w, r)
+
+	// Normal flow: CompleteCallback → redirect to redirect_uri?code=...
+	if w.Code != http.StatusFound {
+		t.Fatalf("status: got %d want 302; body: %s", w.Code, w.Body.String())
+	}
+	if exchangeCalled != 1 {
+		t.Errorf("ExchangeCode called %d times, want 1", exchangeCalled)
+	}
+}
+
+// TestCallbackDeviceFlowFallbackPersistsProviderRefresh verifies that the Callback
+// handler forwards provider refresh metadata (refresh token + access expiry) to
+// ApproveDevice so that the rotation path in tokenDeviceGrant has the data it needs.
+func TestCallbackDeviceFlowFallbackPersistsProviderRefresh(t *testing.T) {
+	p := &provider.Mock{
+		ClientIDValue: "test-client-id",
+		ExchangeCodeFunc: func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{
+				AccessToken:          "ghu_tok",
+				RefreshToken:         "ghr_refresh",
+				AccessTokenExpiresIn: 8 * time.Hour,
+				Scopes:               []string{"repo"},
+			}, nil
+		},
+		ValidateFunc: func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Provider: "mock", Subject: "alice"}, nil
+		},
+	}
+	h, err := NewHandler(Config{
+		BaseURL:              "http://localhost:8080",
+		SessionTTL:           10 * time.Minute,
+		CacheTTL:             5 * time.Minute,
+		ExpiresIn:            90 * 24 * time.Hour,
+		GitHubRefreshEnabled: true,
+	}, p)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	deviceCode, err := h.store.CreateDevice("EFGH-5678", time.Now().Add(10*time.Minute), "mcp")
+	if err != nil {
+		t.Fatalf("CreateDevice: %v", err)
+	}
+	state := generateDeviceState(deviceCode)
+	h.store.SaveSession(state, "http://localhost:8080/device_callback", "", "mcp")
+
+	r := httptest.NewRequest(http.MethodGet, "/callback?code=gh-code&state="+url.QueryEscape(state), nil)
+	w := httptest.NewRecorder()
+	h.Callback(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: got %d want 200; body: %s", w.Code, w.Body.String())
+	}
+	sess, ok := h.store.GetDevice(deviceCode)
+	if !ok {
+		t.Fatal("GetDevice: session not found after Callback")
+	}
+	if sess.ProviderRefreshToken != "ghr_refresh" {
+		t.Errorf("ProviderRefreshToken: got %q want %q", sess.ProviderRefreshToken, "ghr_refresh")
+	}
+	if sess.ProviderAccessExpiry.IsZero() {
+		t.Error("ProviderAccessExpiry should not be zero")
+	}
+}
+
+// TestTokenDeviceGrantPersistsProviderRefresh verifies that tokenDeviceGrant calls
+// persistProviderRefresh after CacheToken so the rotation path (#140) fires
+// correctly for device-flow-issued ghu_ tokens.
+func TestTokenDeviceGrantPersistsProviderRefresh(t *testing.T) {
+	p := &provider.Mock{
+		ClientIDValue: "test-client-id",
+		ExchangeCodeFunc: func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{AccessToken: "ghu_provider_tok"}, nil
+		},
+		ValidateFunc: func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Provider: "mock", Subject: "alice"}, nil
+		},
+	}
+	h, err := NewHandler(Config{
+		BaseURL:              "http://localhost:8080",
+		SessionTTL:           10 * time.Minute,
+		CacheTTL:             5 * time.Minute,
+		ExpiresIn:            90 * 24 * time.Hour,
+		GitHubRefreshEnabled: true,
+	}, p)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	expiry := time.Now().Add(8 * time.Hour).Truncate(time.Second)
+	deviceCode, err := h.store.CreateDevice("IJKL-9999", time.Now().Add(10*time.Minute), "mcp")
+	if err != nil {
+		t.Fatalf("CreateDevice: %v", err)
+	}
+	if !h.store.ApproveDevice(deviceCode, "ghu_provider_tok", "repo", "alice", "ghr_stored", expiry) {
+		t.Fatal("ApproveDevice failed")
+	}
+
+	body := fmt.Sprintf("grant_type=urn:ietf%%3Aparams%%3Aoauth%%3Agrant-type%%3Adevice_code&device_code=%s", deviceCode)
+	r := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	h.Token(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("token exchange: got %d want 200; body: %s", w.Code, w.Body.String())
+	}
+	_, rec, ok := h.store.LatestBySubject("alice")
+	if !ok {
+		t.Fatal("LatestBySubject: no record found after token exchange")
+	}
+	if rec.ProviderRefreshToken != "ghr_stored" {
+		t.Errorf("ProviderRefreshToken: got %q want %q", rec.ProviderRefreshToken, "ghr_stored")
+	}
+	if rec.ProviderAccessExpiry.IsZero() {
+		t.Error("ProviderAccessExpiry should not be zero after token exchange")
 	}
 }
 
