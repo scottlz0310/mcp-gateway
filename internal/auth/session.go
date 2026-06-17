@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"strings"
 	"sync"
@@ -914,6 +915,15 @@ func verifyPKCE(verifier, challenge string) error {
 	got := base64.RawURLEncoding.EncodeToString(h[:])
 	if got != challenge {
 		return fmt.Errorf("PKCE verification failed")
+	}
+	return nil
+}
+
+// Close releases resources held by the store. If the RefreshTokenStore
+// implements io.Closer (e.g. the SQLite backend), its Close method is called.
+func (s *Store) Close() error {
+	if c, ok := s.refreshStore.(io.Closer); ok {
+		return c.Close()
 	}
 	return nil
 }

@@ -1389,9 +1389,14 @@ func TestHandlerRefreshTokenSurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateRefreshToken: %v", err)
 	}
+	// Close h1 before reopening the same SQLite file.
+	if err := h1.Close(); err != nil {
+		t.Fatalf("h1.Close: %v", err)
+	}
 
 	// Re-instantiate handler (simulating restart) with the same store path.
 	h2 := newHandlerWithPath(t, storePath)
+	t.Cleanup(func() { _ = h2.Close() })
 	accessToken, err := h2.store.PeekRefreshToken(rt)
 	if err != nil {
 		t.Fatalf("PeekRefreshToken after restart: %v", err)
@@ -1400,10 +1405,10 @@ func TestHandlerRefreshTokenSurvivesRestart(t *testing.T) {
 		t.Errorf("access token after restart: got %q, want %q", accessToken, "gha_access_token")
 	}
 
-	// Verify the .refresh sibling file was created alongside the configured path.
-	refreshPath := storePath + ".refresh"
+	// Verify the .refresh.db sibling file was created alongside the configured path.
+	refreshPath := storePath + ".refresh.db"
 	if _, statErr := os.Stat(refreshPath); statErr != nil {
-		t.Errorf(".refresh sibling file not created: %v", statErr)
+		t.Errorf(".refresh.db sibling file not created: %v", statErr)
 	}
 }
 
@@ -1497,8 +1502,8 @@ func TestTokenRefreshDeleteFailed503(t *testing.T) {
 func TestNewHandlerRefreshStoreInitError(t *testing.T) {
 	dir := t.TempDir()
 	storePath := filepath.Join(dir, "tokens.json")
-	// Pre-create a directory at the .refresh path so NewFileRefreshTokenStore fails.
-	refreshPath := storePath + ".refresh"
+	// Pre-create a directory at the .refresh.db path so NewSQLiteRefreshTokenStore fails.
+	refreshPath := storePath + ".refresh.db"
 	if err := os.Mkdir(refreshPath, 0o755); err != nil {
 		t.Fatalf("Mkdir: %v", err)
 	}
