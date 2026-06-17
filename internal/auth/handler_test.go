@@ -252,11 +252,12 @@ func TestAuthorizeCustomAllowedRedirectHosts(t *testing.T) {
 	p := provider.NewGitHub(provider.GitHubConfig{
 		ClientID:     "test-client-id",
 		ClientSecret: "test-client-secret",
-		RedirectURI:  "http://localhost:8080/callback",
+		RedirectURI:  "http://gateway.example.com:8080/callback",
 		Scopes:       "repo,user",
 	})
+	// Use a non-localhost BaseURL to avoid it being automatically added to the default list.
 	h, err := NewHandler(Config{
-		BaseURL:              "http://localhost:8080",
+		BaseURL:              "http://gateway.example.com:8080",
 		SessionTTL:           10 * time.Minute,
 		CacheTTL:             5 * time.Minute,
 		ExpiresIn:            90 * 24 * time.Hour,
@@ -266,7 +267,7 @@ func TestAuthorizeCustomAllowedRedirectHosts(t *testing.T) {
 		t.Fatalf("failed to create handler: %v", err)
 	}
 
-	// custom-allowed.com should be allowed
+	// custom-allowed.com should be allowed (explicitly configured)
 	r := httptest.NewRequest(http.MethodGet,
 		"/authorize?response_type=code&state=s&redirect_uri=https://custom-allowed.com/cb", nil)
 	w := httptest.NewRecorder()
@@ -275,7 +276,16 @@ func TestAuthorizeCustomAllowedRedirectHosts(t *testing.T) {
 		t.Errorf("custom-allowed.com should be allowed: got %d, want %d", w.Code, http.StatusFound)
 	}
 
-	// localhost should be disallowed since it was overridden
+	// gateway.example.com is the BaseURL host — automatically added so /device_callback works.
+	r3 := httptest.NewRequest(http.MethodGet,
+		"/authorize?response_type=code&state=s&redirect_uri=http://gateway.example.com:8080/device_callback", nil)
+	w3 := httptest.NewRecorder()
+	h.Authorize(w3, r3)
+	if w3.Code != http.StatusFound {
+		t.Errorf("BaseURL host should be auto-allowed: got %d, want %d", w3.Code, http.StatusFound)
+	}
+
+	// localhost should be disallowed since it was overridden (not in AllowedRedirectHosts, not BaseURL host)
 	r2 := httptest.NewRequest(http.MethodGet,
 		"/authorize?response_type=code&state=s&redirect_uri=https://localhost/cb", nil)
 	w2 := httptest.NewRecorder()
@@ -787,34 +797,7 @@ func TestDiscoveryIncludesDeviceEndpoints(t *testing.T) {
 }
 
 func TestDeviceAuthorizeSuccess(t *testing.T) {
-	// Mock GitHub's device code endpoint.
-	ghServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/login/device/code" {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprint(w, `{
-			"device_code": "gh-dev-code-xyz",
-			"user_code": "WDJB-MJHT",
-			"verification_uri": "https://github.com/login/device",
-			"verification_uri_complete": "https://github.com/login/device?user_code=WDJB-MJHT",
-			"expires_in": 900,
-			"interval": 5
-		}`)
-	}))
-	defer ghServer.Close()
-
-	origClient := githubClient
-	githubClient = ghServer.Client()
-	defer func() { githubClient = origClient }()
-
 	h := newTestHandler(t)
-
-	// Override the GitHub device endpoint URL by monkey-patching startGitHubDeviceFlow
-	// via a local httptest transport. We can't easily override the URL, so instead we
-	// swap the transport to always route to the test server.
-	githubClient.Transport = rewriteHostTransport{target: ghServer.URL, inner: ghServer.Client().Transport}
 
 	r := httptest.NewRequest(http.MethodPost, "/device_authorization",
 		strings.NewReader("scope=repo"))
@@ -830,18 +813,25 @@ func TestDeviceAuthorizeSuccess(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("decoding response: %v", err)
 	}
-	if resp["user_code"] != "WDJB-MJHT" {
-		t.Errorf("user_code: got %v", resp["user_code"])
+	userCode, _ := resp["user_code"].(string)
+	if userCode == "" {
+		t.Error("user_code must be non-empty")
 	}
-	if resp["verification_uri"] != "https://github.com/login/device" {
+	if len(userCode) != 9 || userCode[4] != '-' {
+		t.Errorf("user_code must be XXXX-XXXX format, got %q", userCode)
+	}
+	if resp["verification_uri"] != "http://localhost:8080/activate" {
 		t.Errorf("verification_uri: got %v", resp["verification_uri"])
 	}
-	// device_code must be a gateway-internal code, not the GitHub one.
-	if resp["device_code"] == "gh-dev-code-xyz" {
-		t.Error("device_code must be gateway-internal, not the raw GitHub device_code")
+	wantComplete := "http://localhost:8080/activate?user_code=" + userCode
+	if resp["verification_uri_complete"] != wantComplete {
+		t.Errorf("verification_uri_complete: got %v, want %v", resp["verification_uri_complete"], wantComplete)
 	}
 	if resp["device_code"] == nil || resp["device_code"] == "" {
 		t.Error("device_code must be non-empty")
+	}
+	if resp["interval"] != float64(5) {
+		t.Errorf("interval: got %v, want 5", resp["interval"])
 	}
 }
 
@@ -870,87 +860,105 @@ func TestDeviceAuthorizeMalformedBodyAudited(t *testing.T) {
 	}
 }
 
-func TestGitHubDeviceHTTPErrorRedactsResponseBody(t *testing.T) {
-	cases := []struct {
-		name          string
-		status        int
-		wantTransient bool
-	}{
-		{name: "provider rejection", status: http.StatusBadRequest},
-		{name: "provider unavailable", status: http.StatusServiceUnavailable, wantTransient: true},
+func TestActivateFormRendered(t *testing.T) {
+	h := newTestHandler(t)
+
+	r := httptest.NewRequest(http.MethodGet, "/activate", nil)
+	w := httptest.NewRecorder()
+	h.Activate(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "user_code") {
+		t.Error("activate form should contain user_code input")
+	}
+}
+
+func TestActivateFormPrefill(t *testing.T) {
+	h := newTestHandler(t)
+
+	r := httptest.NewRequest(http.MethodGet, "/activate?user_code=ABCD-1234", nil)
+	w := httptest.NewRecorder()
+	h.Activate(w, r)
+
+	if !strings.Contains(w.Body.String(), "ABCD-1234") {
+		t.Error("activate form should prefill user_code from query parameter")
+	}
+}
+
+func TestActivateSubmitInvalidCode(t *testing.T) {
+	h := newTestHandler(t)
+
+	r := httptest.NewRequest(http.MethodPost, "/activate",
+		strings.NewReader("user_code=XXXX-9999"))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	h.ActivateSubmit(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d, want 400", w.Code)
+	}
+}
+
+func TestActivateSubmitValidCode(t *testing.T) {
+	h := newTestHandler(t)
+
+	expiresAt := time.Now().Add(15 * time.Minute)
+	internalCode, err := h.store.CreateDevice("ABCD-5678", expiresAt, "mcp-gateway")
+	if err != nil {
+		t.Fatalf("CreateDevice: %v", err)
 	}
 
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			ghServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				w.WriteHeader(tc.status)
-				_, _ = fmt.Fprint(w, `{"error":"invalid_grant","error_description":"secret-provider-response"}`)
-			}))
-			defer ghServer.Close()
+	r := httptest.NewRequest(http.MethodPost, "/activate",
+		strings.NewReader("user_code=ABCD-5678"))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	h.ActivateSubmit(w, r)
 
-			originalClient := githubClient
-			githubClient = &http.Client{
-				Transport: rewriteHostTransport{target: ghServer.URL, inner: ghServer.Client().Transport},
-			}
-			defer func() { githubClient = originalClient }()
+	if w.Code != http.StatusFound {
+		t.Fatalf("status: got %d, want 302; body: %s", w.Code, w.Body.String())
+	}
+	loc := w.Header().Get("Location")
+	if !strings.Contains(loc, "/authorize") {
+		t.Errorf("should redirect to /authorize, got %q", loc)
+	}
+	wantState := url.QueryEscape("device:" + internalCode)
+	if !strings.Contains(loc, "state="+wantState) {
+		t.Errorf("state should encode device code, got %q", loc)
+	}
+}
 
-			h := newTestHandler(t)
-			operations := []struct {
-				name string
-				call func() error
-			}{
-				{
-					name: "device authorization",
-					call: func() error {
-						_, err := h.startGitHubDeviceFlow(context.Background(), "repo")
-						return err
-					},
-				},
-				{
-					name: "device token",
-					call: func() error {
-						_, err := h.pollGitHubDeviceToken(context.Background(), "device-code")
-						return err
-					},
-				},
-			}
-			for _, operation := range operations {
-				t.Run(operation.name, func(t *testing.T) {
-					err := operation.call()
-					if err == nil {
-						t.Fatal("expected error")
-					}
-					if strings.Contains(err.Error(), "secret-provider-response") {
-						t.Fatalf("error leaked provider response body: %v", err)
-					}
-					code, status, transient := provider.ErrorDetails(err)
-					if code != "invalid_grant" || status != tc.status || transient != tc.wantTransient {
-						t.Errorf("ErrorDetails: got (%q, %d, %v), want (%q, %d, %v)",
-							code, status, transient, "invalid_grant", tc.status, tc.wantTransient)
-					}
-				})
-			}
-		})
+func TestDeviceCallbackInvalidState(t *testing.T) {
+	h := newTestHandler(t)
+
+	r := httptest.NewRequest(http.MethodGet, "/device_callback?code=abc&state=invalid-state", nil)
+	w := httptest.NewRecorder()
+	h.DeviceCallback(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d, want 400", w.Code)
+	}
+}
+
+func TestDeviceCallbackMissingParams(t *testing.T) {
+	h := newTestHandler(t)
+
+	r := httptest.NewRequest(http.MethodGet, "/device_callback", nil)
+	w := httptest.NewRecorder()
+	h.DeviceCallback(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d, want 400", w.Code)
 	}
 }
 
 func TestTokenDeviceGrantPending(t *testing.T) {
-	// Mock GitHub's token endpoint returning authorization_pending.
-	ghServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprint(w, `{"error":"authorization_pending"}`)
-	}))
-	defer ghServer.Close()
-
-	originalTransport := githubClient.Transport
-	defer func() { githubClient.Transport = originalTransport }()
-	githubClient.Transport = rewriteHostTransport{target: ghServer.URL, inner: ghServer.Client().Transport}
-
 	h := newTestHandler(t)
 
-	// Create a pending device session directly in the store.
 	expiresAt := time.Now().Add(15 * time.Minute)
-	internalCode, err := h.store.CreateDevice("gh-dev-code", "WDJB-MJHT", "https://github.com/login/device", expiresAt, 5, "http://localhost:8080")
+	internalCode, err := h.store.CreateDevice("WDJB-MJHT", expiresAt, "mcp-gateway")
 	if err != nil {
 		t.Fatalf("creating device session: %v", err)
 	}
@@ -974,90 +982,46 @@ func TestTokenDeviceGrantPending(t *testing.T) {
 	}
 }
 
-func TestTokenDeviceGrantConcurrentPollingDoesNotSlowDown(t *testing.T) {
-	var upstreamCalls int32
-	ghServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&upstreamCalls, 1)
-		time.Sleep(50 * time.Millisecond)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprint(w, `{"error":"authorization_pending"}`)
-	}))
-	defer ghServer.Close()
-
-	originalTransport := githubClient.Transport
-	defer func() { githubClient.Transport = originalTransport }()
-	githubClient.Transport = rewriteHostTransport{target: ghServer.URL, inner: ghServer.Client().Transport}
-
+func TestTokenDeviceGrantSlowDown(t *testing.T) {
 	h := newTestHandler(t)
 
 	expiresAt := time.Now().Add(15 * time.Minute)
-	internalCode, err := h.store.CreateDevice("gh-dev-code", "WDJB-MJHT", "https://github.com/login/device", expiresAt, 5, "http://localhost:8080/mcp")
+	internalCode, err := h.store.CreateDevice("ABCD-1234", expiresAt, "mcp-gateway")
 	if err != nil {
 		t.Fatalf("creating device session: %v", err)
 	}
 
-	const requests = 5
-	start := make(chan struct{})
-	results := make(chan map[string]any, requests)
-	var wg sync.WaitGroup
-
-	for range requests {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			<-start
-			body := fmt.Sprintf("grant_type=urn:ietf%%3Aparams%%3Aoauth%%3Agrant-type%%3Adevice_code&device_code=%s", internalCode)
-			r := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
-			r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-			w := httptest.NewRecorder()
-
-			h.Token(w, r)
-
-			if w.Code != http.StatusBadRequest {
-				t.Errorf("status: got %d, want 400; body: %s", w.Code, w.Body.String())
-			}
-			var resp map[string]any
-			if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-				t.Errorf("decoding response: %v", err)
-				return
-			}
-			results <- resp
-		}()
-	}
-
-	close(start)
-	wg.Wait()
-	close(results)
-
-	var slowDown int
-	for resp := range results {
-		if resp["error"] == "slow_down" {
-			slowDown++
+	poll := func() map[string]any {
+		body := fmt.Sprintf("grant_type=urn:ietf%%3Aparams%%3Aoauth%%3Agrant-type%%3Adevice_code&device_code=%s", internalCode)
+		r := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		w := httptest.NewRecorder()
+		h.Token(w, r)
+		var resp map[string]any
+		if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+			t.Fatalf("decoding response: %v", err)
 		}
+		return resp
 	}
-	if slowDown != 0 {
-		t.Fatalf("expected no slow_down responses, got %d", slowDown)
+
+	// First poll: no interval yet → authorization_pending.
+	first := poll()
+	if first["error"] != "authorization_pending" {
+		t.Errorf("first poll: want authorization_pending, got %v", first["error"])
 	}
-	if got := atomic.LoadInt32(&upstreamCalls); got != 1 {
-		t.Fatalf("expected exactly one upstream poll, got %d", got)
+	// Second poll immediately: interval not elapsed → slow_down.
+	second := poll()
+	if second["error"] != "slow_down" {
+		t.Errorf("second poll (too fast): want slow_down, got %v", second["error"])
 	}
 }
 
 func TestTokenDeviceGrantSuccess(t *testing.T) {
-	// Mock GitHub's token endpoint returning a successful access token.
 	ghServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/user") {
-			_, _ = fmt.Fprint(w, `{"login":"octocat","name":"The Octocat"}`)
-			return
-		}
-		_, _ = fmt.Fprint(w, `{"access_token":"gha_success_token","scope":"repo,user","token_type":"bearer"}`)
+		_, _ = fmt.Fprint(w, `{"login":"octocat","name":"The Octocat"}`)
 	}))
 	defer ghServer.Close()
-
-	originalTransport := githubClient.Transport
-	defer func() { githubClient.Transport = originalTransport }()
-	githubClient.Transport = rewriteHostTransport{target: ghServer.URL, inner: ghServer.Client().Transport}
 
 	p := provider.NewGitHub(provider.GitHubConfig{
 		ClientID:     "test-client-id",
@@ -1065,7 +1029,7 @@ func TestTokenDeviceGrantSuccess(t *testing.T) {
 		RedirectURI:  "http://localhost:8080/callback",
 		Scopes:       "repo,user",
 		UserAPI:      ghServer.URL + "/user",
-		TokenURL:     ghServer.URL + "/login/oauth/access_token",
+		HTTPClient:   ghServer.Client(),
 	})
 	h, err := NewHandler(Config{
 		BaseURL:    "http://localhost:8080",
@@ -1078,9 +1042,14 @@ func TestTokenDeviceGrantSuccess(t *testing.T) {
 	}
 
 	expiresAt := time.Now().Add(15 * time.Minute)
-	internalCode, err := h.store.CreateDevice("gh-dev-code", "WDJB-MJHT", "https://github.com/login/device", expiresAt, 5, "http://localhost:8080")
+	internalCode, err := h.store.CreateDevice("WDJB-MJHT", expiresAt, "mcp-gateway")
 	if err != nil {
 		t.Fatalf("creating device session: %v", err)
+	}
+
+	// Simulate /device_callback approving the device.
+	if !h.store.ApproveDevice(internalCode, "gha_success_token", "repo,user", "octocat") {
+		t.Fatal("ApproveDevice failed")
 	}
 
 	body := fmt.Sprintf("grant_type=urn:ietf%%3Aparams%%3Aoauth%%3Agrant-type%%3Adevice_code&device_code=%s", internalCode)
@@ -1410,28 +1379,6 @@ func TestHandlerRefreshTokenSurvivesRestart(t *testing.T) {
 	if _, statErr := os.Stat(refreshPath); statErr != nil {
 		t.Errorf(".refresh.db sibling file not created: %v", statErr)
 	}
-}
-
-// rewriteHostTransport rewrites the target host of outbound HTTP requests,
-// allowing tests to intercept external HTTP calls.
-type rewriteHostTransport struct {
-	target string
-	inner  http.RoundTripper
-}
-
-func (t rewriteHostTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	parsed, err := url.Parse(t.target)
-	if err != nil {
-		return nil, err
-	}
-	req = req.Clone(req.Context())
-	req.URL.Scheme = parsed.Scheme
-	req.URL.Host = parsed.Host
-	req.Host = parsed.Host
-	if t.inner != nil {
-		return t.inner.RoundTrip(req)
-	}
-	return http.DefaultTransport.RoundTrip(req)
 }
 
 // ── error-injection helpers ───────────────────────────────────────────────────

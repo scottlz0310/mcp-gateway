@@ -3,7 +3,6 @@ package auth
 import (
 	"fmt"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
@@ -134,7 +133,7 @@ func TestStoreDeviceLifecycle(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	expiresAt := time.Now().Add(15 * time.Minute)
 
-	code, err := s.CreateDevice("gh-dev-code", "ABCD-1234", "https://github.com/login/device", expiresAt, 5, "https://gw.example/mcp")
+	code, err := s.CreateDevice("ABCD-1234", expiresAt, "mcp-server")
 	if err != nil {
 		t.Fatalf("CreateDevice: %v", err)
 	}
@@ -152,16 +151,23 @@ func TestStoreDeviceLifecycle(t *testing.T) {
 	if d.Status != devicePending {
 		t.Errorf("status: got %v, want pending", d.Status)
 	}
-	if d.Audience != "https://gw.example/mcp" {
+	if d.Audience != "mcp-server" {
 		t.Errorf("audience: got %q", d.Audience)
 	}
 
-	consumed, ok := s.AuthorizeAndConsumeDevice(code, "gha_token", "repo,user")
+	// Approve then consume.
+	if !s.ApproveDevice(code, "gha_token", "repo,user", "alice") {
+		t.Fatal("ApproveDevice should succeed")
+	}
+	consumed, ok := s.ConsumeApprovedDevice(code)
 	if !ok {
-		t.Fatal("expected AuthorizeAndConsumeDevice to succeed")
+		t.Fatal("expected ConsumeApprovedDevice to succeed")
 	}
 	if consumed.AccessToken != "gha_token" {
 		t.Errorf("access_token: got %q", consumed.AccessToken)
+	}
+	if consumed.Subject != "alice" {
+		t.Errorf("subject: got %q", consumed.Subject)
 	}
 	if _, ok := s.GetDevice(code); ok {
 		t.Error("expected device session to be removed after consuming")
@@ -172,7 +178,7 @@ func TestStoreDeviceDeny(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	expiresAt := time.Now().Add(15 * time.Minute)
 
-	code, err := s.CreateDevice("gh-dev", "WXYZ-5678", "https://github.com/login/device", expiresAt, 5, "https://gw.example/mcp")
+	code, err := s.CreateDevice("WXYZ-5678", expiresAt, "mcp-gateway")
 	if err != nil {
 		t.Fatalf("CreateDevice: %v", err)
 	}
@@ -495,113 +501,114 @@ func TestReserveRefreshTokenFamilyIDPropagates(t *testing.T) {
 	}
 }
 
-func TestAcquireDevicePollingSerializes(t *testing.T) {
+func TestCheckAndAdvancePollIntervalEnforcesInterval(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	expiresAt := time.Now().Add(15 * time.Minute)
 
-	code, err := s.CreateDevice("gh-dev", "ABCD-9999", "https://github.com/login/device", expiresAt, 0, "https://gw.example/mcp")
+	code, err := s.CreateDevice("IJKL-0002", expiresAt, "mcp-gateway")
 	if err != nil {
 		t.Fatalf("CreateDevice: %v", err)
 	}
 
-	// First acquire must succeed.
-	if !s.AcquireDevicePolling(code) {
-		t.Fatal("expected AcquireDevicePolling to return true for first caller")
+	// First check should succeed (no nextPollAfter set yet).
+	slowDown, ok := s.CheckAndAdvancePollInterval(code)
+	if !ok {
+		t.Fatal("expected ok=true for existing session")
 	}
-	// While the first is held, concurrent callers must be rejected.
-	if s.AcquireDevicePolling(code) {
-		t.Fatal("expected AcquireDevicePolling to return false when in-flight")
+	if slowDown {
+		t.Fatal("first check should not be slow_down")
 	}
 
-	s.ReleaseDevicePolling(code)
-
-	// After release, next caller must succeed again.
-	if !s.AcquireDevicePolling(code) {
-		t.Fatal("expected AcquireDevicePolling to return true after release")
+	// Second check immediately: interval not elapsed → slow_down.
+	slowDown2, ok2 := s.CheckAndAdvancePollInterval(code)
+	if !ok2 {
+		t.Fatal("expected ok=true for existing session")
 	}
-	s.ReleaseDevicePolling(code)
+	if !slowDown2 {
+		t.Fatal("expected slow_down=true on second immediate check")
+	}
 }
 
-func TestAcquireDevicePollingConcurrent(t *testing.T) {
+func TestCheckAndAdvancePollIntervalUnknownCode(t *testing.T) {
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
+	_, ok := s.CheckAndAdvancePollInterval("no-such-code")
+	if ok {
+		t.Fatal("expected ok=false for unknown code")
+	}
+}
+
+func TestIncreaseDeviceInterval(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	expiresAt := time.Now().Add(15 * time.Minute)
 
-	code, err := s.CreateDevice("gh-dev-concurrent", "EFGH-0001", "https://github.com/login/device", expiresAt, 0, "https://gw.example/mcp")
+	code, err := s.CreateDevice("MNOP-3333", expiresAt, "mcp-gateway")
 	if err != nil {
 		t.Fatalf("CreateDevice: %v", err)
 	}
 
-	const goroutines = 20
-	start := make(chan struct{})
-	release := make(chan struct{})
-	wins := make(chan bool, goroutines)
-	var wg sync.WaitGroup
+	d, _ := s.GetDevice(code)
+	before := d.Interval
+	s.IncreaseDeviceInterval(code)
+	d, _ = s.GetDevice(code)
+	if d.Interval != before+5 {
+		t.Errorf("interval after increase: got %d, want %d", d.Interval, before+5)
+	}
+}
 
-	for range goroutines {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			<-start // wait for all goroutines to be ready before racing
-			acquired := s.AcquireDevicePolling(code)
-			wins <- acquired
-			if acquired {
-				<-release // hold the flag until the test says to release
-				s.ReleaseDevicePolling(code)
-			}
-		}()
+func TestFindDeviceByUserCode(t *testing.T) {
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
+	expiresAt := time.Now().Add(15 * time.Minute)
+
+	_, err := s.CreateDevice("ABCD-5678", expiresAt, "mcp-gateway")
+	if err != nil {
+		t.Fatalf("CreateDevice: %v", err)
 	}
 
-	close(start) // release all goroutines simultaneously
-
-	var acquired int
-	for range goroutines {
-		if <-wins {
-			acquired++
+	cases := []struct {
+		input string
+		found bool
+	}{
+		{"ABCD-5678", true},
+		{"abcd-5678", true},  // case-insensitive
+		{"ABCD5678", true},   // hyphen-tolerant
+		{"abcd5678", true},   // both
+		{"WXYZ-0000", false}, // wrong code
+	}
+	for _, tc := range cases {
+		d, ok := s.FindDeviceByUserCode(tc.input)
+		if ok != tc.found {
+			t.Errorf("FindDeviceByUserCode(%q): got ok=%v, want %v", tc.input, ok, tc.found)
+		}
+		if ok && d.UserCode != "ABCD-5678" {
+			t.Errorf("FindDeviceByUserCode(%q): got user_code=%q", tc.input, d.UserCode)
 		}
 	}
-
-	if acquired != 1 {
-		t.Fatalf("expected exactly 1 successful acquire during contention, got %d/%d", acquired, goroutines)
-	}
-
-	close(release) // allow the winner to release
-	wg.Wait()      // ensure winner goroutine has called ReleaseDevicePolling before proceeding
-
-	// After the winner releases, the next caller must be able to acquire again.
-	if !s.AcquireDevicePolling(code) {
-		t.Fatal("expected AcquireDevicePolling to succeed after contention winner released")
-	}
-	s.ReleaseDevicePolling(code)
 }
 
-func TestAcquireDevicePollingUnknownCode(t *testing.T) {
-	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
-	if s.AcquireDevicePolling("no-such-code") {
-		t.Fatal("expected AcquireDevicePolling to return false for unknown code")
-	}
-}
-
-func TestAcquireDevicePollingEnforcesInterval(t *testing.T) {
+func TestConsumeApprovedDevicePreventsDoubleIssuance(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	expiresAt := time.Now().Add(15 * time.Minute)
 
-	code, err := s.CreateDevice("gh-dev-interval", "IJKL-0002", "https://github.com/login/device", expiresAt, 5, "https://gw.example/mcp")
+	code, err := s.CreateDevice("QRST-1111", expiresAt, "mcp-gateway")
 	if err != nil {
 		t.Fatalf("CreateDevice: %v", err)
 	}
 
-	if !s.AcquireDevicePolling(code) {
-		t.Fatal("expected first AcquireDevicePolling to succeed")
+	// Not yet approved: ConsumeApprovedDevice should return false.
+	if _, ok := s.ConsumeApprovedDevice(code); ok {
+		t.Fatal("ConsumeApprovedDevice must return false for pending session")
 	}
-	s.ReleaseDevicePolling(code)
 
-	if s.AcquireDevicePolling(code) {
-		t.Fatal("expected second AcquireDevicePolling inside interval to be rejected")
+	if !s.ApproveDevice(code, "tok", "scope", "user") {
+		t.Fatal("ApproveDevice failed")
 	}
-}
 
-func TestReleaseDevicePollingNoOp(t *testing.T) {
-	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
-	// Must not panic when session does not exist.
-	s.ReleaseDevicePolling("no-such-code")
+	// First consume succeeds.
+	if _, ok := s.ConsumeApprovedDevice(code); !ok {
+		t.Fatal("first ConsumeApprovedDevice must succeed")
+	}
+	// Second consume must fail (already deleted).
+	if _, ok := s.ConsumeApprovedDevice(code); ok {
+		t.Fatal("second ConsumeApprovedDevice must return false")
+	}
 }

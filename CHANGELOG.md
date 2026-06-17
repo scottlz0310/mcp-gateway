@@ -9,6 +9,16 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Device Authorization Grant (RFC 8628) fully implemented as gateway-native flow ([#130](https://github.com/scottlz0310/mcp-gateway/issues/130))
+  - `POST /device_authorization` now generates a gateway-own `device_code` and `user_code` (XXXX-XXXX format); no longer delegates to GitHub's device flow
+  - `GET /activate` renders a user_code entry form; `POST /activate` validates the code and redirects to the standard `/authorize` flow
+  - `GET /device_callback` receives the provider callback, exchanges the code, and marks the device session as approved
+  - Client polling (`POST /token?grant_type=device_code`) retrieves the approved token atomically (double-issuance prevented via `ConsumeApprovedDevice`)
+  - `slow_down` enforced via `CheckAndAdvancePollInterval`; interval increased by 5 s on each slow-down (`IncreaseDeviceInterval`)
+  - `verification_uri_complete` pre-fills the user_code in the `/activate` form
+  - BaseURL hostname automatically added to `AllowedRedirectHosts` so `/device_callback` can be used as `redirect_uri`
+  - `builtin` mode issues gateway-signed JWT; `github` mode returns GitHub opaque token (consistent with `/authorize` flow)
+  - Removed GitHub-delegated device flow: `startGitHubDeviceFlow`, `pollGitHubDeviceToken`, `githubDeviceHTTPError`, `githubRateLimited`, `githubClient`
 - Separate `aud` claim by route via `required_audience` config ([#129](https://github.com/scottlz0310/mcp-gateway/issues/129))
   - `RouteConfig.required_audience` / `Route.RequiredAudience` field: per-route JWT audience (e.g. `"mcp-server"`, `"external-mcp"`); defaults to `"mcp-gateway"`
   - `/token` and device-authorize endpoints accept `resource=<route-name>` (RFC 8707); gateway resolves audience from route config and stamps it in issued access tokens

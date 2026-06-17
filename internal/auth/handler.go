@@ -44,10 +44,6 @@ func (e audienceCheckError) Error() string         { return e.inner.Error() }
 func (e audienceCheckError) Unwrap() error         { return e.inner }
 func (e audienceCheckError) IsAudienceError() bool { return true }
 
-// githubClient is the HTTP client used for GitHub Device Flow API calls.
-// Exposed as a package-level var so tests can substitute a test server transport.
-var githubClient = &http.Client{Timeout: 15 * time.Second}
-
 // Config holds OAuth façade configuration. Provider-specific fields (client
 // credentials, scope) live on the Provider implementation; this struct only
 // carries gateway-wide settings.
@@ -143,6 +139,12 @@ func NewHandler(cfg Config, p provider.Provider, opts ...HandlerOption) (*Handle
 	cfg.BaseURL = strings.TrimRight(cfg.BaseURL, "/")
 	if len(cfg.AllowedRedirectHosts) == 0 {
 		cfg.AllowedRedirectHosts = []string{"localhost", "127.0.0.1", "vscode.dev", "antigravity.google"}
+	}
+	// Always allow the gateway's own hostname so /device_callback can be used as redirect_uri.
+	if parsed, parseErr := url.Parse(cfg.BaseURL); parseErr == nil {
+		if h := parsed.Hostname(); h != "" && !slices.Contains(cfg.AllowedRedirectHosts, h) {
+			cfg.AllowedRedirectHosts = append(cfg.AllowedRedirectHosts, h)
+		}
 	}
 	if len(cfg.AllowedRedirectSchemes) == 0 {
 		cfg.AllowedRedirectSchemes = []string{"antigravity", "antigravity-insiders"}
@@ -619,104 +621,51 @@ func (h *Handler) tokenDeviceGrant(w http.ResponseWriter, r *http.Request) {
 		h.auditFailure("token_exchange", "access_denied", "device token grant denied", nil, http.StatusBadRequest, "")
 		oauthError(w, "access_denied", "user denied authorization", http.StatusBadRequest)
 		return
-	}
-
-	// Serialize concurrent GitHub polls for the same device_code. AcquireDevicePolling
-	// returns false in two cases: (1) another goroutine is already polling, or (2) the
-	// session was consumed/removed between GetDevice and this point.
-	// Re-check the session state to return the most accurate OAuth error.
-	if !h.store.AcquireDevicePolling(deviceCode) {
-		current, ok := h.store.GetDevice(deviceCode)
-		if !ok {
-			// Session consumed by a concurrent winner.
-			oauthError(w, "invalid_grant", "device code already consumed", http.StatusBadRequest)
-			return
-		}
-		if time.Now().After(current.ExpiresAt) {
-			oauthError(w, "expired_token", "device code expired", http.StatusBadRequest)
-			return
-		}
-		if current.Status == deviceDenied {
-			oauthError(w, "access_denied", "user denied authorization", http.StatusBadRequest)
-			return
-		}
-		// Another goroutine is actively polling; client should retry.
-		oauthError(w, "authorization_pending", "polling in progress, please retry", http.StatusBadRequest)
-		return
-	}
-	defer h.store.ReleaseDevicePolling(deviceCode)
-
-	// Status is pending: poll GitHub on behalf of the client.
-	result, err := h.pollGitHubDeviceToken(r.Context(), pending.GitHubDevCode)
-	if err != nil {
-		h.auditFailure("token_exchange", "provider_error", "provider device token exchange failed", err, http.StatusBadGateway, "")
-		slog.Error("GitHub device token poll failed", "err", err)
-		oauthError(w, "server_error", "upstream error polling GitHub", http.StatusBadGateway)
-		return
-	}
-
-	switch result.Error {
-	case "":
-		// Resolve provider identity early to get the Subject claim
-		id, valErr := h.provider.ValidateToken(r.Context(), result.AccessToken)
-		if valErr != nil {
-			h.auditFailure("identity_resolution", "provider_error", "device grant identity resolution failed", valErr, http.StatusBadGateway, tokenFingerprint(result.AccessToken))
-			slog.Error("Identity resolution failed during device grant callback", "err", valErr)
-			oauthError(w, "server_error", "failed to resolve identity", http.StatusBadGateway)
-			return
-		}
-		h.auditSuccess("identity_resolution", "device grant identity resolved", http.StatusOK)
-		completed, ok := h.store.AuthorizeAndConsumeDevice(deviceCode, result.AccessToken, result.Scope)
-		if !ok {
+	case deviceApproved:
+		// Atomically consume the approved session to prevent double-issuance.
+		completed, consumed := h.store.ConsumeApprovedDevice(deviceCode)
+		if !consumed {
+			// Lost race with a concurrent poll — session already consumed.
 			h.auditFailure("token_exchange", "invalid_grant", "device token grant was already consumed", nil, http.StatusBadRequest, "")
 			oauthError(w, "invalid_grant", "device code already consumed", http.StatusBadRequest)
 			return
 		}
-		h.store.CacheToken(result.AccessToken, id.Subject, completed.Audience)
-		h.persistProviderRefresh(result.AccessToken, result.RefreshToken, providerAccessExpiry(result.AccessExpiresIn))
-		deviceFamilyID, deviceFidErr := generateCode()
-		if deviceFidErr != nil {
-			slog.Warn("failed to generate refresh token family ID (device)", "err", deviceFidErr)
-			deviceFamilyID = ""
+		token := completed.AccessToken
+		if h.isBuiltinMode() {
+			var genErr error
+			token, genErr = h.generateGatewayAccessToken(completed.Subject, completed.Audience)
+			if genErr != nil {
+				h.auditFailure("token_exchange", "server_error", "device grant token generation failed", genErr, http.StatusInternalServerError, "")
+				slog.Error("device grant token generation failed", "err", genErr)
+				oauthError(w, "server_error", "internal error", http.StatusInternalServerError)
+				return
+			}
 		}
-		refreshToken, rtErr := h.store.CreateRefreshToken(result.AccessToken, completed.Audience, deviceFamilyID, h.refreshTokenTTL())
+		h.store.CacheToken(token, completed.Subject, completed.Audience)
+		familyID, fidErr := generateCode()
+		if fidErr != nil {
+			slog.Warn("failed to generate refresh token family ID (device)", "err", fidErr)
+			familyID = ""
+		}
+		refreshToken, rtErr := h.store.CreateRefreshToken(token, completed.Audience, familyID, h.refreshTokenTTL())
 		if rtErr != nil {
-			slog.Warn("failed to create refresh token", "err", rtErr)
+			slog.Warn("failed to create refresh token (device)", "err", rtErr)
 		}
-		h.writeTokenResponse(w, result.AccessToken, result.Scope, refreshToken, id.Subject)
+		h.writeTokenResponse(w, token, completed.Scope, refreshToken, completed.Subject)
 		h.auditSuccess("token_exchange", "device token exchange completed", http.StatusOK)
-	case "authorization_pending":
+	default: // devicePending
+		// Enforce minimum polling interval (RFC 8628 §3.5).
+		slowDown, intervalOK := h.store.CheckAndAdvancePollInterval(deviceCode)
+		if !intervalOK {
+			oauthError(w, "invalid_grant", "device code not found", http.StatusBadRequest)
+			return
+		}
+		if slowDown {
+			h.store.IncreaseDeviceInterval(deviceCode)
+			oauthError(w, "slow_down", "polling too frequently, increase interval by 5 seconds", http.StatusBadRequest)
+			return
+		}
 		oauthError(w, "authorization_pending", "user has not yet authorized the device", http.StatusBadRequest)
-	case "slow_down":
-		// RFC 8628 §3.5: client must increase polling interval by 5 seconds
-		oauthError(w, "slow_down", "polling too frequently, increase interval by 5 seconds", http.StatusBadRequest)
-	case "expired_token":
-		h.auditFailure("token_exchange", "token_expired", "provider device token expired", nil, http.StatusBadRequest, "")
-		oauthError(w, "expired_token", "device code expired on GitHub", http.StatusBadRequest)
-	case "access_denied":
-		h.store.DenyDevice(deviceCode)
-		h.recordAudit(authaudit.Event{
-			Phase:      "token_exchange",
-			Provider:   h.provider.Name(),
-			Result:     "failure",
-			ErrorClass: "access_denied",
-			OAuthError: "access_denied",
-			HTTPStatus: http.StatusBadRequest,
-			Message:    "provider device authorization denied",
-		})
-		oauthError(w, "access_denied", "user denied authorization", http.StatusBadRequest)
-	default:
-		h.recordAudit(authaudit.Event{
-			Phase:      "token_exchange",
-			Provider:   h.provider.Name(),
-			Result:     "failure",
-			ErrorClass: "provider_rejected",
-			OAuthError: provider.NormalizeOAuthErrorCode(result.Error),
-			HTTPStatus: http.StatusBadGateway,
-			Message:    "provider device token exchange rejected",
-		})
-		slog.Warn("unexpected GitHub device poll error", "err", result.Error)
-		oauthError(w, "server_error", "unexpected upstream error: "+result.Error, http.StatusBadGateway)
 	}
 }
 
@@ -877,9 +826,10 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 	h.auditSuccess("refresh", "refresh token exchange completed", http.StatusOK)
 }
 
-// DeviceAuthorize handles POST /device_authorization (RFC 8628).
-// It requests a device code from GitHub and returns the user_code and verification_uri to the client.
-// client_secret is NOT required for GitHub's Device Flow.
+// DeviceAuthorize handles POST /device_authorization (RFC 8628 §3.1).
+// It generates a gateway-internal device_code and user_code, stores a pending
+// device session, and returns the codes together with the verification_uri
+// pointing to the gateway's own /activate endpoint.
 func (h *Handler) DeviceAuthorize(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	if err := r.ParseForm(); err != nil {
@@ -894,19 +844,17 @@ func (h *Handler) DeviceAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Always use configured scopes to prevent clients from escalating to broader permissions.
-	scope := h.provider.Scopes()
-
-	ghResp, err := h.startGitHubDeviceFlow(r.Context(), scope)
-	if err != nil {
-		h.auditFailure("authorize", "provider_error", "provider device authorization start failed", err, http.StatusBadGateway, "")
-		slog.Error("GitHub device flow start failed", "err", err)
-		oauthError(w, "server_error", "failed to start device flow with GitHub", http.StatusBadGateway)
+	userCode, ucErr := generateUserCode()
+	if ucErr != nil {
+		h.auditFailure("authorize", "server_error", "user code generation failed", ucErr, http.StatusInternalServerError, "")
+		slog.Error("user code generation failed", "err", ucErr)
+		oauthError(w, "server_error", "internal error", http.StatusInternalServerError)
 		return
 	}
 
-	expiresAt := time.Now().Add(time.Duration(ghResp.ExpiresIn) * time.Second)
-	internalCode, err := h.store.CreateDevice(ghResp.DeviceCode, ghResp.UserCode, ghResp.VerificationURI, expiresAt, ghResp.Interval, audience)
+	const deviceCodeTTL = 15 * time.Minute
+	expiresAt := time.Now().Add(deviceCodeTTL)
+	internalCode, err := h.store.CreateDevice(userCode, expiresAt, audience)
 	if err != nil {
 		h.auditFailure("authorize", "store_error", "device authorization session creation failed", err, http.StatusInternalServerError, "")
 		slog.Error("device session creation failed", "err", err)
@@ -914,15 +862,14 @@ func (h *Handler) DeviceAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	verificationURI := h.cfg.BaseURL + "/activate"
 	resp := map[string]any{
-		"device_code":      internalCode, // gateway-internal; client uses this to poll /token
-		"user_code":        ghResp.UserCode,
-		"verification_uri": ghResp.VerificationURI,
-		"expires_in":       ghResp.ExpiresIn,
-		"interval":         ghResp.Interval,
-	}
-	if ghResp.VerificationURIComplete != "" {
-		resp["verification_uri_complete"] = ghResp.VerificationURIComplete
+		"device_code":              internalCode,
+		"user_code":                userCode,
+		"verification_uri":         verificationURI,
+		"verification_uri_complete": verificationURI + "?user_code=" + userCode,
+		"expires_in":               int(deviceCodeTTL / time.Second),
+		"interval":                 5,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
@@ -930,133 +877,147 @@ func (h *Handler) DeviceAuthorize(w http.ResponseWriter, r *http.Request) {
 	h.auditSuccess("authorize", "device authorization started", http.StatusOK)
 }
 
-type githubDeviceCodeResp struct {
-	DeviceCode              string `json:"device_code"`
-	UserCode                string `json:"user_code"`
-	VerificationURI         string `json:"verification_uri"`
-	VerificationURIComplete string `json:"verification_uri_complete"`
-	ExpiresIn               int    `json:"expires_in"`
-	Interval                int    `json:"interval"`
+// Activate handles GET /activate — renders the user_code entry form.
+func (h *Handler) Activate(w http.ResponseWriter, r *http.Request) {
+	prefill := r.URL.Query().Get("user_code")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	// minimal, dependency-free form; production deployments can replace this handler.
+	_, _ = fmt.Fprintf(w, `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>Activate Device</title></head>
+<body>
+<h1>Activate your device</h1>
+<form method="post" action="/activate">
+  <label>Enter the code displayed on your device:<br>
+    <input type="text" name="user_code" value="%s" required autofocus
+           placeholder="XXXX-XXXX" style="font-size:1.5em;letter-spacing:0.15em">
+  </label><br><br>
+  <button type="submit">Activate</button>
+</form>
+</body></html>`, prefill)
 }
 
-type githubDevicePollResult struct {
-	AccessToken     string
-	Scope           string
-	RefreshToken    string
-	AccessExpiresIn time.Duration
-	Error           string // GitHub error code; empty on success
-}
-
-func (h *Handler) startGitHubDeviceFlow(ctx context.Context, scope string) (*githubDeviceCodeResp, error) {
-	form := url.Values{
-		"client_id": {h.provider.ClientID()},
-		"scope":     {scope},
+// ActivateSubmit handles POST /activate — validates the user_code and redirects
+// to the OAuth authorization endpoint so the user can authenticate with the provider.
+func (h *Handler) ActivateSubmit(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "malformed request", http.StatusBadRequest)
+		return
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"https://github.com/login/device/code",
-		strings.NewReader(form.Encode()))
+	userCode := strings.TrimSpace(r.FormValue("user_code"))
+	if userCode == "" {
+		http.Error(w, "user_code required", http.StatusBadRequest)
+		return
+	}
+
+	sess, ok := h.store.FindDeviceByUserCode(userCode)
+	if !ok {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = fmt.Fprintf(w, `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>Invalid Code</title></head>
+<body>
+<h1>Invalid or expired code</h1>
+<p>The code <strong>%s</strong> was not found or has expired. Please check the code and try again.</p>
+<a href="/activate">Try again</a>
+</body></html>`, userCode)
+		return
+	}
+
+	state := generateDeviceState(sess.InternalCode)
+	deviceCallbackURI := h.cfg.BaseURL + "/device_callback"
+	h.store.SaveSession(state, deviceCallbackURI, "", sess.Audience)
+
+	authorizeURL := h.cfg.BaseURL + "/authorize?response_type=code" +
+		"&client_id=" + url.QueryEscape(h.provider.ClientID()) +
+		"&redirect_uri=" + url.QueryEscape(deviceCallbackURI) +
+		"&state=" + url.QueryEscape(state)
+	http.Redirect(w, r, authorizeURL, http.StatusFound)
+}
+
+// DeviceCallback handles GET /device_callback — receives the provider callback
+// after the user authenticates, exchanges the code for a provider token, and
+// calls ApproveDevice so the polling client can retrieve its access token.
+func (h *Handler) DeviceCallback(w http.ResponseWriter, r *http.Request) {
+	code := r.URL.Query().Get("code")
+	state := r.URL.Query().Get("state")
+	if code == "" || state == "" {
+		http.Error(w, "missing code or state", http.StatusBadRequest)
+		return
+	}
+	if !h.store.HasSession(state) {
+		http.Error(w, "invalid state", http.StatusBadRequest)
+		return
+	}
+
+	internalCode, ok := parseDeviceState(state)
+	if !ok {
+		http.Error(w, "invalid state format", http.StatusBadRequest)
+		return
+	}
+
+	tokens, err := h.provider.ExchangeCode(r.Context(), code)
 	if err != nil {
-		return nil, fmt.Errorf("creating GitHub device code request: %w", err)
+		slog.Error("device callback: provider token exchange failed", "err", err)
+		http.Error(w, "token exchange failed", http.StatusBadGateway)
+		return
 	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := githubClient.Do(req)
+	id, err := h.provider.ValidateToken(r.Context(), tokens.AccessToken)
 	if err != nil {
-		return nil, &provider.UpstreamError{Err: fmt.Errorf("GitHub device code endpoint: %w", err)}
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, githubDeviceHTTPError(resp, "device_authorization")
+		slog.Error("device callback: identity resolution failed", "err", err)
+		http.Error(w, "identity resolution failed", http.StatusBadGateway)
+		return
 	}
 
-	var result githubDeviceCodeResp
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decoding GitHub device code response: %w", err)
+	if !h.store.ApproveDevice(internalCode, tokens.AccessToken, joinScopes(tokens.Scopes), id.Subject) {
+		http.Error(w, "device session not found or expired", http.StatusBadRequest)
+		return
 	}
-	if result.DeviceCode == "" || result.UserCode == "" {
-		return nil, fmt.Errorf("incomplete device code response from GitHub")
-	}
-	if result.Interval == 0 {
-		result.Interval = 5 // RFC 8628 default
-	}
-	return &result, nil
+
+	// Clean up the OAuth session used to bridge the device flow.
+	// (We initiated it via SaveSession, not the normal /authorize path,
+	//  so there is no internalCode to redirect; just show a success page.)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = fmt.Fprint(w, `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>Device Activated</title></head>
+<body>
+<h1>Device activated</h1>
+<p>Your device has been authorized. You can close this browser tab and return to your device.</p>
+</body></html>`)
 }
 
-func (h *Handler) pollGitHubDeviceToken(ctx context.Context, githubDevCode string) (*githubDevicePollResult, error) {
-	form := url.Values{
-		"client_id":   {h.provider.ClientID()},
-		"device_code": {githubDevCode},
-		"grant_type":  {"urn:ietf:params:oauth:grant-type:device_code"},
+// generateUserCode creates a random user-facing device code in XXXX-XXXX format
+// using characters that are easy to distinguish (no 0/O, 1/I/L etc.).
+func generateUserCode() (string, error) {
+	const charset = "BCDFGHJKLMNPQRSTVWXZ2456789"
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generating user code: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"https://github.com/login/oauth/access_token",
-		strings.NewReader(form.Encode()))
-	if err != nil {
-		return nil, fmt.Errorf("creating GitHub device token request: %w", err)
+	out := make([]byte, 9) // 8 chars + 1 hyphen
+	for i := range 4 {
+		out[i] = charset[int(b[i])%len(charset)]
 	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	resp, err := githubClient.Do(req)
-	if err != nil {
-		return nil, &provider.UpstreamError{Err: fmt.Errorf("GitHub device token endpoint: %w", err)}
+	out[4] = '-'
+	for i := range 4 {
+		out[5+i] = charset[int(b[4+i])%len(charset)]
 	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, githubDeviceHTTPError(resp, "device_token")
-	}
-
-	var raw struct {
-		AccessToken  string `json:"access_token"`
-		Scope        string `json:"scope"`
-		TokenType    string `json:"token_type"`
-		RefreshToken string `json:"refresh_token"`
-		ExpiresIn    int64  `json:"expires_in"`
-		Error        string `json:"error"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
-		return nil, fmt.Errorf("decoding GitHub device token response: %w", err)
-	}
-	if raw.Error == "" && raw.AccessToken == "" {
-		return nil, fmt.Errorf("GitHub device token response: no access_token and no error field")
-	}
-	return &githubDevicePollResult{
-		AccessToken:     raw.AccessToken,
-		Scope:           raw.Scope,
-		RefreshToken:    raw.RefreshToken,
-		AccessExpiresIn: time.Duration(raw.ExpiresIn) * time.Second,
-		Error:           provider.NormalizeOAuthErrorCode(raw.Error),
-	}, nil
+	return string(out), nil
 }
 
-func githubDeviceHTTPError(resp *http.Response, operation string) error {
-	var payload struct {
-		Error string `json:"error"`
-	}
-	_ = json.NewDecoder(io.LimitReader(resp.Body, 4<<10)).Decode(&payload)
-	oauthErr := &provider.OAuthError{
-		Provider:   "github",
-		Operation:  operation,
-		Code:       provider.NormalizeOAuthErrorCode(payload.Error),
-		HTTPStatus: resp.StatusCode,
-		Transient:  resp.StatusCode >= 500 || githubRateLimited(resp),
-	}
-	if oauthErr.Transient {
-		return &provider.UpstreamError{Err: oauthErr}
-	}
-	return oauthErr
+// generateDeviceState creates a state value that encodes the internal device code
+// for recovery in DeviceCallback without requiring a separate store lookup.
+func generateDeviceState(internalCode string) string {
+	return "device:" + internalCode
 }
 
-func githubRateLimited(resp *http.Response) bool {
-	if resp.StatusCode == http.StatusTooManyRequests {
-		return true
-	}
-	return resp.StatusCode == http.StatusForbidden &&
-		(strings.TrimSpace(resp.Header.Get("Retry-After")) != "" ||
-			strings.TrimSpace(resp.Header.Get("X-RateLimit-Remaining")) == "0")
+// parseDeviceState extracts the internal device code from a state generated by generateDeviceState.
+func parseDeviceState(state string) (string, bool) {
+	code, ok := strings.CutPrefix(state, "device:")
+	return code, ok && code != ""
 }
 
 // ValidateToken checks the bearer token via the provider (with cache) and
