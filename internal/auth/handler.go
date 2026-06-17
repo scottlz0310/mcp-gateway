@@ -158,11 +158,14 @@ func NewHandler(cfg Config, p provider.Provider, opts ...HandlerOption) (*Handle
 		ts = fileStore
 		tokensTTL = cfg.ExpiresIn
 
-		fileRTS, err := NewFileRefreshTokenStore(cfg.TokenStorePath + ".refresh")
+		sqliteRTS, err := NewSQLiteRefreshTokenStore(cfg.TokenStorePath + ".refresh.db")
 		if err != nil {
 			return nil, fmt.Errorf("auth.NewHandler: refresh token store: %w", err)
 		}
-		storeOpts = append(storeOpts, WithRefreshTokenStore(fileRTS))
+		if err := migrateFileRefreshTokenStore(cfg.TokenStorePath+".refresh", sqliteRTS); err != nil {
+			return nil, fmt.Errorf("auth.NewHandler: migrating legacy refresh token store: %w", err)
+		}
+		storeOpts = append(storeOpts, WithRefreshTokenStore(sqliteRTS))
 	} else {
 		ts = NewMemTokenStore()
 		tokensTTL = cfg.CacheTTL
@@ -1898,4 +1901,9 @@ func (h *Handler) generateIDToken(issuer, subject, clientID string) (string, err
 	sigB64 := base64.RawURLEncoding.EncodeToString(sigBytes)
 
 	return signingInput + "." + sigB64, nil
+}
+
+// Close releases resources held by the handler (e.g. the SQLite refresh token store).
+func (h *Handler) Close() error {
+	return h.store.Close()
 }

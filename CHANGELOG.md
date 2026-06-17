@@ -9,6 +9,13 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Migrate refresh token store from file-backed JSON to SQLite ([#134](https://github.com/scottlz0310/mcp-gateway/issues/134))
+  - Atomic `Revoke` / `RevokeFamily` via single-statement `UPDATE` — eliminates in-process TOCTOU between `Lookup` and `Revoke`
+  - Flush-failure rollback is now guaranteed by SQLite transactions (no manual `prev`-state bookkeeping)
+  - `Sweep` removes expired entries via indexed `DELETE` (no full-scan)
+  - Store file renamed from `tokens.json.refresh` (JSON) to `tokens.json.refresh.db` (SQLite WAL)
+  - Automatic one-time migration: existing `tokens.json.refresh` is imported on first startup and renamed to `tokens.json.refresh.migrated`
+  - `Handler.Close()` / `Store.Close()` added to release the database connection
 - Add refresh token rotation and reuse detection (RFC 6819 §5.2.2.3) ([#128](https://github.com/scottlz0310/mcp-gateway/issues/128))
   - Token family tracking: every refresh token is associated with a `family_id` generated at authorization-code issuance and inherited across rotations
   - Reuse detection: presenting a revoked (already-used) refresh token immediately revokes the entire token lineage (`invalid_grant`)

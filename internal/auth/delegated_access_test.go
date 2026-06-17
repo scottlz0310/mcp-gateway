@@ -369,6 +369,7 @@ func TestRotationPermanentlyFailedSurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewHandler (first process): %v", err)
 	}
+	t.Cleanup(func() { _ = h1.Close() })
 
 	// Seed: cache token + set provider refresh metadata so rotation is attempted.
 	h1.store.CacheToken("tok-dead", "alice", "http://localhost:8080/mcp")
@@ -391,10 +392,14 @@ func TestRotationPermanentlyFailedSurvivesRestart(t *testing.T) {
 	}
 
 	// ── simulate restart: new Handler backed by the same file ─────────────────
+	if err := h1.Close(); err != nil {
+		t.Fatalf("h1.Close before restart: %v", err)
+	}
 	h2, err := NewHandler(cfg, p)
 	if err != nil {
 		t.Fatalf("NewHandler (restart): %v", err)
 	}
+	t.Cleanup(func() { _ = h2.Close() })
 	defer h2.store.Stop()
 
 	// ValidateToken must still authenticate the user (token is still valid as
