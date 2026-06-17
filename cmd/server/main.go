@@ -460,6 +460,9 @@ func loadConfig() config {
 	// OAuth provider kind: defaults to "github" for backward compatibility.
 	oauthProvider := getEnv("OAUTH_PROVIDER", "github")
 
+	stateDir := gatewayStateDir()
+	ensureGatewayStateDir()
+
 	return config{
 		// githubClientID and githubClientSecret are resolved after key/config loading in main().
 		publicURL:            publicURL,
@@ -477,9 +480,9 @@ func loadConfig() config {
 		tokenExpiresInSec:    getEnvInt("TOKEN_EXPIRES_IN_SEC", 7776000), // 90 days
 		tokenAudienceStrict:  getEnvBool("MCP_GATEWAY_TOKEN_AUDIENCE_STRICT", false),
 		githubRefreshEnabled: getEnvBool("MCP_GATEWAY_GITHUB_REFRESH_ENABLED", false),
-		tokenStorePath:       lookupEnv("MCP_GATEWAY_TOKEN_STORE_PATH", filepath.Join(gatewayStateDir(), "tokens.json")),
-		keyPath:              getEnv("MCP_GATEWAY_KEY_PATH", filepath.Join(gatewayStateDir(), "gateway.key")),
-		configPath:           getEnv("MCP_CONFIG_FILE", filepath.Join(gatewayStateDir(), "config.yaml")),
+		tokenStorePath:       lookupEnv("MCP_GATEWAY_TOKEN_STORE_PATH", filepath.Join(stateDir, "tokens.json")),
+		keyPath:              getEnv("MCP_GATEWAY_KEY_PATH", filepath.Join(stateDir, "gateway.key")),
+		configPath:           getEnv("MCP_CONFIG_FILE", filepath.Join(stateDir, "config.yaml")),
 		allowedRedirectHosts:   splitCSV(os.Getenv("MCP_GATEWAY_ALLOWED_REDIRECT_HOSTS")),
 		allowedRedirectSchemes: splitCSV(os.Getenv("MCP_GATEWAY_ALLOWED_REDIRECT_SCHEMES")),
 	}
@@ -516,6 +519,9 @@ func buildResourceAudienceMap(routes []router.Route) map[string]string {
 // mcp-gateway's runtime state files (gateway.key, config.yaml, tokens.json).
 // Docker operators override these paths via environment variables; this default
 // only affects bare-metal / non-containerised deployments.
+//
+// On Linux/other, XDG_STATE_HOME is preferred (consistent with authaudit defaults
+// and the official Docker image which sets XDG_STATE_HOME=/data).
 func gatewayStateDir() string {
 	switch runtime.GOOS {
 	case "windows":
@@ -527,14 +533,25 @@ func gatewayStateDir() string {
 			return filepath.Join(home, "Library", "Application Support", "mcp-gateway")
 		}
 	default:
-		if base := strings.TrimSpace(os.Getenv("XDG_DATA_HOME")); base != "" {
+		// XDG_STATE_HOME matches authaudit convention; Docker image sets XDG_STATE_HOME=/data.
+		if base := strings.TrimSpace(os.Getenv("XDG_STATE_HOME")); base != "" {
 			return filepath.Join(base, "mcp-gateway")
 		}
 		if home, err := os.UserHomeDir(); err == nil && home != "" {
-			return filepath.Join(home, ".local", "share", "mcp-gateway")
+			return filepath.Join(home, ".local", "state", "mcp-gateway")
 		}
 	}
 	return filepath.Join(".", ".mcp-gateway")
+}
+
+// ensureGatewayStateDir creates the gateway state directory if it does not exist.
+// LoadKey / SaveConfig / NewFileTokenStore do not create parent directories, so
+// a clean install would fail on the first run without this call.
+func ensureGatewayStateDir() {
+	d := gatewayStateDir()
+	if err := os.MkdirAll(d, 0700); err != nil {
+		slog.Warn("could not create gateway state directory", "path", d, "err", err)
+	}
 }
 
 func getEnv(key, fallback string) string {
