@@ -52,7 +52,7 @@ func migrateFileRefreshTokenStore(path string, dst RefreshTokenStore) error {
 		_ = tx.Rollback()
 		return fmt.Errorf("preparing migration insert: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	imported := 0
 	for hash, e := range entries {
