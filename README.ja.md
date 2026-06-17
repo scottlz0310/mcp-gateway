@@ -34,8 +34,10 @@ VS Code などの MCP クライアントから見た単一の HTTP エントリ�
 > GitHub App の認証情報に置き換えるだけで移行できます。コードや設定ファイルの変更は不要です。
 > ゲートウェイは `gho_`（OAuth App）と `ghu_`（GitHub App）の両トークンに対応しています。
 >
-> **トークン有効期限について**: "Expire user authorization tokens" は現時点では無効のまま
-> にしてください。短命 `ghu_` トークンのローテーション対応は次のリリースで追加予定です。
+> **トークン有効期限について**: 短命 `ghu_` トークンと自動ローテーションを有効にするには、
+> GitHub App の設定で "Expire user authorization tokens" をチェックし、ゲートウェイで
+> `MCP_GATEWAY_GITHUB_REFRESH_ENABLED=true` を設定してください。
+> 詳細は [docs/configuration.md](docs/configuration.md#github-oauth-refresh-token-rotation) を参照。
 
 ### 2. Docker Compose で起動
 

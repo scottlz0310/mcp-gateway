@@ -348,7 +348,22 @@ refresh-token lifetime). The gateway can transparently rotate these tokens
 before they expire, so a long-running upstream operation does not see the
 access token become invalid mid-request.
 
-### Enabling
+GitHub Apps issue tokens with `ghu_` prefix (user-to-server access tokens) and
+`ghr_` prefix (refresh tokens). The gateway handles both prefixes identically to
+classic `gho_` OAuth App tokens — no additional configuration is required.
+
+### Enabling Token Expiration on the GitHub App
+
+To enable expiring tokens on your GitHub App:
+
+1. Open **GitHub -> Settings -> Developer settings -> GitHub Apps -> Your App -> General**.
+2. Scroll to **"User authorization tokens"** and check **"Expire user authorization tokens"**.
+3. Save changes.
+
+After this, every OAuth exchange will return `expires_in` (8 hours) and
+`refresh_token` (`ghr_…`, valid for ~6 months) alongside the `ghu_` access token.
+
+### Enabling Rotation in the Gateway
 
 Set one of:
 

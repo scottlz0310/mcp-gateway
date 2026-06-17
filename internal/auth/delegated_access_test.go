@@ -99,6 +99,57 @@ func TestEnsureFreshAccessTokenForSubject_RotationSucceeds(t *testing.T) {
 	}
 }
 
+// TestEnsureFreshAccessTokenForSubject_GhuTokenRotation verifies that
+// tryGitHubRotation works correctly with GitHub Apps user-to-server tokens
+// (ghu_ prefix) and their corresponding refresh tokens (ghr_ prefix).
+// This is the primary expiring-token scenario for GitHub Apps.
+func TestEnsureFreshAccessTokenForSubject_GhuTokenRotation(t *testing.T) {
+	var observedRefreshToken string
+	p := &provider.Mock{
+		NameValue:   "github",
+		ScopesValue: "repo,user",
+		RefreshTokenFunc: func(_ context.Context, rt string) (provider.TokenResponse, error) {
+			observedRefreshToken = rt
+			return provider.TokenResponse{
+				AccessToken:          "ghu_newaccess",
+				RefreshToken:         "ghr_newrefresh",
+				AccessTokenExpiresIn: 8 * time.Hour,
+				Scopes:               []string{"repo", "user"},
+			}, nil
+		},
+	}
+	h := newDelegatedTestHandler(t, p, 5*time.Minute)
+	// Seed a GitHub Apps ghu_ access token inside the leeway window.
+	h.store.CacheToken("ghu_staleaccess", "alice", "http://localhost:8080/mcp")
+	soon := time.Now().Add(30 * time.Second)
+	h.store.RecordProviderRefresh("ghu_staleaccess", "ghr_oldrefresh", soon)
+
+	res, err := h.EnsureFreshAccessTokenForSubject(context.Background(), "alice")
+	if err != nil {
+		t.Fatalf("EnsureFreshAccessTokenForSubject: %v", err)
+	}
+	if res.AccessToken != "ghu_newaccess" {
+		t.Errorf("access token: got %q want %q", res.AccessToken, "ghu_newaccess")
+	}
+	if observedRefreshToken != "ghr_oldrefresh" {
+		t.Errorf("RefreshToken called with %q, want %q", observedRefreshToken, "ghr_oldrefresh")
+	}
+	if res.ProviderAccessExpiry.IsZero() {
+		t.Errorf("expected non-zero ProviderAccessExpiry on rotated record")
+	}
+	if time.Until(res.ProviderAccessExpiry) < 1*time.Hour {
+		t.Errorf("rotated expiry too close: %v", res.ProviderAccessExpiry)
+	}
+	// The new refresh token must be persisted so subsequent rotations work.
+	rec, ok := h.store.LookupToken("ghu_newaccess")
+	if !ok {
+		t.Fatal("rotated token not found in store")
+	}
+	if rec.ProviderRefreshToken != "ghr_newrefresh" {
+		t.Errorf("new refresh token: got %q want %q", rec.ProviderRefreshToken, "ghr_newrefresh")
+	}
+}
+
 // TestEnsureFreshAccessTokenForSubject_RotationFailedInLeeway verifies that
 // when the cached token is inside the leeway window AND rotation fails (here
 // with a transient upstream error), the handler returns ErrRotationFailed
