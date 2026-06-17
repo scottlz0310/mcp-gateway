@@ -3173,3 +3173,279 @@ func generateExpiredGatewayToken(key *rsa.PrivateKey, subject, audience string) 
 	}
 	return signingInput + "." + base64.RawURLEncoding.EncodeToString(sigBytes), nil
 }
+
+func TestDeviceAuthorizeInvalidResource(t *testing.T) {
+	h := newTestHandler(t)
+
+	// Multiple resource params → resolveRequestedAudience error → invalid_target.
+	r := httptest.NewRequest(http.MethodPost, "/device_authorization",
+		strings.NewReader("resource=res-a&resource=res-b"))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+
+	h.DeviceAuthorize(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d, want 400", w.Code)
+	}
+	var resp map[string]any
+	_ = json.NewDecoder(w.Body).Decode(&resp)
+	if resp["error"] != "invalid_target" {
+		t.Errorf("error: got %v, want invalid_target", resp["error"])
+	}
+}
+
+func TestTokenDeviceGrantMissingDeviceCode(t *testing.T) {
+	h := newTestHandler(t)
+
+	r := httptest.NewRequest(http.MethodPost, "/token",
+		strings.NewReader("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code"))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+
+	h.Token(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d, want 400", w.Code)
+	}
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp["error"] != "invalid_request" {
+		t.Errorf("error: got %v, want invalid_request", resp["error"])
+	}
+}
+
+func TestTokenDeviceGrantUnknownDeviceCode(t *testing.T) {
+	h := newTestHandler(t)
+
+	body := "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code&device_code=nonexistent-code"
+	r := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+
+	h.Token(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d, want 400", w.Code)
+	}
+	var resp map[string]any
+	_ = json.NewDecoder(w.Body).Decode(&resp)
+	if resp["error"] != "invalid_grant" {
+		t.Errorf("error: got %v, want invalid_grant", resp["error"])
+	}
+}
+
+func TestTokenDeviceGrantExpired(t *testing.T) {
+	h := newTestHandler(t)
+
+	expiresAt := time.Now().Add(-time.Second) // already expired
+	internalCode, err := h.store.CreateDevice("ABCD-EXPI", expiresAt, "mcp-gateway")
+	if err != nil {
+		t.Fatalf("CreateDevice: %v", err)
+	}
+
+	body := fmt.Sprintf("grant_type=urn:ietf%%3Aparams%%3Aoauth%%3Agrant-type%%3Adevice_code&device_code=%s", internalCode)
+	r := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+
+	h.Token(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d, want 400", w.Code)
+	}
+	var resp map[string]any
+	_ = json.NewDecoder(w.Body).Decode(&resp)
+	if resp["error"] != "expired_token" {
+		t.Errorf("error: got %v, want expired_token", resp["error"])
+	}
+}
+
+func TestTokenDeviceGrantDenied(t *testing.T) {
+	h := newTestHandler(t)
+
+	expiresAt := time.Now().Add(15 * time.Minute)
+	internalCode, err := h.store.CreateDevice("DENY-ABCD", expiresAt, "mcp-gateway")
+	if err != nil {
+		t.Fatalf("CreateDevice: %v", err)
+	}
+	h.store.DenyDevice(internalCode)
+
+	body := fmt.Sprintf("grant_type=urn:ietf%%3Aparams%%3Aoauth%%3Agrant-type%%3Adevice_code&device_code=%s", internalCode)
+	r := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+
+	h.Token(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d, want 400", w.Code)
+	}
+	var resp map[string]any
+	_ = json.NewDecoder(w.Body).Decode(&resp)
+	if resp["error"] != "access_denied" {
+		t.Errorf("error: got %v, want access_denied", resp["error"])
+	}
+}
+
+func TestTokenDeviceGrantAlreadyConsumed(t *testing.T) {
+	h := newTestHandler(t)
+
+	expiresAt := time.Now().Add(15 * time.Minute)
+	internalCode, err := h.store.CreateDevice("CONS-ABCD", expiresAt, "mcp-gateway")
+	if err != nil {
+		t.Fatalf("CreateDevice: %v", err)
+	}
+	h.store.ApproveDevice(internalCode, "tok", "repo", "alice")
+	// Consume once — simulates first poll having already taken the token.
+	h.store.ConsumeApprovedDevice(internalCode)
+
+	// Second poll: session deleted → GetDevice returns false → invalid_grant.
+	body := fmt.Sprintf("grant_type=urn:ietf%%3Aparams%%3Aoauth%%3Agrant-type%%3Adevice_code&device_code=%s", internalCode)
+	r := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+
+	h.Token(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d, want 400", w.Code)
+	}
+	var resp map[string]any
+	_ = json.NewDecoder(w.Body).Decode(&resp)
+	if resp["error"] != "invalid_grant" {
+		t.Errorf("error: got %v, want invalid_grant", resp["error"])
+	}
+}
+
+func TestActivateSubmitEmptyCode(t *testing.T) {
+	h := newTestHandler(t)
+
+	r := httptest.NewRequest(http.MethodPost, "/activate",
+		strings.NewReader("user_code="))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	h.ActivateSubmit(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d, want 400", w.Code)
+	}
+}
+
+func TestDeviceCallbackBadStateFormat(t *testing.T) {
+	h := newTestHandler(t)
+
+	// A state that passes HasSession but has no "device:" prefix.
+	h.store.SaveSession("plain-state-no-prefix", "http://localhost:8080/device_callback", "", "mcp")
+
+	r := httptest.NewRequest(http.MethodGet, "/device_callback?code=abc&state=plain-state-no-prefix", nil)
+	w := httptest.NewRecorder()
+	h.DeviceCallback(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d, want 400", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "invalid state format") {
+		t.Errorf("body: want 'invalid state format', got %q", w.Body.String())
+	}
+}
+
+func TestDeviceCallbackExchangeCodeError(t *testing.T) {
+	p := &provider.Mock{
+		ClientIDValue: "test-client-id",
+		ExchangeCodeFunc: func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{}, fmt.Errorf("upstream exchange failed")
+		},
+	}
+	h, err := NewHandler(Config{
+		BaseURL:    "http://localhost:8080",
+		SessionTTL: 10 * time.Minute,
+		CacheTTL:   5 * time.Minute,
+		ExpiresIn:  90 * 24 * time.Hour,
+	}, p)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	expiresAt := time.Now().Add(15 * time.Minute)
+	internalCode, _ := h.store.CreateDevice("XCBG-1234", expiresAt, "mcp")
+	state := generateDeviceState(internalCode)
+	h.store.SaveSession(state, "http://localhost:8080/device_callback", "", "mcp")
+
+	r := httptest.NewRequest(http.MethodGet, "/device_callback?code=abc&state="+url.QueryEscape(state), nil)
+	w := httptest.NewRecorder()
+	h.DeviceCallback(w, r)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status: got %d, want 502", w.Code)
+	}
+}
+
+func TestDeviceCallbackValidateTokenError(t *testing.T) {
+	p := &provider.Mock{
+		ClientIDValue: "test-client-id",
+		ExchangeCodeFunc: func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{AccessToken: "tok"}, nil
+		},
+		ValidateFunc: func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{}, fmt.Errorf("cannot validate")
+		},
+	}
+	h, err := NewHandler(Config{
+		BaseURL:    "http://localhost:8080",
+		SessionTTL: 10 * time.Minute,
+		CacheTTL:   5 * time.Minute,
+		ExpiresIn:  90 * 24 * time.Hour,
+	}, p)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	expiresAt := time.Now().Add(15 * time.Minute)
+	internalCode, _ := h.store.CreateDevice("XCBG-5678", expiresAt, "mcp")
+	state := generateDeviceState(internalCode)
+	h.store.SaveSession(state, "http://localhost:8080/device_callback", "", "mcp")
+
+	r := httptest.NewRequest(http.MethodGet, "/device_callback?code=abc&state="+url.QueryEscape(state), nil)
+	w := httptest.NewRecorder()
+	h.DeviceCallback(w, r)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status: got %d, want 502", w.Code)
+	}
+}
+
+func TestDeviceCallbackApproveDeviceFails(t *testing.T) {
+	p := &provider.Mock{
+		ClientIDValue: "test-client-id",
+		ExchangeCodeFunc: func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{AccessToken: "tok"}, nil
+		},
+		ValidateFunc: func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Provider: "mock", Subject: "alice"}, nil
+		},
+	}
+	h, err := NewHandler(Config{
+		BaseURL:    "http://localhost:8080",
+		SessionTTL: 10 * time.Minute,
+		CacheTTL:   5 * time.Minute,
+		ExpiresIn:  90 * 24 * time.Hour,
+	}, p)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	// State encodes a device internalCode that does not exist in the store.
+	state := generateDeviceState("nonexistent-device-code")
+	h.store.SaveSession(state, "http://localhost:8080/device_callback", "", "mcp")
+
+	r := httptest.NewRequest(http.MethodGet, "/device_callback?code=abc&state="+url.QueryEscape(state), nil)
+	w := httptest.NewRecorder()
+	h.DeviceCallback(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d, want 400", w.Code)
+	}
+}
