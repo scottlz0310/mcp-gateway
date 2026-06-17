@@ -37,9 +37,10 @@ After creation, generate a **Client secret** from the app settings page and copy
 > config changes are needed — the gateway works with both `gho_` (OAuth App)
 > and `ghu_` (GitHub App) user access tokens.
 >
-> **Expiring tokens:** Leave "Expire user authorization tokens" disabled for
-> now. Support for rotating short-lived `ghu_` tokens will be added in a
-> follow-up release.
+> **Expiring tokens:** To enable short-lived `ghu_` tokens with automatic
+> rotation, check "Expire user authorization tokens" in the GitHub App settings
+> and set `MCP_GATEWAY_GITHUB_REFRESH_ENABLED=true` in the gateway.
+> See [docs/configuration.md](docs/configuration.md#github-oauth-refresh-token-rotation) for details.
 
 ### 2. Run With Docker Compose
 

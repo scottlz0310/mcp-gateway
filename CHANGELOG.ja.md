@@ -7,6 +7,12 @@
 
 ### 追加
 
+- GitHub Apps トークン有効期限対応（`tryGitHubRotation` の `ghu_`/`ghr_` 互換）（[#140](https://github.com/scottlz0310/mcp-gateway/issues/140)）
+  - `ghu_`（user access token）と `ghr_`（refresh token）が `RefreshToken` / `tryGitHubRotation` でプレフィックス検証なしにそのまま動作することを確認
+  - `internal/auth/provider/github_test.go`: `ghu_` access token 取得と `ghr_` → `ghu_` リフレッシュローテーションのテストケースを追加
+  - `internal/auth/delegated_access_test.go`: `ghu_`/`ghr_` の有効期限付きトークン ローテーション全経路をカバーする `TestEnsureFreshAccessTokenForSubject_GhuTokenRotation` を追加
+  - `docs/configuration.md`: GitHub App 側の "Expire user authorization tokens" 有効化手順と `MCP_GATEWAY_GITHUB_REFRESH_ENABLED=true` 設定手順を追加
+  - `README.md` / `README.ja.md`: 有効期限付きトークン注記を「対応済み」に更新
 - GitHub OAuth Apps から GitHub Apps（user-to-server OAuth）へのプロバイダー切り替え（[#139](https://github.com/scottlz0310/mcp-gateway/issues/139)）
   - `ghu_` ユーザーアクセストークン（GitHub Apps）を `gho_`（OAuth Apps）と同様に受け入れ可能 — プレフィックス検証ロジックが存在しないためコード変更不要
   - README / README.ja.md: Step 1 を「GitHub App を作成」に更新。`/callback` と `/device_callback` の両コールバック URL 登録手順、最小 Permissions（`Email addresses: Read-only`）、OAuth Apps からの移行手順を追記

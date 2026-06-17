@@ -13,6 +13,22 @@
 
 ---
 
+## Issue #140 — GitHub Apps トークン有効期限対応（tryGitHubRotation の ghu_ 互換）
+
+**目的**: GitHub Apps の user-to-server トークン（`ghu_`）と refresh token（`ghr_`）で `tryGitHubRotation` が正常動作することを確認・テスト追加する。
+
+### サブタスク
+
+- [x] `tryGitHubRotation` が `ghu_`/`ghr_` トークンで動作することを確認（プレフィックス検証なし・既存コードで対応済み）
+- [x] `internal/auth/provider/github_test.go` に `ghu_` access token ・`ghr_` refresh token のテストケースを追加
+- [x] `internal/auth/delegated_access_test.go` に `ghu_`/`ghr_` ローテーション統合テストを追加（`TestEnsureFreshAccessTokenForSubject_GhuTokenRotation`）
+- [x] `docs/configuration.md` に GitHub App 側の「Expire user authorization tokens」有効化手順を追加
+- [x] `README.md` / `README.ja.md` の「Expiring tokens」注記を更新（対応済みに変更）
+- [x] `CHANGELOG.md` / `CHANGELOG.ja.md` の `Unreleased` を更新
+- [x] `tasks.md` に本 Issue を記録
+
+---
+
 ## Issue #139 — GitHub Apps への切り替え本体（provider 差し替え・コールバック URL・ドキュメント）
 
 **目的**: GitHub OAuth Apps から GitHub Apps（user-to-server OAuth）へのプロバイダー切り替えを行う。トークン有効期限対応は Sub-Issue B（#138）に分離。

@@ -9,6 +9,12 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- GitHub Apps token expiration support (`ghu_`/`ghr_` token compatibility for `tryGitHubRotation`) ([#140](https://github.com/scottlz0310/mcp-gateway/issues/140))
+  - `ghu_` (user access) and `ghr_` (refresh) tokens accepted by `RefreshToken` and `tryGitHubRotation` — no prefix validation present, compatible out of the box
+  - `internal/auth/provider/github_test.go`: added test cases for `ghu_` access token exchange and `ghr_` → `ghu_` refresh rotation
+  - `internal/auth/delegated_access_test.go`: added `TestEnsureFreshAccessTokenForSubject_GhuTokenRotation` covering the full `ghu_`/`ghr_` expiring-token rotation path
+  - `docs/configuration.md`: added step-by-step instructions for enabling "Expire user authorization tokens" on the GitHub App and setting `MCP_GATEWAY_GITHUB_REFRESH_ENABLED=true`
+  - `README.md` / `README.ja.md`: updated expiring-tokens note to reflect the feature is now fully supported
 - Switch provider from GitHub OAuth Apps to GitHub Apps (user-to-server OAuth) ([#139](https://github.com/scottlz0310/mcp-gateway/issues/139))
   - `ghu_` user access tokens (GitHub Apps) accepted alongside classic `gho_` tokens — no code changes required, no prefix validation present
   - README and README.ja.md: Step 1 updated to "Create A GitHub App" with both `/callback` and `/device_callback` callback URL registration instructions, minimum permissions (`Email addresses: Read-only`), and migration note from OAuth Apps
