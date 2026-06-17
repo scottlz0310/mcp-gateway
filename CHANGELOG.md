@@ -9,6 +9,13 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Add refresh token rotation and reuse detection (RFC 6819 §5.2.2.3) ([#128](https://github.com/scottlz0310/mcp-gateway/issues/128))
+  - Token family tracking: every refresh token is associated with a `family_id` generated at authorization-code issuance and inherited across rotations
+  - Reuse detection: presenting a revoked (already-used) refresh token immediately revokes the entire token lineage (`invalid_grant`)
+  - Soft-revoke on rotation: consumed tokens are marked `revoked=true` and retained until expiry so replay attacks can be detected within the expiry window
+  - `RevokeFamily` / `Revoke` / `LookupAny` methods added to `RefreshTokenStore`
+  - File-backed store persists `family_id` and `revoked` flag across gateway restarts (`tokens.json.refresh`)
+  - Both `builtin` and `github` modes apply family tracking
 - Add `OAUTH_PROVIDER=builtin` mode: GitHub OAuth 2.0 PKCE social login with gateway-issued RS256 JWT ([#127](https://github.com/scottlz0310/mcp-gateway/issues/127))
   - gateway が自身の RS256 JWT（access_token + id_token + refresh_token）を発行する
   - GitHub は identity 取得のみに使用し、GitHub access_token はクライアントに渡さず callback 後に破棄する

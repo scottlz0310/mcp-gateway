@@ -547,7 +547,12 @@ func (h *Handler) tokenAuthCode(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.store.CacheToken(gatewayToken, result.Subject, result.Audience)
-		refreshToken, rtErr := h.store.CreateRefreshToken(gatewayToken, result.Audience, h.refreshTokenTTL())
+		familyID, fidErr := generateCode()
+		if fidErr != nil {
+			slog.Warn("failed to generate refresh token family ID", "err", fidErr)
+			familyID = ""
+		}
+		refreshToken, rtErr := h.store.CreateRefreshToken(gatewayToken, result.Audience, familyID, h.refreshTokenTTL())
 		if rtErr != nil {
 			slog.Warn("failed to create refresh token", "err", rtErr)
 		}
@@ -558,7 +563,12 @@ func (h *Handler) tokenAuthCode(w http.ResponseWriter, r *http.Request) {
 
 	h.store.CacheToken(result.AccessToken, result.Subject, result.Audience)
 	h.persistProviderRefresh(result.AccessToken, result.ProviderRefreshToken, result.ProviderAccessExpiry)
-	refreshToken, rtErr := h.store.CreateRefreshToken(result.AccessToken, result.Audience, h.refreshTokenTTL())
+	familyID, fidErr := generateCode()
+	if fidErr != nil {
+		slog.Warn("failed to generate refresh token family ID", "err", fidErr)
+		familyID = ""
+	}
+	refreshToken, rtErr := h.store.CreateRefreshToken(result.AccessToken, result.Audience, familyID, h.refreshTokenTTL())
 	if rtErr != nil {
 		slog.Warn("failed to create refresh token", "err", rtErr)
 	}
@@ -658,7 +668,12 @@ func (h *Handler) tokenDeviceGrant(w http.ResponseWriter, r *http.Request) {
 		}
 		h.store.CacheToken(result.AccessToken, id.Subject, completed.Audience)
 		h.persistProviderRefresh(result.AccessToken, result.RefreshToken, providerAccessExpiry(result.AccessExpiresIn))
-		refreshToken, rtErr := h.store.CreateRefreshToken(result.AccessToken, completed.Audience, h.refreshTokenTTL())
+		deviceFamilyID, deviceFidErr := generateCode()
+		if deviceFidErr != nil {
+			slog.Warn("failed to generate refresh token family ID (device)", "err", deviceFidErr)
+			deviceFamilyID = ""
+		}
+		refreshToken, rtErr := h.store.CreateRefreshToken(result.AccessToken, completed.Audience, deviceFamilyID, h.refreshTokenTTL())
 		if rtErr != nil {
 			slog.Warn("failed to create refresh token", "err", rtErr)
 		}
@@ -743,7 +758,9 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 
 	// Atomically reserve (remove) the token. Concurrent callers presenting the
 	// same token will fail here, preventing double-rotation.
-	accessToken, audience, rtExpiresAt, err := h.store.ReserveRefreshToken(rt)
+	// On reuse detection (revoked token replay), ReserveRefreshToken revokes the
+	// entire family before returning an error.
+	accessToken, audience, familyID, rtExpiresAt, err := h.store.ReserveRefreshToken(rt)
 	if err != nil {
 		if errors.Is(err, ErrRefreshTokenDeleteFailed) {
 			h.auditFailure("refresh", "store_error", "refresh token store unavailable", err, http.StatusServiceUnavailable, "")
@@ -768,13 +785,13 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 	if resources := r.Form["resource"]; len(resources) > 0 {
 		resolved, audErr := h.resolveRequestedAudience(resources)
 		if audErr != nil {
-			h.store.RestoreRefreshToken(rt, accessToken, originalAudience, rtExpiresAt)
+			h.store.RestoreRefreshToken(rt, accessToken, originalAudience, familyID, rtExpiresAt)
 			h.auditFailure("refresh", "invalid_target", "refresh token target rejected", audErr, http.StatusBadRequest, tokenFingerprint(accessToken))
 			oauthError(w, "invalid_target", audErr.Error(), http.StatusBadRequest)
 			return
 		}
 		if !isSubAudience(resolved, originalAudience) {
-			h.store.RestoreRefreshToken(rt, accessToken, originalAudience, rtExpiresAt)
+			h.store.RestoreRefreshToken(rt, accessToken, originalAudience, familyID, rtExpiresAt)
 			h.auditFailure("refresh", "invalid_target", "refresh token target widening rejected", nil, http.StatusBadRequest, tokenFingerprint(accessToken))
 			oauthError(w, "invalid_target", "resource is not a valid narrowing of the original audience", http.StatusBadRequest)
 			return
@@ -796,16 +813,17 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 		if genErr != nil {
 			h.auditFailure("refresh", "server_error", "gateway token generation failed during refresh", genErr, http.StatusInternalServerError, tokenFingerprint(accessToken))
 			slog.Error("gateway access token generation failed during refresh", "err", genErr)
-			h.store.RestoreRefreshToken(rt, accessToken, originalAudience, rtExpiresAt)
+			h.store.RestoreRefreshToken(rt, accessToken, originalAudience, familyID, rtExpiresAt)
 			oauthError(w, "server_error", "internal error", http.StatusInternalServerError)
 			return
 		}
 		h.store.CacheToken(newGatewayToken, sub, audience)
-		newRT, rtErr := h.store.CreateRefreshToken(newGatewayToken, audience, h.refreshTokenTTL())
+		// Propagate the same familyID so the token lineage remains traceable.
+		newRT, rtErr := h.store.CreateRefreshToken(newGatewayToken, audience, familyID, h.refreshTokenTTL())
 		if rtErr != nil {
 			h.auditFailure("refresh", "store_error", "refresh token rotation failed", rtErr, http.StatusInternalServerError, tokenFingerprint(newGatewayToken))
 			slog.Error("failed to rotate refresh token (builtin)", "err", rtErr)
-			h.store.RestoreRefreshToken(rt, accessToken, originalAudience, rtExpiresAt)
+			h.store.RestoreRefreshToken(rt, accessToken, originalAudience, familyID, rtExpiresAt)
 			oauthError(w, "server_error", "internal error", http.StatusInternalServerError)
 			return
 		}
@@ -825,7 +843,7 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("refresh rejected: transient upstream error", "err", valErr)
 			// Restore the token with its original audience so the client can retry,
 			// potentially with a different resource value.
-			h.store.RestoreRefreshToken(rt, accessToken, originalAudience, rtExpiresAt)
+			h.store.RestoreRefreshToken(rt, accessToken, originalAudience, familyID, rtExpiresAt)
 			oauthError(w, "temporarily_unavailable", "upstream provider unreachable, retry later", http.StatusServiceUnavailable)
 		} else {
 			h.auditFailure("refresh", "invalid_grant", "refresh token underlying access token invalid", valErr, http.StatusBadRequest, tokenFingerprint(accessToken))
@@ -838,13 +856,13 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 	// Re-cache the freshly validated token.
 	h.store.CacheToken(accessToken, id.Subject, audience)
 
-	// Issue the rotated refresh token. The original is already consumed (reserved).
-	newRT, rtErr := h.store.CreateRefreshToken(accessToken, audience, h.refreshTokenTTL())
+	// Issue the rotated refresh token propagating familyID for reuse tracking.
+	newRT, rtErr := h.store.CreateRefreshToken(accessToken, audience, familyID, h.refreshTokenTTL())
 	if rtErr != nil {
 		h.auditFailure("refresh", "store_error", "refresh token rotation failed", rtErr, http.StatusInternalServerError, tokenFingerprint(accessToken))
 		slog.Error("failed to rotate refresh token", "err", rtErr)
 		// Restore the original token (with its original audience) so the client can retry.
-		h.store.RestoreRefreshToken(rt, accessToken, originalAudience, rtExpiresAt)
+		h.store.RestoreRefreshToken(rt, accessToken, originalAudience, familyID, rtExpiresAt)
 		oauthError(w, "server_error", "internal error", http.StatusInternalServerError)
 		return
 	}

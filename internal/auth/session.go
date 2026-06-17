@@ -354,12 +354,16 @@ func (s *Store) ReleaseDevicePolling(internalCode string) {
 // (MCP_GATEWAY_TOKEN_STORE_PATH is set), the associated access token value is
 // written to disk in the .refresh sibling file (mode 0600); see the
 // MCP_GATEWAY_TOKEN_STORE_PATH documentation for security considerations.
-func (s *Store) CreateRefreshToken(accessToken, audience string, ttl time.Duration) (string, error) {
+//
+// familyID groups tokens from the same authorization grant for reuse detection
+// (RFC 6819 §5.2.2.3). Pass a new random familyID on initial issuance and
+// propagate the same familyID on rotation.
+func (s *Store) CreateRefreshToken(accessToken, audience, familyID string, ttl time.Duration) (string, error) {
 	code, err := generateCode()
 	if err != nil {
 		return "", fmt.Errorf("generating refresh token: %w", err)
 	}
-	if err := s.refreshStore.Save(code, accessToken, audience, time.Now().Add(ttl)); err != nil {
+	if err := s.refreshStore.Save(code, accessToken, audience, familyID, time.Now().Add(ttl)); err != nil {
 		return "", fmt.Errorf("saving refresh token: %w", err)
 	}
 	return code, nil
@@ -372,7 +376,7 @@ func (s *Store) CreateRefreshToken(accessToken, audience string, ttl time.Durati
 func (s *Store) UseRefreshToken(refreshToken string) (string, error) {
 	s.refreshMu.Lock()
 	defer s.refreshMu.Unlock()
-	accessToken, _, _, ok := s.refreshStore.Lookup(refreshToken)
+	accessToken, _, _, _, ok := s.refreshStore.Lookup(refreshToken)
 	if !ok {
 		return "", fmt.Errorf("refresh token not found or expired")
 	}
@@ -387,7 +391,7 @@ func (s *Store) UseRefreshToken(refreshToken string) (string, error) {
 // when the token is unknown or has expired.  Use ConsumeRefreshToken to
 // delete the token only after the full rotation has succeeded.
 func (s *Store) PeekRefreshToken(refreshToken string) (string, error) {
-	accessToken, _, _, ok := s.refreshStore.Lookup(refreshToken)
+	accessToken, _, _, _, ok := s.refreshStore.Lookup(refreshToken)
 	if !ok {
 		return "", fmt.Errorf("refresh token not found or expired")
 	}
@@ -403,29 +407,43 @@ func (s *Store) ConsumeRefreshToken(refreshToken string) {
 }
 
 // ReserveRefreshToken atomically removes a refresh token from the store and
-// returns the associated access token and expiry time.  Because the token is
-// deleted immediately, concurrent callers presenting the same token will
-// receive an error here, preventing double-rotation.  On any subsequent
-// failure in the rotation flow, call RestoreRefreshToken to put the token
-// back so the client can retry.
-func (s *Store) ReserveRefreshToken(refreshToken string) (string, string, time.Time, error) {
+// returns the associated access token, audience, familyID, and expiry time.
+// Because the token is deleted immediately, concurrent callers presenting the
+// same token will receive an error here, preventing double-rotation. On any
+// subsequent failure in the rotation flow, call RestoreRefreshToken to put the
+// token back so the client can retry.
+//
+// Reuse detection (RFC 6819 §5.2.2.3): if a revoked-but-still-valid token is
+// presented (replay attack), the entire token family is immediately revoked and
+// the error is returned with details logged.
+func (s *Store) ReserveRefreshToken(refreshToken string) (accessToken, audience, familyID string, expiresAt time.Time, err error) {
 	s.refreshMu.Lock()
 	defer s.refreshMu.Unlock()
-	accessToken, audience, expiresAt, ok := s.refreshStore.Lookup(refreshToken)
+	at, aud, fid, exp, ok := s.refreshStore.Lookup(refreshToken)
 	if !ok {
-		return "", "", time.Time{}, fmt.Errorf("refresh token not found or expired")
+		// Check whether this is a revoked token being replayed (reuse attack).
+		_, _, revokedFID, _, revoked, anyOK := s.refreshStore.LookupAny(refreshToken)
+		if anyOK && revoked && revokedFID != "" {
+			slog.Warn("refresh token reuse detected — revoking token family",
+				"family_id", revokedFID,
+			)
+			_ = s.refreshStore.RevokeFamily(revokedFID)
+		}
+		return "", "", "", time.Time{}, fmt.Errorf("refresh token not found or expired")
 	}
-	if err := s.refreshStore.Delete(refreshToken); err != nil {
-		return "", "", time.Time{}, fmt.Errorf("%w: %w", ErrRefreshTokenDeleteFailed, err)
+	// Soft-revoke (not delete) so LookupAny can detect future replay attacks
+	// within the token's expiry window.
+	if revokeErr := s.refreshStore.Revoke(refreshToken); revokeErr != nil {
+		return "", "", "", time.Time{}, fmt.Errorf("%w: %w", ErrRefreshTokenDeleteFailed, revokeErr)
 	}
-	return accessToken, audience, expiresAt, nil
+	return at, aud, fid, exp, nil
 }
 
 // RestoreRefreshToken puts a previously reserved refresh token back into the
 // store.  Call this when the rotation flow fails after ReserveRefreshToken so
 // that the client can retry without full re-authentication.
-func (s *Store) RestoreRefreshToken(refreshToken, accessToken, audience string, expiresAt time.Time) {
-	if err := s.refreshStore.Save(refreshToken, accessToken, audience, expiresAt); err != nil {
+func (s *Store) RestoreRefreshToken(refreshToken, accessToken, audience, familyID string, expiresAt time.Time) {
+	if err := s.refreshStore.Save(refreshToken, accessToken, audience, familyID, expiresAt); err != nil {
 		slog.Warn("refresh token restore failed", "err", err)
 	}
 }

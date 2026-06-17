@@ -612,7 +612,7 @@ func TestValidateTokenReseedsSubjectIndexOnCacheHit(t *testing.T) {
 	}
 }
 
-// TestValidateTokenAudiencePrefixMatching covers the gateway-wide → route-scoped
+// TestValidateTokenAudiencePrefixMatching covers the gateway-wide ↁEroute-scoped
 // acceptance path required by MCP clients (e.g. Codex) that acquire a single
 // token at the public URL and then call multiple authenticated sub-routes.
 func TestValidateTokenAudiencePrefixMatching(t *testing.T) {
@@ -1134,7 +1134,7 @@ func TestTokenRefreshSuccess(t *testing.T) {
 	}
 
 	// Seed a refresh token for an existing access token.
-	rt, err := h.store.CreateRefreshToken("gha_existing_token", "http://localhost:8080/mcp", h.refreshTokenTTL())
+	rt, err := h.store.CreateRefreshToken("gha_existing_token", "http://localhost:8080/mcp", "", h.refreshTokenTTL())
 	if err != nil {
 		t.Fatalf("seeding refresh token: %v", err)
 	}
@@ -1237,7 +1237,7 @@ func TestTokenRefreshUpstreamErrorPreservesToken(t *testing.T) {
 		t.Fatalf("NewHandler: %v", err)
 	}
 
-	rt, err := h.store.CreateRefreshToken("gha_token", "http://localhost:8080/mcp", h.refreshTokenTTL())
+	rt, err := h.store.CreateRefreshToken("gha_token", "http://localhost:8080/mcp", "", h.refreshTokenTTL())
 	if err != nil {
 		t.Fatalf("CreateRefreshToken: %v", err)
 	}
@@ -1291,7 +1291,7 @@ func TestTokenRefreshConcurrentSameToken(t *testing.T) {
 		t.Fatalf("NewHandler: %v", err)
 	}
 
-	rt, err := h.store.CreateRefreshToken("gha_concurrent_token", "http://localhost:8080/mcp", h.refreshTokenTTL())
+	rt, err := h.store.CreateRefreshToken("gha_concurrent_token", "http://localhost:8080/mcp", "", h.refreshTokenTTL())
 	if err != nil {
 		t.Fatalf("CreateRefreshToken: %v", err)
 	}
@@ -1385,7 +1385,7 @@ func TestHandlerRefreshTokenSurvivesRestart(t *testing.T) {
 	}
 
 	h1 := newHandlerWithPath(t, storePath)
-	rt, err := h1.store.CreateRefreshToken("gha_access_token", "http://localhost:8080/mcp", 24*time.Hour)
+	rt, err := h1.store.CreateRefreshToken("gha_access_token", "http://localhost:8080/mcp", "", 24*time.Hour)
 	if err != nil {
 		t.Fatalf("CreateRefreshToken: %v", err)
 	}
@@ -1438,14 +1438,19 @@ type deleteFailRefreshStore struct {
 	inner *memRefreshTokenStore
 }
 
-func (d *deleteFailRefreshStore) Save(rt, at, aud string, exp time.Time) error {
-	return d.inner.Save(rt, at, aud, exp)
+func (d *deleteFailRefreshStore) Save(rt, at, aud, fid string, exp time.Time) error {
+	return d.inner.Save(rt, at, aud, fid, exp)
 }
-func (d *deleteFailRefreshStore) Lookup(rt string) (string, string, time.Time, bool) {
+func (d *deleteFailRefreshStore) Lookup(rt string) (string, string, string, time.Time, bool) {
 	return d.inner.Lookup(rt)
 }
-func (d *deleteFailRefreshStore) Delete(_ string) error { return fmt.Errorf("disk I/O error") }
-func (d *deleteFailRefreshStore) Sweep() error          { return d.inner.Sweep() }
+func (d *deleteFailRefreshStore) LookupAny(rt string) (string, string, string, time.Time, bool, bool) {
+	return d.inner.LookupAny(rt)
+}
+func (d *deleteFailRefreshStore) Revoke(_ string) error         { return fmt.Errorf("disk I/O error") }
+func (d *deleteFailRefreshStore) RevokeFamily(fid string) error { return d.inner.RevokeFamily(fid) }
+func (d *deleteFailRefreshStore) Delete(_ string) error         { return fmt.Errorf("disk I/O error") }
+func (d *deleteFailRefreshStore) Sweep() error                  { return d.inner.Sweep() }
 
 // TestTokenRefreshDeleteFailed503 verifies that when the refresh token store
 // fails to delete the token during rotation (ErrRefreshTokenDeleteFailed),
@@ -1460,7 +1465,7 @@ func TestTokenRefreshDeleteFailed503(t *testing.T) {
 
 	inner := &memRefreshTokenStore{entries: make(map[string]memRTEntry)}
 	failStore := &deleteFailRefreshStore{inner: inner}
-	_ = inner.Save("test-rt", "test-at", "http://localhost:8080/mcp", time.Now().Add(time.Hour))
+	_ = inner.Save("test-rt", "test-at", "http://localhost:8080/mcp", "fid-test", time.Now().Add(time.Hour))
 
 	store := NewStore(time.Minute, 90*24*time.Hour, NewMemTokenStore(),
 		WithRefreshTokenStore(failStore))
@@ -1549,7 +1554,7 @@ func TestTokenRefreshResourceSameAudience(t *testing.T) {
 	const audience = "http://localhost:8080/mcp/route-a"
 	h, _ := newTestRefreshHandlerWithGitHub(t, []string{audience})
 
-	rt, err := h.store.CreateRefreshToken("gha_token", audience, h.refreshTokenTTL())
+	rt, err := h.store.CreateRefreshToken("gha_token", audience, "", h.refreshTokenTTL())
 	if err != nil {
 		t.Fatalf("seeding refresh token: %v", err)
 	}
@@ -1577,7 +1582,7 @@ func TestTokenRefreshResourceNarrowing(t *testing.T) {
 	h, _ := newTestRefreshHandlerWithGitHub(t, []string{routeAud})
 
 	// Original token is gateway-wide.
-	rt, err := h.store.CreateRefreshToken("gha_token", "http://localhost:8080", h.refreshTokenTTL())
+	rt, err := h.store.CreateRefreshToken("gha_token", "http://localhost:8080", "", h.refreshTokenTTL())
 	if err != nil {
 		t.Fatalf("seeding refresh token: %v", err)
 	}
@@ -1601,7 +1606,7 @@ func TestTokenRefreshResourceCrossRoute(t *testing.T) {
 		"http://localhost:8080/mcp/route-b",
 	})
 
-	rt, err := h.store.CreateRefreshToken("gha_token", "http://localhost:8080/mcp/route-a", h.refreshTokenTTL())
+	rt, err := h.store.CreateRefreshToken("gha_token", "http://localhost:8080/mcp/route-a", "", h.refreshTokenTTL())
 	if err != nil {
 		t.Fatalf("seeding refresh token: %v", err)
 	}
@@ -1628,7 +1633,7 @@ func TestTokenRefreshResourceWidening(t *testing.T) {
 	const routeAud = "http://localhost:8080/mcp/route-a"
 	h, _ := newTestRefreshHandlerWithGitHub(t, []string{routeAud})
 
-	rt, err := h.store.CreateRefreshToken("gha_token", routeAud, h.refreshTokenTTL())
+	rt, err := h.store.CreateRefreshToken("gha_token", routeAud, "", h.refreshTokenTTL())
 	if err != nil {
 		t.Fatalf("seeding refresh token: %v", err)
 	}
@@ -1654,7 +1659,7 @@ func TestTokenRefreshResourceWidening(t *testing.T) {
 func TestTokenRefreshResourceUnknown(t *testing.T) {
 	h, _ := newTestRefreshHandlerWithGitHub(t, nil)
 
-	rt, err := h.store.CreateRefreshToken("gha_token", "http://localhost:8080", h.refreshTokenTTL())
+	rt, err := h.store.CreateRefreshToken("gha_token", "http://localhost:8080", "", h.refreshTokenTTL())
 	if err != nil {
 		t.Fatalf("seeding refresh token: %v", err)
 	}
@@ -1686,7 +1691,7 @@ func TestTokenRefreshResourceLegacyToken(t *testing.T) {
 	h, _ := newTestRefreshHandlerWithGitHub(t, []string{routeAud})
 
 	// Empty audience simulates a pre-audience (legacy) refresh token.
-	rt, err := h.store.CreateRefreshToken("gha_token", "", h.refreshTokenTTL())
+	rt, err := h.store.CreateRefreshToken("gha_token", "", "", h.refreshTokenTTL())
 	if err != nil {
 		t.Fatalf("seeding refresh token: %v", err)
 	}
@@ -1707,7 +1712,7 @@ func TestTokenRefreshResourceLegacyToken(t *testing.T) {
 func TestTokenRefreshResourceEmptyValue(t *testing.T) {
 	h, _ := newTestRefreshHandlerWithGitHub(t, []string{"http://localhost:8080/mcp/route-a"})
 
-	rt, err := h.store.CreateRefreshToken("gha_token", "http://localhost:8080", h.refreshTokenTTL())
+	rt, err := h.store.CreateRefreshToken("gha_token", "http://localhost:8080", "", h.refreshTokenTTL())
 	if err != nil {
 		t.Fatalf("seeding refresh token: %v", err)
 	}
@@ -1729,17 +1734,17 @@ func TestTokenRefreshResourceEmptyValue(t *testing.T) {
 }
 
 // TestTokenRefreshResourceMultipleRaw verifies that resource=&resource=https://x
-// (one empty, one valid) is rejected — raw count check ignores empty filtering.
+// (one empty, one valid) is rejected  Eraw count check ignores empty filtering.
 func TestTokenRefreshResourceMultipleRaw(t *testing.T) {
 	const routeAud = "http://localhost:8080/mcp/route-a"
 	h, _ := newTestRefreshHandlerWithGitHub(t, []string{routeAud})
 
-	rt, err := h.store.CreateRefreshToken("gha_token", "http://localhost:8080", h.refreshTokenTTL())
+	rt, err := h.store.CreateRefreshToken("gha_token", "http://localhost:8080", "", h.refreshTokenTTL())
 	if err != nil {
 		t.Fatalf("seeding refresh token: %v", err)
 	}
 
-	// resource= (empty) is present first — should be rejected before multi-check
+	// resource= (empty) is present first  Eshould be rejected before multi-check
 	body := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(rt) + "&resource=&resource=" + url.QueryEscape(routeAud)
 	r := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -1937,7 +1942,7 @@ func TestValidateTokenGitHubRotation(t *testing.T) {
 					t.Errorf("new cache subject: got %q, want %q", rec.Subject, tc.wantSubject)
 				}
 				// Old entry must remain cached: clients keep presenting it and
-				// dropping it would force a provider round-trip — possibly a
+				// dropping it would force a provider round-trip  Epossibly a
 				// 401 once GitHub expires the original.
 				oldRec, oldCached := h.store.LookupToken("old-access")
 				if !oldCached {
@@ -2226,7 +2231,7 @@ func TestValidateTokenGitHubRotationSkipsWhenSubjectUnknown(t *testing.T) {
 
 // TestValidateTokenGitHubRotationKeepsOriginalEntryRotating verifies that
 // after a successful rotation, presenting the original token again triggers
-// another rotation (using the rotated refresh token) — i.e. the original
+// another rotation (using the rotated refresh token)  Ei.e. the original
 // entry's metadata was refreshed, not cleared.
 func TestValidateTokenGitHubRotationKeepsOriginalEntryRotating(t *testing.T) {
 	const audience = "http://localhost:8080/mcp"
@@ -2610,7 +2615,7 @@ func TestAuthorizeCustomSchemeRedirectURI(t *testing.T) {
 func TestAuthorizeCustomSchemeDefaultSchemes(t *testing.T) {
 	h := newTestHandler(t)
 
-	// デフォルトの AllowedRedirectSchemes が正しく設定されているか検証
+	// チE��ォルト�E AllowedRedirectSchemes が正しく設定されてぁE��か検証
 	wantSchemes := []string{"antigravity", "antigravity-insiders"}
 	for _, scheme := range wantSchemes {
 		t.Run("default includes "+scheme, func(t *testing.T) {
