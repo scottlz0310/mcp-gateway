@@ -317,7 +317,8 @@ func TestMigrateOIDCPrivateKey(t *testing.T) {
 		t.Fatalf("MigrateOIDCPrivateKey (generate): %v", err)
 	}
 	if privKey1 == nil {
-		t.Fatal("expected non-nil private key")
+		t.Errorf("expected non-nil private key")
+		return
 	}
 
 	// Config should now hold the encrypted value
@@ -335,7 +336,8 @@ func TestMigrateOIDCPrivateKey(t *testing.T) {
 		t.Fatalf("MigrateOIDCPrivateKey (load): %v", err)
 	}
 	if privKey2 == nil {
-		t.Fatal("expected non-nil loaded private key")
+		t.Errorf("expected non-nil loaded private key")
+		return
 	}
 
 	// Keys should be identical (same N and D for RSA key)
