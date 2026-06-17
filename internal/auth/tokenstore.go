@@ -436,12 +436,28 @@ func (f *fileTokenStore) flush() error {
 
 // RefreshTokenStore persists gateway-issued refresh token → access token mappings.
 // Two implementations: memRefreshTokenStore (default) and fileRefreshTokenStore (JSON file).
+//
+// Token family tracking (RFC 6819 §5.2.2.3): every refresh token belongs to a
+// family identified by a familyID generated at authorization-code issuance and
+// inherited across rotations. When a revoked token is presented again (reuse
+// attack), RevokeFamily invalidates the entire lineage.
 type RefreshTokenStore interface {
-	// Save records that refreshToken maps to accessToken/audience and is valid until expiresAt.
-	Save(refreshToken, accessToken, audience string, expiresAt time.Time) error
-	// Lookup returns the access token, audience, and expiry for a non-expired refresh token, or ("", "", zero, false).
+	// Save records that refreshToken maps to accessToken/audience/familyID and is valid until expiresAt.
+	Save(refreshToken, accessToken, audience, familyID string, expiresAt time.Time) error
+	// Lookup returns the access token, audience, familyID, and expiry for an active (non-revoked,
+	// non-expired) refresh token. Returns false when the token is unknown, expired, or revoked.
 	// expiresAt is returned so that RestoreRefreshToken can re-save with the original expiry on rotation failure.
-	Lookup(refreshToken string) (accessToken, audience string, expiresAt time.Time, ok bool)
+	Lookup(refreshToken string) (accessToken, audience, familyID string, expiresAt time.Time, ok bool)
+	// LookupAny is like Lookup but also returns revoked entries that have not yet expired.
+	// Used for reuse detection: a revoked-but-present entry indicates a replay attack.
+	LookupAny(refreshToken string) (accessToken, audience, familyID string, expiresAt time.Time, revoked, ok bool)
+	// Revoke marks a single refresh token as revoked without deleting it.
+	// The revoked entry is retained until it expires so that reuse detection
+	// (via LookupAny) can identify replay attacks within the expiry window.
+	Revoke(refreshToken string) error
+	// RevokeFamily marks all non-revoked tokens belonging to familyID as revoked.
+	// Used on reuse detection to invalidate the entire token lineage.
+	RevokeFamily(familyID string) error
 	// Delete removes a single refresh token entry immediately.
 	Delete(refreshToken string) error
 	// Sweep removes all expired entries. Called periodically by the Store janitor.
@@ -453,7 +469,9 @@ type RefreshTokenStore interface {
 type memRTEntry struct {
 	accessToken string
 	audience    string
+	familyID    string
 	expiresAt   time.Time
+	revoked     bool
 }
 
 type memRefreshTokenStore struct {
@@ -467,21 +485,61 @@ func NewMemRefreshTokenStore() RefreshTokenStore {
 	return &memRefreshTokenStore{entries: make(map[string]memRTEntry)}
 }
 
-func (m *memRefreshTokenStore) Save(refreshToken, accessToken, audience string, expiresAt time.Time) error {
+func (m *memRefreshTokenStore) Save(refreshToken, accessToken, audience, familyID string, expiresAt time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.entries[tokenKey(refreshToken)] = memRTEntry{accessToken: accessToken, audience: audience, expiresAt: expiresAt}
+	m.entries[tokenKey(refreshToken)] = memRTEntry{
+		accessToken: accessToken,
+		audience:    audience,
+		familyID:    familyID,
+		expiresAt:   expiresAt,
+	}
 	return nil
 }
 
-func (m *memRefreshTokenStore) Lookup(refreshToken string) (string, string, time.Time, bool) {
+func (m *memRefreshTokenStore) Lookup(refreshToken string) (string, string, string, time.Time, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	e, ok := m.entries[tokenKey(refreshToken)]
+	if !ok || time.Now().After(e.expiresAt) || e.revoked {
+		return "", "", "", time.Time{}, false
+	}
+	return e.accessToken, e.audience, e.familyID, e.expiresAt, true
+}
+
+func (m *memRefreshTokenStore) LookupAny(refreshToken string) (string, string, string, time.Time, bool, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	e, ok := m.entries[tokenKey(refreshToken)]
 	if !ok || time.Now().After(e.expiresAt) {
-		return "", "", time.Time{}, false
+		return "", "", "", time.Time{}, false, false
 	}
-	return e.accessToken, e.audience, e.expiresAt, true
+	return e.accessToken, e.audience, e.familyID, e.expiresAt, e.revoked, true
+}
+
+func (m *memRefreshTokenStore) Revoke(refreshToken string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := tokenKey(refreshToken)
+	e, ok := m.entries[key]
+	if !ok || time.Now().After(e.expiresAt) {
+		return nil
+	}
+	e.revoked = true
+	m.entries[key] = e
+	return nil
+}
+
+func (m *memRefreshTokenStore) RevokeFamily(familyID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for k, e := range m.entries {
+		if e.familyID == familyID && !e.revoked {
+			e.revoked = true
+			m.entries[k] = e
+		}
+	}
+	return nil
 }
 
 func (m *memRefreshTokenStore) Delete(refreshToken string) error {
@@ -512,7 +570,9 @@ func (m *memRefreshTokenStore) Sweep() error {
 type fileRTEntry struct {
 	AccessToken string    `json:"a"`
 	Audience    string    `json:"aud,omitempty"`
+	FamilyID    string    `json:"fid,omitempty"`
 	ExpiresAt   time.Time `json:"e"`
+	Revoked     bool      `json:"rv,omitempty"`
 }
 
 type fileRefreshTokenStore struct {
@@ -574,12 +634,12 @@ func NewFileRefreshTokenStore(path string) (RefreshTokenStore, error) {
 	return s, nil
 }
 
-func (f *fileRefreshTokenStore) Save(refreshToken, accessToken, audience string, expiresAt time.Time) error {
+func (f *fileRefreshTokenStore) Save(refreshToken, accessToken, audience, familyID string, expiresAt time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	key := tokenKey(refreshToken)
 	prev, hasPrev := f.entries[key]
-	f.entries[key] = fileRTEntry{AccessToken: accessToken, Audience: audience, ExpiresAt: expiresAt}
+	f.entries[key] = fileRTEntry{AccessToken: accessToken, Audience: audience, FamilyID: familyID, ExpiresAt: expiresAt}
 	if err := f.flush(); err != nil {
 		if hasPrev {
 			f.entries[key] = prev
@@ -591,14 +651,59 @@ func (f *fileRefreshTokenStore) Save(refreshToken, accessToken, audience string,
 	return nil
 }
 
-func (f *fileRefreshTokenStore) Lookup(refreshToken string) (string, string, time.Time, bool) {
+func (f *fileRefreshTokenStore) Lookup(refreshToken string) (string, string, string, time.Time, bool) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	e, ok := f.entries[tokenKey(refreshToken)]
+	if !ok || time.Now().After(e.ExpiresAt) || e.Revoked {
+		return "", "", "", time.Time{}, false
+	}
+	return e.AccessToken, e.Audience, e.FamilyID, e.ExpiresAt, true
+}
+
+func (f *fileRefreshTokenStore) LookupAny(refreshToken string) (string, string, string, time.Time, bool, bool) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	e, ok := f.entries[tokenKey(refreshToken)]
 	if !ok || time.Now().After(e.ExpiresAt) {
-		return "", "", time.Time{}, false
+		return "", "", "", time.Time{}, false, false
 	}
-	return e.AccessToken, e.Audience, e.ExpiresAt, true
+	return e.AccessToken, e.Audience, e.FamilyID, e.ExpiresAt, e.Revoked, true
+}
+
+func (f *fileRefreshTokenStore) Revoke(refreshToken string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := tokenKey(refreshToken)
+	e, ok := f.entries[key]
+	if !ok || time.Now().After(e.ExpiresAt) {
+		return nil
+	}
+	prev := e
+	e.Revoked = true
+	f.entries[key] = e
+	if err := f.flush(); err != nil {
+		f.entries[key] = prev
+		return err
+	}
+	return nil
+}
+
+func (f *fileRefreshTokenStore) RevokeFamily(familyID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	changed := false
+	for k, e := range f.entries {
+		if e.FamilyID == familyID && !e.Revoked {
+			e.Revoked = true
+			f.entries[k] = e
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return f.flush()
 }
 
 func (f *fileRefreshTokenStore) Delete(refreshToken string) error {

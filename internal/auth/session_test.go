@@ -263,7 +263,7 @@ func TestInvalidateCachedTokenDeleteError(t *testing.T) {
 func TestCreateAndUseRefreshToken(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 
-	rt, err := s.CreateRefreshToken("access-token-abc", "https://gw.example/mcp", time.Hour)
+	rt, err := s.CreateRefreshToken("access-token-abc", "https://gw.example/mcp", "fid-1", time.Hour)
 	if err != nil {
 		t.Fatalf("CreateRefreshToken: %v", err)
 	}
@@ -283,7 +283,7 @@ func TestCreateAndUseRefreshToken(t *testing.T) {
 func TestUseRefreshTokenIsOneTimeUse(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 
-	rt, err := s.CreateRefreshToken("tok", "https://gw.example/mcp", time.Hour)
+	rt, err := s.CreateRefreshToken("tok", "https://gw.example/mcp", "fid-1", time.Hour)
 	if err != nil {
 		t.Fatalf("CreateRefreshToken: %v", err)
 	}
@@ -299,7 +299,7 @@ func TestUseRefreshTokenIsOneTimeUse(t *testing.T) {
 func TestUseRefreshTokenExpired(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 
-	rt, err := s.CreateRefreshToken("tok", "https://gw.example/mcp", -time.Second) // already expired
+	rt, err := s.CreateRefreshToken("tok", "https://gw.example/mcp", "fid-1", -time.Second) // already expired
 	if err != nil {
 		t.Fatalf("CreateRefreshToken: %v", err)
 	}
@@ -320,7 +320,7 @@ func TestUseRefreshTokenUnknown(t *testing.T) {
 func TestPeekRefreshTokenDoesNotConsume(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 
-	rt, err := s.CreateRefreshToken("tok", "https://gw.example/mcp", time.Hour)
+	rt, err := s.CreateRefreshToken("tok", "https://gw.example/mcp", "fid-1", time.Hour)
 	if err != nil {
 		t.Fatalf("CreateRefreshToken: %v", err)
 	}
@@ -345,7 +345,7 @@ func TestPeekRefreshTokenDoesNotConsume(t *testing.T) {
 func TestConsumeRefreshToken(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 
-	rt, err := s.CreateRefreshToken("tok", "https://gw.example/mcp", time.Hour)
+	rt, err := s.CreateRefreshToken("tok", "https://gw.example/mcp", "fid-1", time.Hour)
 	if err != nil {
 		t.Fatalf("CreateRefreshToken: %v", err)
 	}
@@ -366,12 +366,12 @@ func TestConsumeRefreshTokenNoOp(t *testing.T) {
 func TestReserveRefreshToken(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 
-	rt, err := s.CreateRefreshToken("access-tok", "https://gw.example/mcp", time.Hour)
+	rt, err := s.CreateRefreshToken("access-tok", "https://gw.example/mcp", "fid-1", time.Hour)
 	if err != nil {
 		t.Fatalf("CreateRefreshToken: %v", err)
 	}
 
-	got, audience, _, err := s.ReserveRefreshToken(rt)
+	got, audience, familyID, _, err := s.ReserveRefreshToken(rt)
 	if err != nil {
 		t.Fatalf("ReserveRefreshToken: %v", err)
 	}
@@ -381,8 +381,11 @@ func TestReserveRefreshToken(t *testing.T) {
 	if audience != "https://gw.example/mcp" {
 		t.Errorf("audience: got %q", audience)
 	}
+	if familyID != "fid-1" {
+		t.Errorf("familyID: got %q, want %q", familyID, "fid-1")
+	}
 	// Token must be gone after reservation (concurrent callers must fail).
-	if _, _, _, err2 := s.ReserveRefreshToken(rt); err2 == nil {
+	if _, _, _, _, err2 := s.ReserveRefreshToken(rt); err2 == nil {
 		t.Fatal("expected error on second ReserveRefreshToken (atomic one-time removal)")
 	}
 }
@@ -390,11 +393,11 @@ func TestReserveRefreshToken(t *testing.T) {
 func TestReserveRefreshTokenExpired(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 
-	rt, err := s.CreateRefreshToken("tok", "https://gw.example/mcp", -time.Second) // already expired
+	rt, err := s.CreateRefreshToken("tok", "https://gw.example/mcp", "fid-1", -time.Second) // already expired
 	if err != nil {
 		t.Fatalf("CreateRefreshToken: %v", err)
 	}
-	if _, _, _, err := s.ReserveRefreshToken(rt); err == nil {
+	if _, _, _, _, err := s.ReserveRefreshToken(rt); err == nil {
 		t.Fatal("expected error for expired refresh token")
 	}
 }
@@ -402,17 +405,17 @@ func TestReserveRefreshTokenExpired(t *testing.T) {
 func TestRestoreRefreshToken(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 
-	rt, err := s.CreateRefreshToken("tok-restore", "https://gw.example/mcp", time.Hour)
+	rt, err := s.CreateRefreshToken("tok-restore", "https://gw.example/mcp", "fid-1", time.Hour)
 	if err != nil {
 		t.Fatalf("CreateRefreshToken: %v", err)
 	}
 
-	_, audience, expiresAt, err := s.ReserveRefreshToken(rt)
+	_, audience, familyID, expiresAt, err := s.ReserveRefreshToken(rt)
 	if err != nil {
 		t.Fatalf("ReserveRefreshToken: %v", err)
 	}
 	// Simulate rotation failure: restore the token.
-	s.RestoreRefreshToken(rt, "tok-restore", audience, expiresAt)
+	s.RestoreRefreshToken(rt, "tok-restore", audience, familyID, expiresAt)
 
 	// Token must be accessible again via Peek after restoration.
 	got, err := s.PeekRefreshToken(rt)
@@ -421,6 +424,74 @@ func TestRestoreRefreshToken(t *testing.T) {
 	}
 	if got != "tok-restore" {
 		t.Errorf("access token after restore: got %q, want %q", got, "tok-restore")
+	}
+}
+
+// TestReserveRefreshTokenReuseRevokesFamily verifies RFC 6819 §5.2.2.3 reuse
+// detection: presenting a revoked (already-used) refresh token must revoke the
+// entire token family, not merely return an error for the presented token.
+func TestReserveRefreshTokenReuseRevokesFamily(t *testing.T) {
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
+
+	// Issue initial refresh token (rt1) with family "fid-family".
+	rt1, err := s.CreateRefreshToken("at-1", "https://gw.example/mcp", "fid-family", time.Hour)
+	if err != nil {
+		t.Fatalf("CreateRefreshToken rt1: %v", err)
+	}
+
+	// Normal rotation: consume rt1 → create rt2 in the same family.
+	_, _, gotFID, _, err := s.ReserveRefreshToken(rt1)
+	if err != nil {
+		t.Fatalf("first ReserveRefreshToken: %v", err)
+	}
+	if gotFID != "fid-family" {
+		t.Errorf("familyID: got %q, want %q", gotFID, "fid-family")
+	}
+	rt2, err := s.CreateRefreshToken("at-2", "https://gw.example/mcp", "fid-family", time.Hour)
+	if err != nil {
+		t.Fatalf("CreateRefreshToken rt2: %v", err)
+	}
+
+	// rt1 is now revoked. Replaying it must revoke the entire family (rt2).
+	_, _, _, _, err = s.ReserveRefreshToken(rt1)
+	if err == nil {
+		t.Fatal("expected error on revoked token replay, got nil")
+	}
+
+	// rt2 must also be revoked (family-wide invalidation).
+	_, _, _, _, err = s.ReserveRefreshToken(rt2)
+	if err == nil {
+		t.Fatal("rt2 must be revoked after family invalidation, but ReserveRefreshToken succeeded")
+	}
+}
+
+// TestReserveRefreshTokenFamilyIDPropagates verifies that the family ID is
+// returned by ReserveRefreshToken and can be passed to CreateRefreshToken for
+// rotation, maintaining the lineage.
+func TestReserveRefreshTokenFamilyIDPropagates(t *testing.T) {
+	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
+
+	rt1, err := s.CreateRefreshToken("at", "https://gw.example/mcp", "fid-chain", time.Hour)
+	if err != nil {
+		t.Fatalf("CreateRefreshToken: %v", err)
+	}
+
+	_, _, fid1, _, err := s.ReserveRefreshToken(rt1)
+	if err != nil {
+		t.Fatalf("ReserveRefreshToken: %v", err)
+	}
+
+	rt2, err := s.CreateRefreshToken("at-2", "https://gw.example/mcp", fid1, time.Hour)
+	if err != nil {
+		t.Fatalf("CreateRefreshToken rt2: %v", err)
+	}
+
+	_, _, fid2, _, err := s.ReserveRefreshToken(rt2)
+	if err != nil {
+		t.Fatalf("second ReserveRefreshToken: %v", err)
+	}
+	if fid2 != fid1 {
+		t.Errorf("familyID not propagated: rt1=%q rt2=%q", fid1, fid2)
 	}
 }
 
