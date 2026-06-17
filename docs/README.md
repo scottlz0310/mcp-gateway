@@ -1,26 +1,23 @@
-# Documentation
+# ドキュメント
 
-This directory contains operational and reference documentation for
-mcp-gateway.
+このディレクトリには mcp-gateway の運用リファレンスドキュメントが含まれています。
 
-## Guides
+## ガイド
 
-| Document | Purpose |
-|----------|---------|
-| [Architecture](architecture.md) | Review platform overview, responsibility boundaries, route examples, and design principles. |
-| [Operations Guide](operations.md) | Start/stop procedures, health checks, structured logs, troubleshooting, and deployment migration notes. |
-| [Configuration Reference](configuration.md) | Environment variables, `config.yaml`, route syntax, token persistence, reverse proxy settings, and endpoint reference. |
-| [v0.1.0 E2E Runbook](runbook-e2e-v0.1.0.md) | End-to-end acceptance runbook for setup wizard, encryption, routing, token persistence, and device flow. |
-| [Copilot API Auth Spike](spike-18-copilot-api-auth.md) | Investigation notes for the Copilot API upstream authentication model. |
+| ドキュメント | 用途 |
+|------------|------|
+| [アーキテクチャ](architecture.md) | レビュープラットフォーム概要、責務境界、ルート例、設計原則。 |
+| [運用ガイド](operations.md) | 起動・停止手順、ヘルスチェック、構造化ログ、トラブルシュート、デプロイ移行手順。 |
+| [設定リファレンス](configuration.md) | 環境変数、`config.yaml`、ルート構文、トークン永続化、リバースプロキシ設定、エンドポイントリファレンス。 |
+| [v0.1.0 E2E ランブック](runbook-e2e-v0.1.0.md) | セットアップウィザード・暗号化・ルーティング・トークン永続化・デバイスフローの E2E 受け入れランブック。 |
+| [Copilot API Auth Spike](spike-18-copilot-api-auth.md) | Copilot API upstream 認証モデルの調査ノート。 |
 
-## Examples
+## サンプル
 
-| Path | Purpose |
-|------|---------|
-| [`../examples/copilot-review-routing/`](../examples/copilot-review-routing/) | Docker Compose example for routing both `github-mcp-server` and `copilot-review-mcp` through one gateway. |
+| パス | 用途 |
+|------|------|
+| [`../examples/copilot-review-routing/`](../examples/copilot-review-routing/) | `github-mcp-server` と `copilot-review-mcp` を 1 つのゲートウェイでルーティングする Docker Compose サンプル。 |
 
-## README Split
+## README の構成方針
 
-The root [README](../README.md) is intentionally focused on the first-run path,
-architecture overview, and links into these documents. Detailed configuration
-and operations material should live here to keep the README scannable.
+ルートの [README](../README.md) は意図的に初回起動手順・アーキテクチャ概要・各ドキュメントへのリンクに絞っています。詳細な設定・運用の内容はここに置き、README をスキャンしやすく保ちます。
