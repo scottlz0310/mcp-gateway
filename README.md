@@ -232,12 +232,12 @@ Important paths:
 
 | Setting | Default | Notes |
 |---------|---------|-------|
-| `MCP_CONFIG_FILE` | `./config.yaml` | Persisted setup and encrypted secrets. |
-| `MCP_GATEWAY_KEY_PATH` | `./gateway.key` | age X25519 identity. Back it up securely. |
-| `MCP_GATEWAY_TOKEN_STORE_PATH` | `/data/tokens.json` | Docker-friendly token persistence path. Use a writable local path outside Docker. |
+| `MCP_CONFIG_FILE` | `{state-dir}/config.yaml` | Persisted setup and encrypted secrets. |
+| `MCP_GATEWAY_KEY_PATH` | `{state-dir}/gateway.key` | age X25519 identity. Back it up securely. |
+| `MCP_GATEWAY_TOKEN_STORE_PATH` | `{state-dir}/tokens.json` | Persistent token store. Docker deployments pin this via env var. |
 | `MCP_GATEWAY_AUTH_AUDIT_LOG_PATH` | OS user state directory; `/data/mcp-gateway/logs/auth-audit.jsonl` in the official image | Rotating OAuth audit JSON Lines file. Relative paths and Git worktree paths are rejected. |
 
-The full reference is in [docs/configuration.md](docs/configuration.md).
+`{state-dir}` is the OS user state directory resolved at startup (Windows: `%LOCALAPPDATA%\mcp-gateway`, macOS: `~/Library/Application Support/mcp-gateway`, Linux: `$XDG_STATE_HOME/mcp-gateway` → `~/.local/state/mcp-gateway`). Docker deployments always override paths via environment variables. See [docs/configuration.md](docs/configuration.md) for the full reference.
 
 ## Endpoints
 
