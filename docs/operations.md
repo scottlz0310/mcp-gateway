@@ -41,13 +41,15 @@ deployments even when `MCP_GATEWAY_BIND_ADDR` is `0.0.0.0:8080`.
 
 ### Bare Binary Or `go run`
 
-When running outside Docker, the default token store path (`/data/tokens.json`)
-usually does not exist. Point runtime files at writable local paths:
+When running outside Docker, runtime files default to the OS user state
+directory (see [configuration reference](configuration.md#environment-variables)).
+The directory is created automatically on first startup. To override to an
+explicit path, set the path variables before starting:
 
 ```bash
-export MCP_GATEWAY_TOKEN_STORE_PATH=./tokens.json
-export MCP_CONFIG_FILE=./config.yaml
-export MCP_GATEWAY_KEY_PATH=./gateway.key
+export MCP_GATEWAY_TOKEN_STORE_PATH=/your/path/tokens.json
+export MCP_CONFIG_FILE=/your/path/config.yaml
+export MCP_GATEWAY_KEY_PATH=/your/path/gateway.key
 export OAUTH_CLIENT_ID=<your-client-id>
 export OAUTH_CLIENT_SECRET=<your-client-secret>
 export ROUTE_GITHUB=/mcp/github|http://127.0.0.1:8082
@@ -360,19 +362,22 @@ For the local default this is:
 http://127.0.0.1:8080/callback
 ```
 
-### Bare Binary Fails Because `/data` Does Not Exist
+### State Directory Cannot Be Created
 
 Symptoms:
 
-- Local `go run ./cmd/server` or a bare binary fails while opening the token
-  store.
+- Local `go run ./cmd/server` or a bare binary fails while creating or opening
+  the state directory / token store (e.g. `permission denied`).
 
 Fix:
 
+The gateway creates the OS default state directory on startup. If the directory
+cannot be created (e.g. due to permissions), pin paths to a writable location:
+
 ```bash
-export MCP_GATEWAY_TOKEN_STORE_PATH=./tokens.json
-export MCP_CONFIG_FILE=./config.yaml
-export MCP_GATEWAY_KEY_PATH=./gateway.key
+export MCP_GATEWAY_TOKEN_STORE_PATH=/your/writable/path/tokens.json
+export MCP_CONFIG_FILE=/your/writable/path/config.yaml
+export MCP_GATEWAY_KEY_PATH=/your/writable/path/gateway.key
 ```
 
 ### Invalid Trusted Proxy CIDR
