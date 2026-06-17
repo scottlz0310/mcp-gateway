@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"net/url"
@@ -894,7 +895,7 @@ func (h *Handler) Activate(w http.ResponseWriter, r *http.Request) {
   </label><br><br>
   <button type="submit">Activate</button>
 </form>
-</body></html>`, prefill)
+</body></html>`, html.EscapeString(prefill))
 }
 
 // ActivateSubmit handles POST /activate — validates the user_code and redirects
@@ -976,9 +977,10 @@ func (h *Handler) DeviceCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Clean up the OAuth session used to bridge the device flow.
-	// (We initiated it via SaveSession, not the normal /authorize path,
-	//  so there is no internalCode to redirect; just show a success page.)
+	// Remove the bridge OAuth session — it was created by SaveSession for this
+	// device flow only and is not consumed by the normal ExchangeCode path.
+	h.store.DeleteSession(state)
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = fmt.Fprint(w, `<!DOCTYPE html>

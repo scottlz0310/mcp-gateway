@@ -170,6 +170,13 @@ func (s *Store) HasSession(state string) bool {
 	return ok && !time.Now().After(sess.ExpiresAt)
 }
 
+// DeleteSession removes the session keyed by state. No-op if absent.
+func (s *Store) DeleteSession(state string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.sessions, state)
+}
+
 // CompleteCallback attaches an internal code and access token to the session.
 // providerRefreshToken and providerAccessExpiry are zero-valued when the
 // upstream provider did not advertise them (e.g. classic non-expiring GitHub
@@ -303,6 +310,9 @@ func (s *Store) IncreaseDeviceInterval(internalCode string) {
 	defer s.mu.Unlock()
 	if d, ok := s.devices[internalCode]; ok {
 		d.Interval += 5
+		// Reset nextPollAfter so the client must wait the full new interval
+		// before the next poll is accepted (RFC 8628 §3.5).
+		d.nextPollAfter = time.Now().Add(time.Duration(d.Interval) * time.Second)
 	}
 }
 
