@@ -2635,6 +2635,29 @@ func TestAuthorizeCustomSchemeRedirectURI(t *testing.T) {
 			schemes:     []string{"com.example.app"},
 			wantStatus:  http.StatusFound,
 		},
+		// true opaque form (scheme:opaque, no leading slash — exercises the Opaque branch)
+		{
+			name:        "true opaque form accepted when scheme is allowed",
+			redirectURI: "antigravity:callback",
+			wantStatus:  http.StatusFound,
+		},
+		{
+			name:        "true opaque form rejected when scheme not allowed",
+			redirectURI: "myapp:callback",
+			wantStatus:  http.StatusBadRequest,
+		},
+		// scheme-only URI (host == "" && path == "" && opaque == "") must be rejected
+		{
+			name:        "custom scheme URI with no path or opaque rejected",
+			redirectURI: "antigravity:",
+			wantStatus:  http.StatusBadRequest,
+		},
+		// http/https without host must be rejected
+		{
+			name:        "http scheme without host rejected",
+			redirectURI: "http:/no-authority-path",
+			wantStatus:  http.StatusBadRequest,
+		},
 	}
 
 	for _, tc := range tests {
