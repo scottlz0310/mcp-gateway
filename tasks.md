@@ -1,240 +1,146 @@
 # Tasks
 
-`mcp-gateway` の継続的なタスク管理ファイル。各 issue の状態とサブタスク、依存関係を記録する。
+`mcp-gateway` の現在の未実装 GitHub Issue を、優先度と実装依存に沿って管理する。
 
-過去のリリース履歴（v0.1.0 〜 v0.3.0）は [`docs/tasks-archive-v0.3.0.md`](docs/tasks-archive-v0.3.0.md) を参照。
+完了済みの履歴は archive に移し、このファイルには原則として open issue と次に着手すべき順序だけを残す。
+
+- v0.1.0 から v0.3.0 まで: [`docs/tasks-archive-v0.3.0.md`](docs/tasks-archive-v0.3.0.md)
+- v0.4.0 から v0.6.0 まで: [`docs/tasks-archive-v0.6.0.md`](docs/tasks-archive-v0.6.0.md)
+- 公開リリース単位の履歴: [`CHANGELOG.md`](CHANGELOG.md) / [`CHANGELOG.ja.md`](CHANGELOG.ja.md)
 
 ## 凡例
 
 - `[ ]` 未着手
-- `[~]` 進行中
+- `[~]` 設計済み / 管理中
 - `[x]` 完了
 - `[-]` 保留 / 別 issue へ移管
 
 ---
 
-## Issue #140 — GitHub Apps トークン有効期限対応（tryGitHubRotation の ghu_ 互換）
+## 現在の判断基準
 
-**目的**: GitHub Apps の user-to-server トークン（`ghu_`）と refresh token（`ghr_`）で `tryGitHubRotation` が正常動作することを確認・テスト追加する。
-
-### サブタスク
-
-- [x] `tryGitHubRotation` が `ghu_`/`ghr_` トークンで動作することを確認（プレフィックス検証なし・既存コードで対応済み）
-- [x] `internal/auth/provider/github_test.go` に `ghu_` access token ・`ghr_` refresh token のテストケースを追加
-- [x] `internal/auth/delegated_access_test.go` に `ghu_`/`ghr_` ローテーション統合テストを追加（`TestEnsureFreshAccessTokenForSubject_GhuTokenRotation`）
-- [x] `docs/configuration.md` に GitHub App 側の「Expire user authorization tokens」有効化手順を追加
-- [x] `README.md` / `README.ja.md` の「Expiring tokens」注記を更新（対応済みに変更）
-- [x] `CHANGELOG.md` / `CHANGELOG.ja.md` の `Unreleased` を更新
-- [x] `tasks.md` に本 Issue を記録
+- 対象: 2026-06-18 時点の open issue
+- `#126` は設計決定 issue であり、直接の実装単位ではない。実装は `#122` / `#123` / `#125` / `#6` へ寄せる。
+- `#84` は upstream OAuth delegation の親 issue。実装は `#113` から `#118` の直列 chain で進める。
+- `#65` は Renovate Dependency Dashboard であり、通常の実装ロードマップには含めない。
 
 ---
 
-## Issue #139 — GitHub Apps への切り替え本体（provider 差し替え・コールバック URL・ドキュメント）
+## 推奨実装順
 
-**目的**: GitHub OAuth Apps から GitHub Apps（user-to-server OAuth）へのプロバイダー切り替えを行う。トークン有効期限対応は Sub-Issue B（#138）に分離。
-
-### サブタスク
-
-- [x] `ghu_` プレフィックストークンの受け入れ確認 — プレフィックス検証ロジックが存在しないため既存コードで対応済み
-- [x] `internal/auth/provider/github.go` コメントを GitHub Apps に更新（`RefreshToken` の docstring）
-- [x] `internal/auth/provider/factory.go` エラーメッセージを "GitHub App credentials" に更新
-- [x] `internal/auth/handler.go` コメント更新（`GitHubRefreshEnabled` フィールド）
-- [x] `internal/internalapi/handler_test.go` テストフィクスチャを `ghu_` プレフィックスに更新
-- [x] `README.md` / `README.ja.md` を GitHub App 作成手順に更新（`/callback` + `/device_callback` 両 URL 登録、最小 Permissions、移行ガイド）
-- [x] `docs/configuration.md` の "GitHub OAuth App" 参照を "GitHub App" に統一
-- [x] `CHANGELOG.md` / `CHANGELOG.ja.md` の `Unreleased` を更新
-- [x] `tasks.md` に本 Issue を記録
-
----
-
-## Issue #105 — ルーティング先 MCP サーバーで報告される認証切れをログから調査する
-
-**目的**: mcp-gateway でルーティングしている複数の MCP サーバーから報告されている認証切れエラーについて、ログや設定ファイルを基に原因特定・境界分析を行い、対策を決定する。
-
-### サブタスク
-
-- [x] ログファイルのエクスポートと監査ログ（`auth-audit.jsonl`）の確認
-- [x] 認証エラーが発生したタイミングと設定値の相関分析
-- [x] 調査結果レポート（`docs/spike-105-auth-issue-investigation.md`）の作成とアーティファクト出力
-- [x] `tasks.md` に結果を記録し、対策タスクを `Mcp-Docker` に起票する準備を整える
+| 優先 | Issue | 状態 | 依存 | 次のアクション |
+|---|---|---|---|---|
+| P0 | [#122](https://github.com/scottlz0310/mcp-gateway/issues/122) OIDC Discovery metadata 補完 | [ ] | なし | `/.well-known/openid-configuration` に PKCE / grant / registration / device metadata を追加 |
+| P0 | [#123](https://github.com/scottlz0310/mcp-gateway/issues/123) OIDC `nonce` claim 対応 | [ ] | なし | `nonce` を authorize session から `id_token` まで伝播 |
+| P1 | [#125](https://github.com/scottlz0310/mcp-gateway/issues/125) RFC 8252 opaque-form redirect URI | [ ] | なし | custom scheme の `Opaque` 形式を許可し、HTTP(S) とは別に validation |
+| P1 | [#6](https://github.com/scottlz0310/mcp-gateway/issues/6) gateway OIDC Provider 完成 / agy 完走 | [ ] | `#122` / `#123` / `#125` 推奨先行、`#127` / `#128` / `#130` 完了済み | #126 前提の AC で agy / device flow / gateway-issued JWT を E2E 確認 |
+| P2 | [#113](https://github.com/scottlz0310/mcp-gateway/issues/113) upstream OAuth route option | [ ] | なし | `upstream_oauth` / `upstream_oauth_scope` の parse / validation を追加 |
+| P2 | [#114](https://github.com/scottlz0310/mcp-gateway/issues/114) upstream OAuth discovery + DCR | [ ] | `#113` | RFC 9728 / RFC 8414 discovery と DCR client store を実装 |
+| P2 | [#115](https://github.com/scottlz0310/mcp-gateway/issues/115) upstream token store | [ ] | `#114` | `(subject, route_name)` keyed token store を追加 |
+| P2 | [#116](https://github.com/scottlz0310/mcp-gateway/issues/116) upstream OAuth authorization flow | [ ] | `#114` / `#115` | PKCE / state / `/upstream/callback/{route-name}` を実装 |
+| P2 | [#117](https://github.com/scottlz0310/mcp-gateway/issues/117) proxy token injection | [ ] | `#113`-`#116` | proxy に upstream token injection と再認証誘導を統合 |
+| P2 | [#118](https://github.com/scottlz0310/mcp-gateway/issues/118) upstream token refresh | [ ] | `#117` | proactive refresh と 401 後 refresh/retry を追加 |
 
 ---
 
-## Issue #104 — github-mcp-server プロキシ時の認証切れ不具合の解消
+## Phase 1: OIDC Authorization Server の仕様補完
 
-**目的**: github-mcp-server と連携時、クライアント（LLM）側のトークンが期限切れ、またはセッション状態が変化した際に、upstream で 401 認証エラーとなり、ゲートウェイ全体で「認証切れ」と報告される不具合を修正する。
+設計アンカー: [#126](https://github.com/scottlz0310/mcp-gateway/issues/126)
 
-### サブタスク
+`#127` GitHub social login layer、`#128` refresh token rotation / reuse detection、`#129` audience 分離、`#130` gateway-native Device Authorization Grant は v0.6.0 で完了済み。残件は OIDC metadata / nonce / native redirect URI の仕様補完と、agy を含む E2E 完走確認。
 
-- [x] `examples/copilot-review-routing/docker-compose.yml` 内の `mcp-gateway` に `GITHUB_PERSONAL_ACCESS_TOKEN` 環境変数を追加
-- [x] `ROUTE_GITHUB` 設定に `upstream_bearer_token_env=GITHUB_PERSONAL_ACCESS_TOKEN` オプションを追加し、サーバー側のトークンをインジェクトさせる
-- [x] `CHANGELOG.md` / `CHANGELOG.ja.md` の `Unreleased` を更新
-- [x] `tasks.md` の関連タスクをクローズする
+### [#122](https://github.com/scottlz0310/mcp-gateway/issues/122) OIDC Discovery に `code_challenge_methods_supported` を追加
 
-## Issue #102 — OAuth 認証監査ログの永続化・ローテーション・診断機能
+- [ ] `OIDCDiscovery` に `code_challenge_methods_supported: ["S256"]` を追加
+- [ ] `grant_types_supported` に `authorization_code` / `refresh_token` / `urn:ietf:params:oauth:grant-type:device_code` を追加
+- [ ] `registration_endpoint` と `device_authorization_endpoint` を追加
+- [ ] `internal/auth/handler_test.go` に OIDC Discovery の regression test を追加
 
-**目的**: OAuth 認証フローの成否と失敗原因を、リポジトリ外の機械可読な監査ログと internal API から事後解析可能にする。
+### [#123](https://github.com/scottlz0310/mcp-gateway/issues/123) OIDC Provider の `nonce` claim 対応
 
-### サブタスク
+- [ ] `/authorize` で `nonce` パラメータを読み取り session に保存
+- [ ] authorization code exchange の結果に `nonce` を含める
+- [ ] `writeTokenResponse` / `generateIDToken` まで `nonce` を伝播
+- [ ] `nonce` が空でない場合のみ `id_token` payload に含める
+- [ ] OIDC Core §3.1.3.7 の期待に沿うテストを追加
 
-- [x] `internal/authaudit` に OS 別の外部保存 path 解決と Git worktree 配下拒否を実装
-- [x] JSON Lines、10 MiB、5世代、30日保持のローテーションを実装
-- [x] provider の OAuth エラーを型付き化し、`oauth_error` と HTTP status を安全に抽出
-- [x] authorize / callback / token exchange / identity resolution / refresh / rotation の監査イベントを追加
-- [x] 直近100件の失敗を保持し、`GET /internal/v1/auth/failures` から参照可能にする
-- [x] 公式 container image の `XDG_STATE_HOME` を `/data` に設定し、既定 path を `/data/mcp-gateway/logs/auth-audit.jsonl` に解決
-- [x] 機密情報除外、ローテーション境界、保持数・日数、並行書き込み、診断 API のテストを追加
-- [x] `README.md` / `README.ja.md` / `docs/configuration.md` / `docs/operations.md` を更新
-- [x] `CHANGELOG.md` / `CHANGELOG.ja.md` の `Unreleased` を更新
+### [#125](https://github.com/scottlz0310/mcp-gateway/issues/125) RFC 8252 opaque-form カスタムスキーム URI
 
----
+- [ ] `http` / `https` は従来通り host 必須で検証
+- [ ] custom scheme は `Host != ""` または `Opaque != ""` のどちらかを許可
+- [ ] fragment 付き redirect URI は引き続き拒否
+- [ ] `com.example.app:/oauth2redirect/provider` の許可テストを追加
+- [ ] host も opaque もない custom scheme を拒否するテストを追加
 
-## Issue #100 — redirect_uri 許可ホストに設定経路がなく agy 認証が失敗する
+### [#6](https://github.com/scottlz0310/mcp-gateway/issues/6) gateway OIDC Provider / agy 認証フロー完走
 
-**目的**: agy（Antigravity）からの OAuth 認証が許可リスト制限で失敗する問題を解消するため、ホスト許可リストの設定手段（環境変数および config.yaml）を追加し、デフォルト許可ホストに `antigravity.google` を加える。
-
-### サブタスク
-
-- [x] `internal/config/config.go` の `GatewayConfig` に `AllowedRedirectHosts` フィールドを追加し、`config.yaml` から設定可能にする
-- [x] `cmd/server/main.go` にて環境変数 `MCP_GATEWAY_ALLOWED_REDIRECT_HOSTS`（カンマ区切り）の読み込み経路と、`config.yaml` からのフォールバックを設定
-- [x] `internal/auth/handler.go` のデフォルト `AllowedRedirectHosts` に `antigravity.google` を追加
-- [x] ユニットテストを追加し、デフォルト動作とカスタム設定時の挙動を検証
-- [x] `docs/configuration.md` に設定項目について追記
-- [x] `CHANGELOG.md` / `CHANGELOG.ja.md` の `Unreleased` セクションに変更内容を追記
+- [ ] 実装着手前に #126 の設計決定を前提として受け入れ基準を再確認
+- [ ] agy から Authorization Code + PKCE フローが完走することを確認
+- [ ] gateway が自身の `access_token` / `id_token` を発行し、GitHub access token を client に渡さないことを確認
+- [ ] Claude CLI / Copilot CLI が device flow または互換モードで認証できることを確認
+- [ ] 既存の `upstream_bearer_token_env` と upstream OAuth delegation 設計に影響がないことを確認
 
 ---
 
-## アクティブフェーズ: Issue #70 — Auth Lifecycle Mismatch 対応
+## Phase 2: upstream OAuth delegation
 
-### 背景
+親 issue: [#84](https://github.com/scottlz0310/mcp-gateway/issues/84)
 
-[Issue #70](https://github.com/scottlz0310/mcp-gateway/issues/70) の spike 調査により、`mcp-gateway` ↔ `copilot-review-mcp` 間で次の構造が確認された:
+Cloudflare MCP など、upstream が独自 OAuth サーバーを持つケースに対応する。`upstream_bearer_token_env` による静的 token injection とは別の機能として、ユーザーごとの upstream OAuth フローを gateway が仲介する。
 
-- 当初: ゲートウェイは Bearer トークン（`gho_*`）を upstream にパススルーするだけで、proxying 経路でのトークン refresh は未実装だった（`internal/proxy/handler.go` の `Rewrite` callback、`internal/auth/handler.go` の `Handler.ValidateToken`）。**Phase A (本ブランチ) で `Handler.ValidateToken` 側に rotation 統合が完了している（gate: `gateway.github_refresh_enabled`）。**
-- `copilot-review-mcp` 側は watch 開始時の token を `oauth2.StaticTokenSource` でスナップショットし、最大 2 時間のバックグラウンドポーリングを行う（refresh 不可）
-- 短命トークン（GitHub App installation token 等、有効期限 ≦ 2 時間）を扱う構成では watch 途中で確実に失効する
-- 現行設計でも `FailureReasonAuthExpired` により AI エージェントへの構造化通知は機能しているため、緊急の暫定対処は不要
+### [#113](https://github.com/scottlz0310/mcp-gateway/issues/113) route option parse / validation
 
-調査詳細は Issue #70 のコメント参照:
-- [gateway 側調査](https://github.com/scottlz0310/mcp-gateway/issues/70#issuecomment-4423105027)
-- [upstream 側調査](https://github.com/scottlz0310/mcp-gateway/issues/70#issuecomment-4423300774) / [追加 deep dive](https://github.com/scottlz0310/mcp-gateway/issues/70#issuecomment-4423383186)
-- [統合まとめと方針](https://github.com/scottlz0310/mcp-gateway/issues/70#issuecomment-4423496131)
+- [ ] `internal/router.Route` に `UpstreamOAuth` / `UpstreamOAuthScope` を追加
+- [ ] `ROUTE_*` の `upstream_oauth=auto|https://...` を parse
+- [ ] `upstream_oauth_scope` を parse し、空白のみは拒否
+- [ ] `upstream_oauth` と `upstream_bearer_token_env` の同時指定を fail-closed
+- [ ] `config.yaml` route でも同じ validation を適用
 
-### 採用方針
+### [#114](https://github.com/scottlz0310/mcp-gateway/issues/114) discovery / Dynamic Client Registration
 
-- 現行の非同期 watch 設計（`copilot-review-mcp` 側 Option B = token snapshot）は維持する
-- Option A（request-scoped 化）への回帰は採らない（`wait_for_copilot_review` で legacy fallback として残し、新規 work はしない）
-- 根本対策は gateway 側を主軸に、フェーズ分けで進める
+- [ ] `upstream_oauth=auto` で RFC 9728 PRM から authorization server を発見
+- [ ] 明示 issuer URL では RFC 8414 metadata を直接取得
+- [ ] discovery 結果を route 単位で遅延取得・キャッシュ
+- [ ] DCR で `client_id` / `client_secret` を取得
+- [ ] `upstream_clients.json` を 0600 + atomic write で永続化
 
----
+### [#115](https://github.com/scottlz0310/mcp-gateway/issues/115) upstream user token store
 
-## Phase A: GitHub OAuth refresh token rotation を gateway provider に実装（短期・low risk）
+- [ ] `UpstreamTokenStore` interface を追加
+- [ ] in-memory 実装と JSON file-backed 実装を追加
+- [ ] on-disk key を `sha256(subject + "\x00" + routeName)` にして raw identity を本文に保存しない
+- [ ] `ExpiresAt` に基づく lookup / sweep を実装
+- [ ] `TokenStorePath` と同一ディレクトリに `upstream_tokens.json` を置く
 
-**目的**: GitHub OAuth App で expiring tokens が有効化されているデプロイにおいて、access token の期限切れをゲートウェイ層で自動回復させる。これにより `copilot-review-mcp` の watch goroutine がスナップショットしたトークンが切れる前に、後続リクエスト経由で fresh token に置き換わるシナリオを増やす。
+### [#116](https://github.com/scottlz0310/mcp-gateway/issues/116) upstream authorization flow
 
-**Issue**: 新規作成予定（Phase A の専用 issue を切る）
+- [ ] upstream OAuth state store を TTL 付き in-memory で実装
+- [ ] PKCE `code_verifier` / `code_challenge` を生成
+- [ ] `/upstream/callback/{route-name}` を追加
+- [ ] callback では state store から subject を復元し、middleware context に依存しない
+- [ ] token endpoint から取得した token を `UpstreamTokenStore` に保存
 
-### サブタスク
+### [#117](https://github.com/scottlz0310/mcp-gateway/issues/117) proxy integration
 
-- [x] `internal/auth/provider/github.go` に refresh token rotation API（`POST https://github.com/login/oauth/access_token` `grant_type=refresh_token`）を追加
-- [x] `internal/auth/tokenstore.go` の `TokenRecord` に GitHub 側 refresh token と GitHub access token の有効期限を保存できるよう拡張（既存の gateway-issued refresh token とは別フィールド）
-- [x] `internal/auth/handler.go:ValidateToken` で「キャッシュ hit だが GitHub access token の有効期限が近い」場合に rotation を試みるパスを追加
-- [x] rotation 失敗時の挙動: cache を維持し、ログに `rotation_failed` を残して既存の 401 経路に委譲（後段で upstream が 401 を返した場合に `invalid_token` で再認証を促す）
-- [x] `cfg.GitHubRefreshEnabled` で機能 gate（OAuth App が non-expiring 構成の場合は no-op）
-- [x] 既存 `Handler` テストへ rotation 成功 / 失敗 / 期限ギリギリ / gate off / metadata 欠落 / 空 access_token / ErrRefreshNotSupported の 7 ケースをテーブル駆動で追加
-- [x] `docs/configuration.md` に rotation 設定とトラブルシュートを追記
-- [x] `CHANGELOG.md` / `CHANGELOG.ja.md` の Unreleased セクションに Phase A の追加・変更を記載
+- [ ] `upstream_oauth` route では user-specific upstream token を `Authorization: Bearer` として注入
+- [ ] token がない場合は upstream OAuth 認可フローへ誘導
+- [ ] upstream 401 では該当 upstream token を削除し、gateway OAuth cache invalidation と混在させない
+- [ ] `upstream_bearer_token_env` と既存 client token path の regression test を追加
 
-### 受け入れ基準
+### [#118](https://github.com/scottlz0310/mcp-gateway/issues/118) proactive refresh / 401 retry
 
-- [x] expiring tokens 有効な OAuth App 構成下で、access token が期限切れ直前のリクエストを送ったときにキャッシュが silently rotate される
-- [x] rotation 後の新 access token が `proxy.NewHandler` 経由で upstream に届く（`middleware.Auth` が context の bearer を差し替える）
-- [x] rotation 失敗時にクライアントは `invalid_token` を受け取り、`WWW-Authenticate` から再認証フローに進める（upstream 401 経由）
-- [x] 既存テストの後方互換 (non-expiring 構成) が崩れない
-
-### 既知の限界
-
-- `copilot-review-mcp` の watch goroutine は依然 snapshot を保持するため、**watch 実行中の差し替えは行われない**。Phase A は「次に gateway 経由で watch を再起動するリクエスト」のたびに fresh token を流せるようにするだけ。watch 中の自動更新は Phase B で扱う。
-
----
-
-## Phase B: Delegated background access（完了）
-
-**目的**: upstream MCP server（`copilot-review-mcp` 等）が background workflow から「現在の有効 token を取り直す」ことを許す内部 API をゲートウェイに追加し、Option C（gateway-managed delegated access）の小さい実装を検証する。
-
-**Issue**: [#72](https://github.com/scottlz0310/mcp-gateway/issues/72)（PoC 実装、PR #76 でマージ済み）、[#77](https://github.com/scottlz0310/mcp-gateway/issues/77)（rotation 正確性ギャップ修正）
-
-### サブタスク
-
-- [x] 設計ドキュメント `docs/spike-72-delegated-background-access.md` を作成
-  - エンドポイント: `POST /internal/v1/whoami`（loopback bind + shared secret）
-  - trust boundary: loopback(127.0.0.1) + `MCP_GATEWAY_INTERNAL_SECRET`（HMAC-safe ConstantTimeCompare）
-  - upstream 側がトークンを保存しない設計を維持する API 形状
-- [x] PoC ブランチで `/internal/v1/whoami` ハンドラ実装（loopback bind 限定）— `internal/internalapi/`
-- [x] `EnsureFreshAccessTokenForSubject` を `Handler` に実装（subject ベースの delegated token lookup + 自動 rotation）
-- [x] `LatestBySubject` を `Store` に実装（subject index による token ranking）
-- [x] `copilot-review-mcp` 側の client 実装 draft 提案（別リポジトリ issue として連動）
-- [x] **Gap 2 修正** (#77): 永続的 rotation 失敗後のレニエントブランチが dead bearer を返す問題を修正
-  - `Store.MarkRotationPermanentlyFailed` / `IsRotationPermanentlyFailed` を追加
-  - `runGitHubRotation` の永続失敗パスで `MarkRotationPermanentlyFailed` を呼び出す
-  - レニエントブランチで `IsRotationPermanentlyFailed` チェックを追加
-- [x] **Gap 3 修正** (#77): `LatestBySubject` の同一 `ProviderAccessExpiry` 時の tie-break 修正
-  - `.Equal()` 条件を追加し、後から登録されたエントリ（新しい rotated token）を優先
-- [x] Phase B 本採用評価レポート `docs/phase-b-adoption-report.md` 作成
-- [x] テスト追加: Gap 2 (`TestEnsureFreshAccessTokenForSubject_PermanentFailureLenientBranchReturnsError`)、Gap 3 (`TestLatestBySubjectTieBreaksOnInsertionOrder`)
-
-### 受け入れ基準（PoC ゲート）
-
-- [x] ローカル composing 環境で gateway と upstream MCP が trust boundary 越しに通信できることを確認
-- [x] セキュリティレビュー（loopback 限定、認証 secret の取り扱い）が完了している
-- [x] Option C を採るか、より軽量な手段に切り戻すかの判断材料が docs として残る（`docs/phase-b-adoption-report.md` 参照）
-
-### 既知の限界（#77 修正後残存分）
-
-- subject index はインメモリのみ: gateway 再起動後、再認証まで delegated アクセス不可
-- `rotationFailed` フラグ永続化（Issue #77 Thread 1 対応済み）: `MarkRotationPermanentlyFailed` が token store に `RotationPermanentlyFailed` フラグを永続化（file-backed store はディスクへフラッシュ）し、subject index からも即時削除する。`ValidateToken` は再起動後も `RefreshSubjectIndex` をスキップするため、dead bearer が subject index に再挿入されることはない。`EnsureFreshAccessTokenForSubject` は `ErrSubjectNotFound` を返す
-- スコープは gateway 全体設定: トークンごとの fine-grained scope は将来課題
-- Unix socket / mTLS による multi-host 構成は未実装（同一ホスト構成限定）
+- [ ] `ExpiresAt` が近い upstream token を proxy 注入前に refresh
+- [ ] `ExpiresAt == zero` は期限不明として proactive refresh しない
+- [ ] temporary refresh failure では既存 token を継続利用
+- [ ] permanent refresh failure では token を削除して再認証へ誘導
+- [ ] upstream 401 後に refresh / retry する
+- [ ] 同一 subject x route の refresh を singleflight で排他
 
 ---
 
-## Phase C: 構造化エラー契約の整理（中期、Phase B と並走可）
+## 運用枠
 
-**目的**: `AUTH_CONTEXT_UNAVAILABLE` を導入するか否かを決め、ゲートウェイ→upstream・upstream→クライアントの間のエラーコード契約を整理する。
+### [#65](https://github.com/scottlz0310/mcp-gateway/issues/65) Dependency Dashboard
 
-**Issue**: 新規作成予定（軽量 issue、docs 主体）
-
-### サブタスク
-
-- [ ] `docs/auth-error-contract.md` を新設し、`invalid_request` / `invalid_token` / `upstream_error` の境界条件を明文化
-- [ ] Phase B 採用時のみ `AUTH_CONTEXT_UNAVAILABLE` を追加候補として記載（Phase B 非採用なら本項目はクローズ）
-- [ ] `copilot-review-mcp` 側 `FailureReasonAuthExpired` 等とのマッピング表を整備
-
-### 受け入れ基準
-
-- `WWW-Authenticate` の `error=` 値と JSON body の `error` 値が docs と一致する
-- 既存テスト（`internal/middleware/auth_test.go`）でエラーコードの後方互換が保証される
-
----
-
-## スコープ外（他リポジトリ管轄）
-
-これらは `copilot-review-mcp` 側 issue として扱い、本リポジトリの tasks.md では追跡しない。
-
-- [`copilot-review-mcp`] `InvalidateToken: nil` の活性化（Phase B の API が用意できた後に対応）
-- [`copilot-review-mcp`] `FailureReasonAuthExpired` の recovery hint 強化（watch token snapshot expired 等）
-- [`copilot-review-mcp`] 起動時 STALE 化（既に `MarkActiveReviewWatchesStale` で実装済み、確認のみ）
-
----
-
-## 実装着手順（推奨）
-
-1. **Phase A**: 本 PR (#71) で実装＋docs＋テストまで揃ったので、レビュー反映完了後に main へマージ
-2. Phase A マージ後、Phase B の spike issue を切り、設計ドキュメントを先に書く
-3. Phase B の PoC で trust boundary が固まったら Phase C のエラー契約 docs を仕上げる
-
----
-
-## 直近の未消化 issue（参考）
-
-Issue #70 以外の継続タスクは過去アーカイブ（[`docs/tasks-archive-v0.3.0.md`](docs/tasks-archive-v0.3.0.md)）を参照。新規追加分は本ファイル上部のフェーズ表に随時追記する。
+- [~] Renovate 管理 issue。open のまま維持する
+- [ ] Renovate branch が発生した場合のみ、通常の依存更新 PR として個別に扱う
