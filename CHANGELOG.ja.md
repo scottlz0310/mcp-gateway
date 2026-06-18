@@ -45,6 +45,7 @@
 
 ### 修正
 
+- OIDC Discovery（`/.well-known/openid-configuration`）に PKCE、grant type、registration、device authorization の metadata を追加し、OIDC クライアントが対応フローを検出できるよう修正（[#122](https://github.com/scottlz0310/mcp-gateway/issues/122)）
 - exact-prefix リクエストで upstream のベースパスに末尾スラッシュを付与せず、そのまま転送するよう修正（[#111](https://github.com/scottlz0310/mcp-gateway/issues/111)）
 - upstream 転送時にルーティングプレフィックスをストリップする機能を追加（[#108](https://github.com/scottlz0310/mcp-gateway/issues/108)）
   - `github-mcp-server` や `playwright-mcp` などパスを厳格に検証する MCP サーバーで発生していた `405 Method Not Allowed` を解消するため、プロキシ転送前にルーティングプレフィックス（例: `/mcp/github`）をリクエストパスから除去するよう修正

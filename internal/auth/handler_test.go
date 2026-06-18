@@ -1,4 +1,4 @@
-﻿package auth
+package auth
 
 import (
 	"context"
@@ -2334,6 +2334,16 @@ func TestOIDCProviderEndpoints(t *testing.T) {
 	if discDoc["jwks_uri"] != "http://localhost:8080/jwks" {
 		t.Errorf("jwks_uri: got %v", discDoc["jwks_uri"])
 	}
+	if discDoc["registration_endpoint"] != "http://localhost:8080/register" {
+		t.Errorf("registration_endpoint: got %v", discDoc["registration_endpoint"])
+	}
+	if discDoc["device_authorization_endpoint"] != "http://localhost:8080/device_authorization" {
+		t.Errorf("device_authorization_endpoint: got %v", discDoc["device_authorization_endpoint"])
+	}
+	assertJSONStringsContain(t, discDoc, "code_challenge_methods_supported", "S256")
+	assertJSONStringsContain(t, discDoc, "grant_types_supported", "authorization_code")
+	assertJSONStringsContain(t, discDoc, "grant_types_supported", "refresh_token")
+	assertJSONStringsContain(t, discDoc, "grant_types_supported", "urn:ietf:params:oauth:grant-type:device_code")
 
 	// 2. Test JWKS
 	rJWKS := httptest.NewRequest(http.MethodGet, "/jwks", nil)
@@ -2445,6 +2455,21 @@ func TestOIDCProviderEndpoints(t *testing.T) {
 	if err := rsa.VerifyPKCS1v15(pubKey, crypto.SHA256, hashed, sig); err != nil {
 		t.Errorf("signature verification failed: %v", err)
 	}
+}
+
+func assertJSONStringsContain(t *testing.T, doc map[string]any, key, want string) {
+	t.Helper()
+
+	values, ok := doc[key].([]any)
+	if !ok {
+		t.Fatalf("%s: got %T, want JSON string array", key, doc[key])
+	}
+	for _, value := range values {
+		if value == want {
+			return
+		}
+	}
+	t.Fatalf("%s: got %v, want value %q", key, values, want)
 }
 
 func TestNewHandler_OIDCPrivateKey(t *testing.T) {
@@ -3098,12 +3123,12 @@ func TestBuiltinValidateTokenAudienceStrict(t *testing.T) {
 		},
 	}
 	h, err := NewHandler(Config{
-		BaseURL:              "http://localhost:8080",
-		SessionTTL:           10 * time.Minute,
-		CacheTTL:             5 * time.Minute,
-		ExpiresIn:            90 * 24 * time.Hour,
-		OIDCPrivateKey:       key,
-		TokenAudienceStrict:  true,
+		BaseURL:             "http://localhost:8080",
+		SessionTTL:          10 * time.Minute,
+		CacheTTL:            5 * time.Minute,
+		ExpiresIn:           90 * 24 * time.Hour,
+		OIDCPrivateKey:      key,
+		TokenAudienceStrict: true,
 	}, p)
 	if err != nil {
 		t.Fatalf("NewHandler: %v", err)

@@ -893,12 +893,12 @@ func (h *Handler) DeviceAuthorize(w http.ResponseWriter, r *http.Request) {
 
 	verificationURI := h.cfg.BaseURL + "/activate"
 	resp := map[string]any{
-		"device_code":              internalCode,
-		"user_code":                userCode,
-		"verification_uri":         verificationURI,
+		"device_code":               internalCode,
+		"user_code":                 userCode,
+		"verification_uri":          verificationURI,
 		"verification_uri_complete": verificationURI + "?user_code=" + userCode,
-		"expires_in":               int(deviceCodeTTL / time.Second),
-		"interval":                 5,
+		"expires_in":                int(deviceCodeTTL / time.Second),
+		"interval":                  5,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
@@ -1560,7 +1560,6 @@ func (h *Handler) validateAudience(token string, record TokenRecord, audience st
 	return audienceCheckError{ErrTokenAudienceMismatch}
 }
 
-
 func normalizeAudience(audience string) string {
 	return strings.TrimRight(strings.TrimSpace(audience), "/")
 }
@@ -1639,7 +1638,11 @@ func (h *Handler) OIDCDiscovery(w http.ResponseWriter, r *http.Request) {
 		"token_endpoint":                        h.cfg.BaseURL + "/token",
 		"userinfo_endpoint":                     h.cfg.BaseURL + "/userinfo",
 		"jwks_uri":                              h.cfg.BaseURL + "/jwks",
+		"registration_endpoint":                 h.cfg.BaseURL + "/register",
+		"device_authorization_endpoint":         h.cfg.BaseURL + "/device_authorization",
 		"response_types_supported":              []string{"code"},
+		"grant_types_supported":                 []string{"authorization_code", "urn:ietf:params:oauth:grant-type:device_code", "refresh_token"},
+		"code_challenge_methods_supported":      []string{"S256"},
 		"subject_types_supported":               []string{"public"},
 		"id_token_signing_alg_values_supported": []string{"RS256"},
 		"scopes_supported":                      []string{"openid", "profile", "email"},
