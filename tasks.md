@@ -30,7 +30,7 @@
 
 | 優先 | Issue | 状態 | 依存 | 次のアクション |
 |---|---|---|---|---|
-| P0 | [#122](https://github.com/scottlz0310/mcp-gateway/issues/122) OIDC Discovery metadata 補完 | [ ] | なし | `/.well-known/openid-configuration` に PKCE / grant / registration / device metadata を追加 |
+| P0 | [#122](https://github.com/scottlz0310/mcp-gateway/issues/122) OIDC Discovery metadata 補完 | [x] | なし | `/.well-known/openid-configuration` に PKCE / grant / registration / device metadata を追加 |
 | P0 | [#123](https://github.com/scottlz0310/mcp-gateway/issues/123) OIDC `nonce` claim 対応 | [ ] | なし | `nonce` を authorize session から `id_token` まで伝播 |
 | P1 | [#125](https://github.com/scottlz0310/mcp-gateway/issues/125) RFC 8252 opaque-form redirect URI | [ ] | なし | custom scheme の `Opaque` 形式を許可し、HTTP(S) とは別に validation |
 | P1 | [#6](https://github.com/scottlz0310/mcp-gateway/issues/6) gateway OIDC Provider 完成 / agy 完走 | [ ] | `#122` / `#123` / `#125` 推奨先行、`#127` / `#128` / `#130` 完了済み | #126 前提の AC で agy / device flow / gateway-issued JWT を E2E 確認 |
@@ -51,10 +51,10 @@
 
 ### [#122](https://github.com/scottlz0310/mcp-gateway/issues/122) OIDC Discovery に `code_challenge_methods_supported` を追加
 
-- [ ] `OIDCDiscovery` に `code_challenge_methods_supported: ["S256"]` を追加
-- [ ] `grant_types_supported` に `authorization_code` / `refresh_token` / `urn:ietf:params:oauth:grant-type:device_code` を追加
-- [ ] `registration_endpoint` と `device_authorization_endpoint` を追加
-- [ ] `internal/auth/handler_test.go` に OIDC Discovery の regression test を追加
+- [x] `OIDCDiscovery` に `code_challenge_methods_supported: ["S256"]` を追加
+- [x] `grant_types_supported` に `authorization_code` / `refresh_token` / `urn:ietf:params:oauth:grant-type:device_code` を追加
+- [x] `registration_endpoint` と `device_authorization_endpoint` を追加
+- [x] `internal/auth/handler_test.go` に OIDC Discovery の regression test を追加
 
 ### [#123](https://github.com/scottlz0310/mcp-gateway/issues/123) OIDC Provider の `nonce` claim 対応
 

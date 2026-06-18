@@ -7,6 +7,10 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Add PKCE, grant type, registration, and device authorization metadata to OIDC Discovery (`/.well-known/openid-configuration`) so OIDC clients can detect supported authorization flows ([#122](https://github.com/scottlz0310/mcp-gateway/issues/122)).
+
 ## [0.6.0] - 2026-06-17
 
 ### Added
