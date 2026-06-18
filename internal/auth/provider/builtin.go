@@ -2,13 +2,7 @@ package provider
 
 import (
 	"context"
-	"errors"
 )
-
-// ErrBuiltinValidateNotSupported is returned when ValidateToken is called on the
-// builtin provider. In builtin mode, gateway-issued JWTs are validated directly
-// by the handler (which holds the RSA signing key), not via the upstream provider.
-var ErrBuiltinValidateNotSupported = errors.New("builtin provider: ValidateToken must be handled by the gateway JWT verifier")
 
 // builtinProvider wraps the GitHub OAuth flow so that the gateway can use
 // GitHub as a social login source while issuing its own RS256 JWTs as
@@ -51,8 +45,12 @@ func (p *builtinProvider) RefreshToken(_ context.Context, _ string) (TokenRespon
 	return TokenResponse{}, ErrRefreshNotSupported
 }
 
-// ValidateToken must not be called in builtin mode. The handler validates
-// gateway-issued JWTs directly using its RSA private key.
-func (p *builtinProvider) ValidateToken(_ context.Context, _ string) (Identity, error) {
-	return Identity{}, ErrBuiltinValidateNotSupported
+// ValidateToken resolves the caller's identity from the GitHub API using the
+// GitHub access token obtained via ExchangeCode. This is called during the
+// OAuth callback and device callback flows to populate the Subject claim.
+//
+// Note: in builtin mode, handler.ValidateToken (proxy-auth path) bypasses this
+// method and validates gateway-issued JWTs directly via verifyGatewayJWT.
+func (p *builtinProvider) ValidateToken(ctx context.Context, token string) (Identity, error) {
+	return p.github.ValidateToken(ctx, token)
 }
