@@ -159,8 +159,12 @@ func parseRoutes(env []string) ([]Route, error) {
 
 		// upstream_oauth_scope: space-separated OAuth scope string.
 		// Comma-separated values are normalised to space-separated.
+		// upstream_oauth must be set when upstream_oauth_scope is specified.
 		var upstreamOAuthScope string
 		if scopeVal, ok := options["upstream_oauth_scope"]; ok {
+			if upstreamOAuth == "" {
+				return nil, fmt.Errorf("%s: upstream_oauth_scope requires upstream_oauth to be set", key)
+			}
 			scopeVal = strings.TrimSpace(scopeVal)
 			if scopeVal == "" {
 				return nil, fmt.Errorf("%s: upstream_oauth_scope value must not be empty or whitespace-only", key)
@@ -306,8 +310,12 @@ func ParseFromConfig(cfgRoutes []appconfig.RouteConfig) ([]Route, error) {
 			}
 		}
 		// upstream_oauth_scope: normalise comma-separated to space-separated.
+		// upstream_oauth must be set when upstream_oauth_scope is specified.
 		upstreamOAuthScope := strings.TrimSpace(r.UpstreamOAuthScope)
 		if r.UpstreamOAuthScope != "" {
+			if upstreamOAuth == "" {
+				return nil, fmt.Errorf("route %q: upstream_oauth_scope requires upstream_oauth to be set", name)
+			}
 			if upstreamOAuthScope == "" {
 				return nil, fmt.Errorf("route %q: upstream_oauth_scope value must not be empty or whitespace-only", name)
 			}
