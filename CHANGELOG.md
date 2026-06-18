@@ -7,6 +7,15 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Upstream OAuth route option parsing and validation ([#113](https://github.com/scottlz0310/mcp-gateway/issues/113))
+  - `Route` struct gains `UpstreamOAuth` ("auto" or absolute issuer URL) and `UpstreamOAuthScope` (space-separated scopes) fields
+  - `ROUTE_*` env-var parser accepts `upstream_oauth=auto|<issuer-url>` and `upstream_oauth_scope=<scopes>`
+  - `config.yaml` `RouteConfig` gains `upstream_oauth` and `upstream_oauth_scope` fields parsed by `ParseFromConfig`
+  - Validation: empty value, non-http/https scheme, and invalid URL rejected (fail-closed); issuer URL trailing slash is trimmed; comma-separated scopes normalised to space-separated; `upstream_oauth` + `upstream_bearer_token_env` combination rejected
+  - No runtime behaviour changes; discovery/DCR/token injection handled in subsequent issues
+
 ### Fixed
 
 - Add PKCE, grant type, registration, and device authorization metadata to OIDC Discovery (`/.well-known/openid-configuration`) so OIDC clients can detect supported authorization flows ([#122](https://github.com/scottlz0310/mcp-gateway/issues/122)).
