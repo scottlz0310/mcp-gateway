@@ -92,6 +92,16 @@ func TestBuiltinRefreshTokenNotSupported(t *testing.T) {
 
 func TestBuiltinValidateTokenDelegatesToGitHub(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/user" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer gh-access-token" {
+			t.Errorf("Authorization: got %q, want %q", got, "Bearer gh-access-token")
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"login":"testuser","id":42,"email":"test@example.com","name":"Test User"}`))
 	}))
@@ -101,8 +111,8 @@ func TestBuiltinValidateTokenDelegatesToGitHub(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ValidateToken: %v", err)
 	}
-	if id.Subject == "" {
-		t.Error("ValidateToken: expected non-empty Subject")
+	if id.Subject != "testuser" {
+		t.Errorf("ValidateToken: Subject = %q, want %q", id.Subject, "testuser")
 	}
 }
 
