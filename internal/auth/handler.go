@@ -409,20 +409,30 @@ func (h *Handler) Authorize(w http.ResponseWriter, r *http.Request) {
 	}
 
 	parsedRedirect, err := url.Parse(redirectURI)
-	if err != nil || parsedRedirect.Scheme == "" || parsedRedirect.Host == "" || parsedRedirect.Fragment != "" {
+	if err != nil || parsedRedirect.Scheme == "" || parsedRedirect.Fragment != "" {
 		h.auditFailure("authorize", "invalid_request", "authorization redirect URI rejected", err, http.StatusBadRequest, "")
 		oauthError(w, "invalid_request", "invalid redirect_uri: must be an absolute URI without fragment", http.StatusBadRequest)
 		return
 	}
 	switch parsedRedirect.Scheme {
 	case "http", "https":
+		if parsedRedirect.Host == "" {
+			h.auditFailure("authorize", "invalid_request", "authorization redirect URI rejected", nil, http.StatusBadRequest, "")
+			oauthError(w, "invalid_request", "invalid redirect_uri: must be an absolute URI without fragment", http.StatusBadRequest)
+			return
+		}
 		if !isAllowedRedirectHost(parsedRedirect.Hostname(), h.cfg.AllowedRedirectHosts) {
 			h.auditFailure("authorize", "invalid_request", "authorization redirect host rejected", nil, http.StatusBadRequest, "")
 			oauthError(w, "invalid_request", "redirect_uri host not permitted", http.StatusBadRequest)
 			return
 		}
 	default:
-		// RFC 8252: custom URL scheme for native apps (e.g. antigravity://oauth-callback)
+		// RFC 8252 §7.1: custom scheme — authority (host != ""), path-only (/path), or opaque form
+		if parsedRedirect.Host == "" && parsedRedirect.Path == "" && parsedRedirect.Opaque == "" {
+			h.auditFailure("authorize", "invalid_request", "authorization redirect URI rejected", nil, http.StatusBadRequest, "")
+			oauthError(w, "invalid_request", "invalid redirect_uri: must be an absolute URI without fragment", http.StatusBadRequest)
+			return
+		}
 		if !isAllowedRedirectScheme(parsedRedirect.Scheme, h.cfg.AllowedRedirectSchemes) {
 			h.auditFailure("authorize", "invalid_request", "authorization redirect scheme rejected", nil, http.StatusBadRequest, "")
 			oauthError(w, "invalid_request", "redirect_uri scheme not permitted", http.StatusBadRequest)
