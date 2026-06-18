@@ -2619,6 +2619,22 @@ func TestAuthorizeCustomSchemeRedirectURI(t *testing.T) {
 			schemes:     []string{"other"},
 			wantStatus:  http.StatusBadRequest,
 		},
+		{
+			name:        "opaque-form custom scheme accepted when scheme is allowed",
+			redirectURI: "antigravity:/oauth2redirect/provider",
+			wantStatus:  http.StatusFound,
+		},
+		{
+			name:        "opaque-form custom scheme rejected when scheme not allowed",
+			redirectURI: "myapp:/oauth2redirect/provider",
+			wantStatus:  http.StatusBadRequest,
+		},
+		{
+			name:        "opaque-form custom scheme accepted when scheme explicitly configured",
+			redirectURI: "com.example.app:/oauth2redirect/provider",
+			schemes:     []string{"com.example.app"},
+			wantStatus:  http.StatusFound,
+		},
 	}
 
 	for _, tc := range tests {
