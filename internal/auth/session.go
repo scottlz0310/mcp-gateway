@@ -25,6 +25,7 @@ type Session struct {
 	RedirectURI           string
 	CodeChallenge         string
 	Audience              string
+	Nonce                 string    // OIDC Core §3.1.3.7: forwarded to id_token if provided
 	InternalCode          string
 	AccessToken           string
 	Scope                 string
@@ -152,7 +153,7 @@ func (s *Store) Stop() {
 }
 
 // SaveSession stores a new OAuth session keyed by state.
-func (s *Store) SaveSession(state, redirectURI, codeChallenge, audience string) {
+func (s *Store) SaveSession(state, redirectURI, codeChallenge, audience, nonce string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sessions[state] = &Session{
@@ -160,6 +161,7 @@ func (s *Store) SaveSession(state, redirectURI, codeChallenge, audience string) 
 		RedirectURI:   redirectURI,
 		CodeChallenge: codeChallenge,
 		Audience:      audience,
+		Nonce:         nonce,
 		ExpiresAt:     time.Now().Add(s.ttl),
 	}
 }
@@ -214,6 +216,7 @@ type ExchangeCodeResult struct {
 	AccessToken          string
 	Scope                string
 	Audience             string
+	Nonce                string    // OIDC Core §3.1.3.7: forwarded to id_token if provided
 	ProviderRefreshToken string
 	ProviderAccessExpiry time.Time
 	Subject              string    // resolved subject
@@ -244,6 +247,7 @@ func (s *Store) ExchangeCode(code, redirectURI, codeVerifier string) (ExchangeCo
 		AccessToken:          sess.AccessToken,
 		Scope:                sess.Scope,
 		Audience:             sess.Audience,
+		Nonce:                sess.Nonce,
 		ProviderRefreshToken: sess.ProviderRefreshToken,
 		ProviderAccessExpiry: sess.ProviderAccessExpiry,
 		Subject:              sess.Subject,

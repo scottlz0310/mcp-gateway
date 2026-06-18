@@ -384,6 +384,7 @@ func (h *Handler) Authorize(w http.ResponseWriter, r *http.Request) {
 	codeChallenge := q.Get("code_challenge")
 	responseType := q.Get("response_type")
 	codeChallengeMethod := q.Get("code_challenge_method")
+	nonce := q.Get("nonce")
 	audience, audErr := h.resolveRequestedAudience(q["resource"])
 	if audErr != nil {
 		h.auditFailure("authorize", "invalid_target", "authorization target rejected", audErr, http.StatusBadRequest, "")
@@ -429,7 +430,7 @@ func (h *Handler) Authorize(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	h.store.SaveSession(state, redirectURI, codeChallenge, audience)
+	h.store.SaveSession(state, redirectURI, codeChallenge, audience, nonce)
 	h.auditSuccess("authorize", "authorization redirect created", http.StatusFound)
 
 	http.Redirect(w, r, h.provider.AuthorizeURL(state, codeChallenge), http.StatusFound)
@@ -592,7 +593,7 @@ func (h *Handler) tokenAuthCode(w http.ResponseWriter, r *http.Request) {
 		if rtErr != nil {
 			slog.Warn("failed to create refresh token", "err", rtErr)
 		}
-		h.writeTokenResponse(w, gatewayToken, result.Scope, refreshToken, result.Subject)
+		h.writeTokenResponse(w, gatewayToken, result.Scope, refreshToken, result.Subject, result.Nonce)
 		h.auditSuccess("token_exchange", "authorization code exchange completed (builtin)", http.StatusOK)
 		return
 	}
@@ -608,7 +609,7 @@ func (h *Handler) tokenAuthCode(w http.ResponseWriter, r *http.Request) {
 	if rtErr != nil {
 		slog.Warn("failed to create refresh token", "err", rtErr)
 	}
-	h.writeTokenResponse(w, result.AccessToken, result.Scope, refreshToken, result.Subject)
+	h.writeTokenResponse(w, result.AccessToken, result.Scope, refreshToken, result.Subject, result.Nonce)
 	h.auditSuccess("token_exchange", "authorization code exchange completed", http.StatusOK)
 }
 
@@ -680,7 +681,7 @@ func (h *Handler) tokenDeviceGrant(w http.ResponseWriter, r *http.Request) {
 		if rtErr != nil {
 			slog.Warn("failed to create refresh token (device)", "err", rtErr)
 		}
-		h.writeTokenResponse(w, token, completed.Scope, refreshToken, completed.Subject)
+		h.writeTokenResponse(w, token, completed.Scope, refreshToken, completed.Subject, "")
 		h.auditSuccess("token_exchange", "device token exchange completed", http.StatusOK)
 	default: // devicePending
 		// Enforce minimum polling interval (RFC 8628 §3.5).
@@ -698,7 +699,7 @@ func (h *Handler) tokenDeviceGrant(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *Handler) writeTokenResponse(w http.ResponseWriter, token, scope, refreshToken string, subject string) {
+func (h *Handler) writeTokenResponse(w http.ResponseWriter, token, scope, refreshToken, subject, nonce string) {
 	expiresIn := max(int64(h.cfg.ExpiresIn/time.Second), 1)
 	resp := map[string]any{
 		"access_token": token,
@@ -712,7 +713,7 @@ func (h *Handler) writeTokenResponse(w http.ResponseWriter, token, scope, refres
 		resp["refresh_token"] = refreshToken
 	}
 	if subject != "" && (strings.Contains(scope, "openid") || h.provider.Name() == "oidc" || h.isBuiltinMode()) {
-		idToken, err := h.generateIDToken(h.cfg.BaseURL, subject, h.provider.ClientID())
+		idToken, err := h.generateIDToken(h.cfg.BaseURL, subject, h.provider.ClientID(), nonce)
 		if err == nil {
 			resp["id_token"] = idToken
 		} else {
@@ -811,7 +812,7 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 			oauthError(w, "server_error", "internal error", http.StatusInternalServerError)
 			return
 		}
-		h.writeTokenResponse(w, newGatewayToken, "", newRT, sub)
+		h.writeTokenResponse(w, newGatewayToken, "", newRT, sub, "")
 		h.auditSuccess("refresh", "refresh token exchange completed (builtin)", http.StatusOK)
 		return
 	}
@@ -851,7 +852,7 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.writeTokenResponse(w, accessToken, "", newRT, id.Subject)
+	h.writeTokenResponse(w, accessToken, "", newRT, id.Subject, "")
 	h.auditSuccess("refresh", "refresh token exchange completed", http.StatusOK)
 }
 
@@ -956,7 +957,7 @@ func (h *Handler) ActivateSubmit(w http.ResponseWriter, r *http.Request) {
 
 	state := generateDeviceState(sess.InternalCode)
 	deviceCallbackURI := h.cfg.BaseURL + "/device_callback"
-	h.store.SaveSession(state, deviceCallbackURI, "", sess.Audience)
+	h.store.SaveSession(state, deviceCallbackURI, "", sess.Audience, "")
 
 	authorizeURL := h.cfg.BaseURL + "/authorize?response_type=code" +
 		"&client_id=" + url.QueryEscape(h.provider.ClientID()) +
@@ -1838,7 +1839,7 @@ func (h *Handler) verifyGatewayJWT(token string) (subject, audience string, err 
 }
 
 // generateIDToken creates a signed RS256 JWT for the given subject.
-func (h *Handler) generateIDToken(issuer, subject, clientID string) (string, error) {
+func (h *Handler) generateIDToken(issuer, subject, clientID, nonce string) (string, error) {
 	if h.privateKey == nil {
 		return "", fmt.Errorf("private key is nil")
 	}
@@ -1863,6 +1864,9 @@ func (h *Handler) generateIDToken(issuer, subject, clientID string) (string, err
 		"aud": clientID,
 		"iat": now,
 		"exp": now + 3600, // 1 hour
+	}
+	if nonce != "" {
+		payload["nonce"] = nonce
 	}
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
