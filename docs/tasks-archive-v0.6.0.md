@@ -1,6 +1,6 @@
 # Tasks Archive: v0.4.0 - v0.6.0
 
-`tasks.md` から外した完了済みタスクの archive。v0.3.0 以前の履歴は [`docs/tasks-archive-v0.3.0.md`](tasks-archive-v0.3.0.md) を参照。
+`tasks.md` から外した完了済みタスクの archive。v0.3.0 以前の履歴は [`tasks-archive-v0.3.0.md`](tasks-archive-v0.3.0.md) を参照。
 
 このファイルは詳細な変更履歴ではなく、タスク管理上「完了済みとして現行ロードマップから外した issue」の索引である。リリース単位の詳細は [`CHANGELOG.md`](../CHANGELOG.md) / [`CHANGELOG.ja.md`](../CHANGELOG.ja.md) を参照。
 
@@ -109,7 +109,7 @@
 - [x] Phase B follow-up: rotation correctness gap を修正
 - [x] Phase C: auth error contract docs を整理
 
-## 現行 tasks.md に残すもの
+## 現行 tasks.md に残すもの（2026-06-18 時点）
 
 - `#122` / `#123` / `#125` / `#6`: OIDC Authorization Server 完成に必要な未実装 issue
 - `#84` / `#113` - `#118`: upstream OAuth delegation の未実装 chain
