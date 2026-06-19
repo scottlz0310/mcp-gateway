@@ -134,18 +134,23 @@ func NewHandler(upstream *url.URL, inv TokenInvalidator, upstreamBearerTokenEnv 
 					// Delete the stale token so the next request triggers re-authorization.
 					// Automatic refresh is handled by #118.
 					subject := middleware.IdentityFromContext(resp.Request.Context())
-					if subject != "" {
-						if err := upstreamOAuth.TokenStore.Delete(subject, upstreamOAuth.RouteName); err != nil {
-							slog.Warn("upstream OAuth: failed to delete stale token",
-								"route", upstreamOAuth.RouteName,
-								"err", err,
-							)
-						}
+					if subject == "" {
+						slog.Warn("upstream OAuth: upstream 401; no authenticated subject in context, stale token not deleted",
+							"route", upstreamOAuth.RouteName,
+							"path", resp.Request.URL.Path,
+						)
+					} else if err := upstreamOAuth.TokenStore.Delete(subject, upstreamOAuth.RouteName); err != nil {
+						slog.Warn("upstream OAuth: upstream 401; failed to delete stale token, re-authorization may not trigger",
+							"route", upstreamOAuth.RouteName,
+							"path", resp.Request.URL.Path,
+							"err", err,
+						)
+					} else {
+						slog.Warn("upstream OAuth: upstream 401; token deleted, re-authorization required",
+							"route", upstreamOAuth.RouteName,
+							"path", resp.Request.URL.Path,
+						)
 					}
-					slog.Warn("upstream OAuth: upstream 401; token deleted, re-authorization required",
-						"route", upstreamOAuth.RouteName,
-						"path", resp.Request.URL.Path,
-					)
 				} else if upstreamBearerTokenEnv != "" {
 					// The 401 came from an upstream-credential route.
 					// This is a problem with the upstream API token, not the
