@@ -154,7 +154,12 @@ setup:
 | `routes[].name` | ルート名。空でない必要があります。 |
 | `routes[].prefix` | URL パスプレフィックス。`/` で始まる必要があります。末尾スラッシュは `/` を除いて除去されます。 |
 | `routes[].upstream` | 絶対 `http` または `https` upstream URL。 |
-| `routes[].no_auth` | true の場合、このルートの Bearer 検証をスキップします。 |
+| `routes[].no_auth` | `true` の場合、このルートの Bearer 検証をスキップします。`upstream_oauth` と同時設定不可。 |
+| `routes[].upstream_bearer_token_env` | ゲートウェイ→upstream の Bearer トークンを取得する環境変数名。起動時に env var が未設定または空の場合は起動失敗（フェールクローズ）。`upstream_oauth` と排他。 |
+| `routes[].required_audience` | アクセストークンの `aud` クレームに要求する値（デフォルト: `mcp-gateway`）。クライアントは `/token` に `resource=<name>` を渡してこの audience のトークンを取得する。 |
+| `routes[].upstream_oauth` | Upstream OAuth 委任。`auto`（RFC 9728 + RFC 8414 で AS を自動検出）または絶対 issuer URL（`https://...`）。`upstream_bearer_token_env` および `no_auth` と排他。[Upstream OAuth 委任](#upstream-oauth-委任) を参照。 |
+| `routes[].upstream_oauth_scope` | Upstream AS へのトークンリクエストで要求するスコープ（スペース区切り。カンマ区切りは自動正規化）。`upstream_oauth` が必要。 |
+| `routes[].upstream_oauth_grant` | Upstream トークン取得に使用する OAuth 2.0 グラントタイプ（`authorization_code` または `client_credentials`、デフォルト: `authorization_code`）。`upstream_oauth` が必要。[Upstream OAuth 委任](#upstream-oauth-委任) を参照。 |
 | `setup.completed` | ゲートウェイが書き込むセットアップウィザード状態。オペレーターが直接編集することは通常ありません。 |
 
 ゲートウェイがシークレット移行またはセットアップ完了時に `config.yaml` を書き直す際、未知の YAML フィールドとコメントは保持されません。
@@ -164,7 +169,7 @@ setup:
 環境変数によるルート設定:
 
 ```bash
-ROUTE_<NAME>=<prefix>|<upstream_url>
+ROUTE_<NAME>=<prefix>|<upstream_url>[|option=value...]
 ```
 
 例:
@@ -183,13 +188,69 @@ ROUTE_REVIEW_RAVEN=/mcp/review-raven|http://review-raven:8083
 - 重複プレフィックスは拒否されます。
 - ルートは最長プレフィックス優先でソートされます。
 
-ルートの認証を無効にするには `|auth=none` を追加します:
+### ルートオプション
+
+パイプ区切りで追加指定できます。未知のオプションキーは起動時に拒否されます（フェールクローズ）。
+
+| オプション | デフォルト | 説明 |
+|-----------|----------|------|
+| `auth` | `oauth` | `oauth`（Bearer 検証あり）または `none`（認証スキップ）。`upstream_oauth` と `none` は排他。 |
+| `upstream_bearer_token_env` | なし | ゲートウェイ→upstream の Bearer トークンを取得する環境変数名。起動時に env var が未設定または空の場合は起動失敗（フェールクローズ）。`upstream_oauth` と排他。 |
+| `required_audience` | `mcp-gateway` | アクセストークンに必要な `aud` クレーム値。クライアントは `/token` に `resource=<name>` を渡してこの audience のトークンを取得する。 |
+| `upstream_oauth` | なし | Upstream OAuth 委任を有効化。`auto`（RFC 9728 + RFC 8414 で AS を自動検出）または絶対 issuer URL（`https://...`）。`upstream_bearer_token_env` と排他。[Upstream OAuth 委任](#upstream-oauth-委任) を参照。 |
+| `upstream_oauth_scope` | なし | Upstream AS へのトークンリクエストで要求するスコープ（スペース区切り。カンマ区切りは自動正規化）。`upstream_oauth` が必要。 |
+| `upstream_oauth_grant` | `authorization_code` | Upstream トークン取得に使用する OAuth 2.0 グラントタイプ。`authorization_code`（ユーザーを認可エンドポイントへリダイレクト）または `client_credentials`（バックグラウンドでトークンを取得、ユーザー操作不要）。`upstream_oauth` が必要。 |
+
+### Upstream OAuth 委任
+
+`upstream_oauth` を設定したルートでは、ゲートウェイが以下を自動実行します。
+
+1. **Discovery + DCR**（初回アクセス時のみ）: upstream AS のメタデータを検出し、Dynamic Client Registration（RFC 7591）でクライアントを登録。登録情報は `{state-dir}/upstream_clients.json` にキャッシュ。
+2. **トークン取得**: `upstream_oauth_grant` で指定されたフローでトークンを取得。
+3. **トークン注入**: `Authorization: Bearer <upstream-token>` として upstream リクエストに付与。
+4. **リフレッシュ**: トークン期限切れ前にプロアクティブにリフレッシュ、または upstream からの 401 レスポンス時に透過的にリフレッシュして再試行。
+
+#### `authorization_code` フロー（デフォルト）
+
+ユーザーを upstream AS の認可エンドポイントへリダイレクトします（PKCE あり）。初回アクセス時にユーザーの同意が必要です。取得したトークンはユーザーごとに `{state-dir}/upstream_tokens.json` へ保存されます。
 
 ```bash
-ROUTE_PUBLIC=/public|http://public-svc:8083|auth=none
+ROUTE_SVC=/mcp/svc|https://svc.example.com/mcp|upstream_oauth=auto|upstream_oauth_scope=read write
 ```
 
-`auth=oauth` は明示的に指定する必要がある場合のみ使用します。デフォルトです。
+`config.yaml` の場合:
+
+```yaml
+routes:
+  - name: svc
+    prefix: /mcp/svc
+    upstream: https://svc.example.com/mcp
+    upstream_oauth: auto
+    upstream_oauth_scope: read write
+    # upstream_oauth_grant は省略時 authorization_code がデフォルト
+```
+
+#### `client_credentials` フロー
+
+ユーザー操作なしでバックグラウンドにトークンを取得します（サービス間通信向け）。upstream AS が `client_credentials` グラントをサポートしている必要があります。
+
+```bash
+ROUTE_SVC=/mcp/svc|https://svc.example.com/mcp|upstream_oauth=auto|upstream_oauth_grant=client_credentials|upstream_oauth_scope=api:read
+```
+
+`config.yaml` の場合:
+
+```yaml
+routes:
+  - name: svc
+    prefix: /mcp/svc
+    upstream: https://svc.example.com/mcp
+    upstream_oauth: auto
+    upstream_oauth_grant: client_credentials
+    upstream_oauth_scope: api:read
+```
+
+> **Note**: コールバックエンドポイント `GET /upstream/callback/{routeName}` は `authorization_code` フローの redirect_uri として自動登録されます。`client_credentials` フローでは使用されません。
 
 ## シークレット暗号化
 
