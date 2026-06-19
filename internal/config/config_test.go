@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // TestMigrateSecret_EncryptedValue decrypts an ENC[age:] value from config.
@@ -343,6 +345,40 @@ func TestMigrateOIDCPrivateKey(t *testing.T) {
 	// Keys should be identical (same N and D for RSA key)
 	if privKey1.N.Cmp(privKey2.N) != 0 || privKey1.D.Cmp(privKey2.D) != 0 {
 		t.Error("expected loaded private key to match generated private key")
+	}
+}
+
+// TestRouteConfig_UpstreamOAuthNullAndBlankDecodedAsNil documents that yaml.v3
+// decodes both `null` and a blank value (key present with no value) to nil for
+// *string fields. nil is indistinguishable from a missing field — ParseFromConfig
+// treats it as "absent" (upstream OAuth disabled), with no validation error.
+// Only an explicit quoted empty string (`upstream_oauth: ""`) yields ptr("") and
+// is rejected as a fail-closed violation.
+func TestRouteConfig_UpstreamOAuthNullAndBlankDecodedAsNil(t *testing.T) {
+	cases := []struct {
+		name       string
+		input      string
+		checkOAuth bool
+		checkScope bool
+	}{
+		{"oauth_null", "name: r\nprefix: /mcp\nupstream: https://up.example.com/mcp\nupstream_oauth: null\n", true, false},
+		{"oauth_blank", "name: r\nprefix: /mcp\nupstream: https://up.example.com/mcp\nupstream_oauth:\n", true, false},
+		{"scope_null", "name: r\nprefix: /mcp\nupstream: https://up.example.com/mcp\nupstream_oauth_scope: null\n", false, true},
+		{"scope_blank", "name: r\nprefix: /mcp\nupstream: https://up.example.com/mcp\nupstream_oauth_scope:\n", false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var r RouteConfig
+			if err := yaml.Unmarshal([]byte(tc.input), &r); err != nil {
+				t.Fatalf("yaml.Unmarshal: %v", err)
+			}
+			if tc.checkOAuth && r.UpstreamOAuth != nil {
+				t.Errorf("UpstreamOAuth: expected nil (blank/null decodes to nil), got ptr(%q)", *r.UpstreamOAuth)
+			}
+			if tc.checkScope && r.UpstreamOAuthScope != nil {
+				t.Errorf("UpstreamOAuthScope: expected nil (blank/null decodes to nil), got ptr(%q)", *r.UpstreamOAuthScope)
+			}
+		})
 	}
 }
 

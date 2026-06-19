@@ -13,7 +13,8 @@ and versioning follows [Semantic Versioning](https://semver.org/).
   - `Route` struct gains `UpstreamOAuth` ("auto" or absolute issuer URL) and `UpstreamOAuthScope` (space-separated scopes) fields
   - `ROUTE_*` env-var parser accepts `upstream_oauth=auto|<issuer-url>` and `upstream_oauth_scope=<scopes>`
   - `config.yaml` `RouteConfig` gains `upstream_oauth` and `upstream_oauth_scope` fields parsed by `ParseFromConfig`
-  - Validation: empty value, non-http/https scheme, and invalid URL rejected (fail-closed); issuer URL trailing slash is trimmed; comma-separated scopes normalised to space-separated; `upstream_oauth` + `upstream_bearer_token_env` combination rejected
+  - Validation: empty value (`""`), non-http/https scheme, and invalid URL rejected (fail-closed); issuer URL trailing slash is trimmed; comma-separated scopes normalised to space-separated; `upstream_oauth` + `upstream_bearer_token_env` combination rejected; `upstream_oauth_scope` without `upstream_oauth` rejected
+  - YAML `null` and blank (`upstream_oauth:` with no value) both decode to `nil` via `yaml.v3`, which is treated as absent (disabled) — identical to omitting the field. Only an explicit quoted empty string (`upstream_oauth: ""`) triggers the fail-closed rejection.
   - No runtime behaviour changes; discovery/DCR/token injection handled in subsequent issues
 
 ### Fixed

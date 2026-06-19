@@ -712,3 +712,40 @@ func TestParseFromConfig_UpstreamOAuthScopeWithoutOAuthRejected(t *testing.T) {
 		t.Fatal("expected error for upstream_oauth_scope without upstream_oauth")
 	}
 }
+
+// yaml.v3 decodes `null` and blank (key with no value) to nil for *string fields.
+// nil is treated as absent (disabled); these tests pin that specification so that
+// any future UnmarshalYAML change that alters this behaviour is caught immediately.
+
+func TestParseFromConfig_UpstreamOAuthNilTreatedAsAbsent(t *testing.T) {
+	cfgRoutes := []appconfig.RouteConfig{
+		{Name: "cf", Prefix: "/mcp/cf", Upstream: "https://mcp.cloudflare.com/mcp", UpstreamOAuth: nil},
+	}
+	routes, err := ParseFromConfig(cfgRoutes)
+	if err != nil {
+		t.Fatalf("unexpected error for nil upstream_oauth: %v", err)
+	}
+	if len(routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(routes))
+	}
+	if routes[0].UpstreamOAuth != "" {
+		t.Errorf("UpstreamOAuth should be empty for nil input, got %q", routes[0].UpstreamOAuth)
+	}
+}
+
+func TestParseFromConfig_UpstreamOAuthScopeNilTreatedAsAbsent(t *testing.T) {
+	cfgRoutes := []appconfig.RouteConfig{
+		{Name: "cf", Prefix: "/mcp/cf", Upstream: "https://mcp.cloudflare.com/mcp",
+			UpstreamOAuth: strPtr("auto"), UpstreamOAuthScope: nil},
+	}
+	routes, err := ParseFromConfig(cfgRoutes)
+	if err != nil {
+		t.Fatalf("unexpected error for nil upstream_oauth_scope: %v", err)
+	}
+	if len(routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(routes))
+	}
+	if routes[0].UpstreamOAuthScope != "" {
+		t.Errorf("UpstreamOAuthScope should be empty for nil input, got %q", routes[0].UpstreamOAuthScope)
+	}
+}
