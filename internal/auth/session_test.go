@@ -234,10 +234,11 @@ func (e *errTokenStore) Save(_, _ string, _ []string, _ time.Time) error {
 func (e *errTokenStore) SaveProviderRefresh(token, providerRefreshToken string, providerAccessExpiry time.Time) error {
 	return e.mem.SaveProviderRefresh(token, providerRefreshToken, providerAccessExpiry)
 }
-func (e *errTokenStore) Lookup(token string) (TokenRecord, bool)    { return e.mem.Lookup(token) }
-func (e *errTokenStore) MarkRotationFailed(_ string) error          { return nil }
-func (e *errTokenStore) Delete(_ string) error                      { return fmt.Errorf("injected delete error") }
-func (e *errTokenStore) Sweep() error                               { return e.mem.Sweep() }
+func (e *errTokenStore) Lookup(token string) (TokenRecord, bool)  { return e.mem.Lookup(token) }
+func (e *errTokenStore) SaveNonce(token, nonce string) error       { return e.mem.SaveNonce(token, nonce) }
+func (e *errTokenStore) MarkRotationFailed(_ string) error         { return nil }
+func (e *errTokenStore) Delete(_ string) error                     { return fmt.Errorf("injected delete error") }
+func (e *errTokenStore) Sweep() error                              { return e.mem.Sweep() }
 
 // TestNewStoreNilTokenStore verifies that a nil TokenStore defaults to memTokenStore.
 func TestNewStoreNilTokenStore(t *testing.T) {

@@ -716,6 +716,32 @@ func (s *Store) RecordProviderRefresh(token, providerRefreshToken string, provid
 	// is no separate index hint to update here.
 }
 
+// SaveTokenNonce attaches the OIDC nonce to an existing token entry so it can
+// be forwarded in the id_token on refresh (OIDC Core §12.2). An empty nonce
+// clears any previously stored value, ensuring stale nonces from a prior grant
+// do not leak into subsequent grants that reuse the same access token.
+func (s *Store) SaveTokenNonce(token, nonce string) {
+	if err := s.tokens.SaveNonce(token, nonce); err != nil {
+		slog.Warn("token store nonce save failed", "err", err)
+	}
+}
+
+// SaveRefreshTokenNonce attaches the OIDC nonce to a refresh-token entry so
+// the nonce survives past the access-token TTL and can be retrieved during
+// token refresh (OIDC Core §12.2). No-op when entry is absent or expired.
+func (s *Store) SaveRefreshTokenNonce(refreshToken, nonce string) {
+	if err := s.refreshStore.SaveNonce(refreshToken, nonce); err != nil {
+		slog.Warn("refresh token store nonce save failed", "err", err)
+	}
+}
+
+// LookupRefreshTokenNonce returns the OIDC nonce stored for refreshToken, or
+// "" when absent or expired. Reads even soft-revoked entries (already rotated
+// by ReserveRefreshToken) so the nonce remains readable during the rotation.
+func (s *Store) LookupRefreshTokenNonce(refreshToken string) string {
+	return s.refreshStore.LookupNonce(refreshToken)
+}
+
 // ClearProviderRefresh drops the provider refresh metadata for token (sets
 // both the refresh token and access expiry to their zero values). Used after
 // a permanent rotation failure (e.g. bad_refresh_token) so subsequent

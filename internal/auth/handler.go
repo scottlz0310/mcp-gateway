@@ -594,6 +594,7 @@ func (h *Handler) tokenAuthCode(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.store.CacheToken(gatewayToken, result.Subject, result.Audience)
+		h.store.SaveTokenNonce(gatewayToken, result.Nonce)
 		familyID, fidErr := generateCode()
 		if fidErr != nil {
 			slog.Warn("failed to generate refresh token family ID", "err", fidErr)
@@ -603,12 +604,14 @@ func (h *Handler) tokenAuthCode(w http.ResponseWriter, r *http.Request) {
 		if rtErr != nil {
 			slog.Warn("failed to create refresh token", "err", rtErr)
 		}
+		h.store.SaveRefreshTokenNonce(refreshToken, result.Nonce)
 		h.writeTokenResponse(w, gatewayToken, result.Scope, refreshToken, result.Subject, result.Nonce)
 		h.auditSuccess("token_exchange", "authorization code exchange completed (builtin)", http.StatusOK)
 		return
 	}
 
 	h.store.CacheToken(result.AccessToken, result.Subject, result.Audience)
+	h.store.SaveTokenNonce(result.AccessToken, result.Nonce)
 	h.persistProviderRefresh(result.AccessToken, result.ProviderRefreshToken, result.ProviderAccessExpiry)
 	familyID, fidErr := generateCode()
 	if fidErr != nil {
@@ -619,6 +622,7 @@ func (h *Handler) tokenAuthCode(w http.ResponseWriter, r *http.Request) {
 	if rtErr != nil {
 		slog.Warn("failed to create refresh token", "err", rtErr)
 	}
+	h.store.SaveRefreshTokenNonce(refreshToken, result.Nonce)
 	h.writeTokenResponse(w, result.AccessToken, result.Scope, refreshToken, result.Subject, result.Nonce)
 	h.auditSuccess("token_exchange", "authorization code exchange completed", http.StatusOK)
 }
@@ -751,6 +755,13 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Look up the nonce before reserving (soft-revoking) the refresh token so
+	// the nonce is still readable via LookupNonce even after revocation.
+	// OIDC Core §12.2: the nonce in the refresh-issued id_token MUST match the
+	// original authentication request. We key on the refresh token (not the
+	// access token) so the nonce remains available past the access-token TTL.
+	nonce := h.store.LookupRefreshTokenNonce(rt)
+
 	// Atomically reserve (remove) the token. Concurrent callers presenting the
 	// same token will fail here, preventing double-rotation.
 	// On reuse detection (revoked token replay), ReserveRefreshToken revokes the
@@ -813,6 +824,7 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.store.CacheToken(newGatewayToken, sub, audience)
+		h.store.SaveTokenNonce(newGatewayToken, nonce)
 		// Propagate the same familyID so the token lineage remains traceable.
 		newRT, rtErr := h.store.CreateRefreshToken(newGatewayToken, audience, familyID, h.refreshTokenTTL())
 		if rtErr != nil {
@@ -822,7 +834,8 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 			oauthError(w, "server_error", "internal error", http.StatusInternalServerError)
 			return
 		}
-		h.writeTokenResponse(w, newGatewayToken, "", newRT, sub, "")
+		h.store.SaveRefreshTokenNonce(newRT, nonce)
+		h.writeTokenResponse(w, newGatewayToken, "", newRT, sub, nonce)
 		h.auditSuccess("refresh", "refresh token exchange completed (builtin)", http.StatusOK)
 		return
 	}
@@ -861,8 +874,9 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 		oauthError(w, "server_error", "internal error", http.StatusInternalServerError)
 		return
 	}
+	h.store.SaveRefreshTokenNonce(newRT, nonce)
 
-	h.writeTokenResponse(w, accessToken, "", newRT, id.Subject, "")
+	h.writeTokenResponse(w, accessToken, "", newRT, id.Subject, nonce)
 	h.auditSuccess("refresh", "refresh token exchange completed", http.StatusOK)
 }
 

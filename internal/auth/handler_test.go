@@ -1399,10 +1399,12 @@ func (d *deleteFailRefreshStore) Lookup(rt string) (string, string, string, time
 func (d *deleteFailRefreshStore) LookupAny(rt string) (string, string, string, time.Time, bool, bool) {
 	return d.inner.LookupAny(rt)
 }
-func (d *deleteFailRefreshStore) Revoke(_ string) error         { return fmt.Errorf("disk I/O error") }
-func (d *deleteFailRefreshStore) RevokeFamily(fid string) error { return d.inner.RevokeFamily(fid) }
-func (d *deleteFailRefreshStore) Delete(_ string) error         { return fmt.Errorf("disk I/O error") }
-func (d *deleteFailRefreshStore) Sweep() error                  { return d.inner.Sweep() }
+func (d *deleteFailRefreshStore) Revoke(_ string) error            { return fmt.Errorf("disk I/O error") }
+func (d *deleteFailRefreshStore) RevokeFamily(fid string) error    { return d.inner.RevokeFamily(fid) }
+func (d *deleteFailRefreshStore) SaveNonce(rt, n string) error     { return d.inner.SaveNonce(rt, n) }
+func (d *deleteFailRefreshStore) LookupNonce(rt string) string     { return d.inner.LookupNonce(rt) }
+func (d *deleteFailRefreshStore) Delete(_ string) error            { return fmt.Errorf("disk I/O error") }
+func (d *deleteFailRefreshStore) Sweep() error                     { return d.inner.Sweep() }
 
 // TestTokenRefreshDeleteFailed503 verifies that when the refresh token store
 // fails to delete the token during rotation (ErrRefreshTokenDeleteFailed),
@@ -2520,6 +2522,221 @@ func TestIDTokenNonceClaim(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestTokenRefreshNoncePropagated verifies that the nonce from the original
+// authorization request is forwarded in the id_token issued by the refresh
+// endpoint (OIDC Core §12.2). Tested in builtin mode where id_token is always
+// emitted on refresh.
+func TestTokenRefreshNoncePropagated(t *testing.T) {
+	tests := []struct {
+		name           string
+		nonce          string
+		expireATBefore bool // simulate AT TTL expiry before refresh
+		expectInToken  bool
+	}{
+		{"nonce present", "original-nonce-xyz", false, true},
+		{"nonce absent", "", false, false},
+		// Thread-owl PRRT_kwDOSNXuJs6KuAH4: nonce must survive past the AT TTL
+		// because the refresh token grace period exceeds the access token TTL.
+		{"nonce present, AT store expired", "original-nonce-xyz", true, true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newBuiltinTestHandler(t,
+				func(_ context.Context, _ string) (provider.TokenResponse, error) {
+					return provider.TokenResponse{AccessToken: "gh-tok"}, nil
+				},
+				func(_ context.Context, _ string) (provider.Identity, error) {
+					return provider.Identity{Subject: "alice"}, nil
+				},
+			)
+
+			// Authorize → Callback → Token (authorization_code) with nonce.
+			verifier := "test-verifier-abcdefghijklmnopqrstuvwxyz01234"
+			challenge := pkceChallenge(verifier)
+			state := "nonce-test-state"
+			redirectURI := "http://localhost/cb"
+
+			authURL := "/authorize?response_type=code&state=" + state +
+				"&redirect_uri=" + url.QueryEscape(redirectURI) +
+				"&code_challenge=" + challenge +
+				"&code_challenge_method=S256"
+			if tc.nonce != "" {
+				authURL += "&nonce=" + url.QueryEscape(tc.nonce)
+			}
+			h.Authorize(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, authURL, nil))
+
+			cbRec := httptest.NewRecorder()
+			h.Callback(cbRec, httptest.NewRequest(http.MethodGet, "/callback?code=gh-code&state="+state, nil))
+			if cbRec.Code != http.StatusFound {
+				t.Fatalf("callback: got %d", cbRec.Code)
+			}
+			loc, _ := url.Parse(cbRec.Header().Get("Location"))
+			internalCode := loc.Query().Get("code")
+
+			tokenBody := "grant_type=authorization_code" +
+				"&redirect_uri=" + url.QueryEscape(redirectURI) +
+				"&code=" + url.QueryEscape(internalCode) +
+				"&code_verifier=" + url.QueryEscape(verifier)
+			tokenRec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(tokenBody))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			h.Token(tokenRec, req)
+			if tokenRec.Code != http.StatusOK {
+				t.Fatalf("token exchange: got %d; body=%s", tokenRec.Code, tokenRec.Body.String())
+			}
+			var tokenResp map[string]any
+			if err := json.NewDecoder(tokenRec.Body).Decode(&tokenResp); err != nil {
+				t.Fatalf("decode token response: %v", err)
+			}
+			rt, _ := tokenResp["refresh_token"].(string)
+			if rt == "" {
+				t.Fatal("expected refresh_token in authorization_code response")
+			}
+
+			if tc.expireATBefore {
+				// Simulate the access-token TTL expiring before the refresh-token
+				// grace period (PRRT_kwDOSNXuJs6KuAH4): the AT record is evicted
+				// from the token store while the RT is still valid. Nonce must
+				// still be propagated via the RT-keyed entry.
+				at, _ := tokenResp["access_token"].(string)
+				h.store.InvalidateCachedToken(at)
+			}
+
+			// Refresh — nonce must be propagated to the new id_token.
+			refreshBody := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(rt)
+			refreshRec := httptest.NewRecorder()
+			req2 := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(refreshBody))
+			req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			h.Token(refreshRec, req2)
+			if refreshRec.Code != http.StatusOK {
+				t.Fatalf("refresh: got %d; body=%s", refreshRec.Code, refreshRec.Body.String())
+			}
+			var refreshResp map[string]any
+			if err := json.NewDecoder(refreshRec.Body).Decode(&refreshResp); err != nil {
+				t.Fatalf("decode refresh response: %v", err)
+			}
+
+			idToken, _ := refreshResp["id_token"].(string)
+			if idToken == "" {
+				t.Fatal("expected id_token in refresh response (builtin mode always issues id_token)")
+			}
+			parts := strings.Split(idToken, ".")
+			if len(parts) != 3 {
+				t.Fatalf("invalid JWT: got %d parts", len(parts))
+			}
+			payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+			if err != nil {
+				t.Fatalf("decode JWT payload: %v", err)
+			}
+			var claims map[string]any
+			if err := json.Unmarshal(payload, &claims); err != nil {
+				t.Fatalf("unmarshal claims: %v", err)
+			}
+
+			nonceClaim, hasClaim := claims["nonce"]
+			if tc.expectInToken {
+				if !hasClaim {
+					t.Error("expected nonce claim in refresh id_token, but not found")
+				} else if nonceClaim != tc.nonce {
+					t.Errorf("nonce claim: got %v, want %q", nonceClaim, tc.nonce)
+				}
+			} else {
+				if hasClaim {
+					t.Errorf("expected no nonce claim in refresh id_token, but got %v", nonceClaim)
+				}
+			}
+		})
+	}
+}
+
+// TestTokenRefreshNoncePropagatedChained verifies that the nonce is correctly
+// propagated across multiple consecutive refresh operations (RT rotation).
+// PRRT_kwDOSNXuJs6KuAH4 follow-up: after the first refresh the new RT must
+// also carry the nonce so the second refresh can include it in id_token.
+func TestTokenRefreshNoncePropagatedChained(t *testing.T) {
+	h := newBuiltinTestHandler(t,
+		func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{AccessToken: "gh-tok"}, nil
+		},
+		func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Subject: "alice"}, nil
+		},
+	)
+
+	const nonce = "chained-nonce-xyz"
+	verifier := "test-verifier-abcdefghijklmnopqrstuvwxyz01234"
+	challenge := pkceChallenge(verifier)
+	state := "chained-nonce-state"
+	redirectURI := "http://localhost/cb"
+
+	authURL := "/authorize?response_type=code&state=" + state +
+		"&redirect_uri=" + url.QueryEscape(redirectURI) +
+		"&code_challenge=" + challenge +
+		"&code_challenge_method=S256" +
+		"&nonce=" + url.QueryEscape(nonce)
+	h.Authorize(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, authURL, nil))
+
+	cbRec := httptest.NewRecorder()
+	h.Callback(cbRec, httptest.NewRequest(http.MethodGet, "/callback?code=gh-code&state="+state, nil))
+	loc, _ := url.Parse(cbRec.Header().Get("Location"))
+	internalCode := loc.Query().Get("code")
+
+	tokenBody := "grant_type=authorization_code" +
+		"&redirect_uri=" + url.QueryEscape(redirectURI) +
+		"&code=" + url.QueryEscape(internalCode) +
+		"&code_verifier=" + url.QueryEscape(verifier)
+	tokenRec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(tokenBody))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	h.Token(tokenRec, req)
+	var tokenResp map[string]any
+	if err := json.NewDecoder(tokenRec.Body).Decode(&tokenResp); err != nil {
+		t.Fatalf("decode token response: %v", err)
+	}
+	rt1, _ := tokenResp["refresh_token"].(string)
+	if rt1 == "" {
+		t.Fatal("expected refresh_token in authorization_code response")
+	}
+
+	doRefresh := func(t *testing.T, rt string) (newRT string, nonceClaim string) {
+		t.Helper()
+		refreshBody := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(rt)
+		refreshRec := httptest.NewRecorder()
+		req2 := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(refreshBody))
+		req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		h.Token(refreshRec, req2)
+		if refreshRec.Code != http.StatusOK {
+			t.Fatalf("refresh: got %d; body=%s", refreshRec.Code, refreshRec.Body.String())
+		}
+		var resp map[string]any
+		if err := json.NewDecoder(refreshRec.Body).Decode(&resp); err != nil {
+			t.Fatalf("decode refresh response: %v", err)
+		}
+		idToken, _ := resp["id_token"].(string)
+		if idToken == "" {
+			t.Fatal("expected id_token in refresh response (builtin mode)")
+		}
+		claims := parseJWTPayload(t, idToken)
+		nc, _ := claims["nonce"].(string)
+		nr, _ := resp["refresh_token"].(string)
+		return nr, nc
+	}
+
+	rt2, nonce1 := doRefresh(t, rt1)
+	if nonce1 != nonce {
+		t.Errorf("1st refresh: nonce claim got %q, want %q", nonce1, nonce)
+	}
+	if rt2 == "" {
+		t.Fatal("expected refresh_token in 1st refresh response")
+	}
+
+	_, nonce2 := doRefresh(t, rt2)
+	if nonce2 != nonce {
+		t.Errorf("2nd refresh: nonce claim got %q, want %q (nonce must survive RT rotation)", nonce2, nonce)
 	}
 }
 
