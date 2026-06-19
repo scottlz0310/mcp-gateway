@@ -1,9 +1,13 @@
 package upstreamoauth
 
 import (
+	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -24,8 +28,13 @@ func generateStateKey() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
-// NewAuthorizeMiddleware returns middleware that redirects authenticated users
-// to the upstream authorization endpoint when they have no valid upstream token.
+// NewAuthorizeMiddleware returns middleware that acquires an upstream token for
+// authenticated users that do not yet have one.
+//
+// When grant is "client_credentials", the token is fetched directly from the
+// upstream token endpoint without user interaction. When grant is
+// "authorization_code" (or empty, which defaults to "authorization_code"), the
+// user is redirected to the upstream authorization endpoint via PKCE.
 //
 // The middleware must sit between the gateway Auth middleware (which sets the
 // identity in context) and the proxy handler.
@@ -33,6 +42,7 @@ func NewAuthorizeMiddleware(
 	routeName string,
 	upstreamOAuth string,
 	upstreamOAuthScope string,
+	grant string,
 	resourceURL string,
 	manager *Manager,
 	stateStore StateStore,
@@ -40,6 +50,9 @@ func NewAuthorizeMiddleware(
 	publicURL string,
 ) func(http.Handler) http.Handler {
 	trimmedPublicURL := strings.TrimRight(publicURL, "/")
+	if grant == "" {
+		grant = "authorization_code"
+	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			subject := middleware.IdentityFromContext(r.Context())
@@ -53,13 +66,44 @@ func NewAuthorizeMiddleware(
 				return
 			}
 
-			rec, err := manager.EnsureClient(r.Context(), routeName, upstreamOAuth, resourceURL)
+			rec, err := manager.EnsureClient(r.Context(), routeName, upstreamOAuth, resourceURL, grant)
 			if err != nil {
 				slog.Error("upstream OAuth: EnsureClient failed", "route", routeName, "err", err)
 				http.Error(w, "upstream OAuth configuration error", http.StatusBadGateway)
 				return
 			}
 
+			if grant == "client_credentials" {
+				h := &http.Client{Timeout: DefaultHTTPTimeout}
+				tokenResp, err := fetchClientCredentialsToken(r.Context(), h, rec, upstreamOAuthScope)
+				if err != nil {
+					slog.Error("upstream OAuth: client_credentials token fetch failed", "route", routeName, "err", err)
+					http.Error(w, "upstream OAuth error", http.StatusBadGateway)
+					return
+				}
+				if tokenResp.ExpiresIn <= 0 {
+					slog.Error("upstream OAuth: client_credentials token missing required expires_in",
+						"route", routeName, "token_endpoint", rec.TokenEndpoint)
+					http.Error(w, "upstream token missing required expiry", http.StatusBadGateway)
+					return
+				}
+				expiresAt := time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
+				if err := tokenStore.Save(subject, routeName, auth.UpstreamTokenRecord{
+					Issuer:      rec.Issuer,
+					AccessToken: tokenResp.AccessToken,
+					ExpiresAt:   expiresAt,
+					Scope:       tokenResp.Scope,
+				}); err != nil {
+					slog.Error("upstream OAuth: failed to save client_credentials token", "route", routeName, "err", err)
+					http.Error(w, "failed to save token", http.StatusInternalServerError)
+					return
+				}
+				slog.Info("upstream OAuth: client_credentials token acquired", "route", routeName)
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			// authorization_code flow: redirect user to upstream authorization endpoint.
 			codeVerifier, err := GenerateCodeVerifier()
 			if err != nil {
 				slog.Error("upstream OAuth: code_verifier generation failed", "err", err)
@@ -106,4 +150,48 @@ func NewAuthorizeMiddleware(
 			http.Redirect(w, r, authURL.String(), http.StatusFound)
 		})
 	}
+}
+
+// fetchClientCredentialsToken obtains an access token from rec.TokenEndpoint
+// using the client_credentials grant type. The returned response is never nil
+// when err is nil, and AccessToken is guaranteed to be non-empty.
+func fetchClientCredentialsToken(ctx context.Context, httpClient *http.Client, rec ClientRecord, scope string) (*tokenExchangeResponse, error) {
+	form := url.Values{}
+	form.Set("grant_type", "client_credentials")
+	if scope != "" {
+		form.Set("scope", scope)
+	}
+	form.Set("client_id", rec.ClientID)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rec.TokenEndpoint,
+		bytes.NewBufferString(form.Encode()))
+	if err != nil {
+		return nil, fmt.Errorf("creating client_credentials request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+	if rec.ClientSecret != "" {
+		req.SetBasicAuth(rec.ClientID, rec.ClientSecret)
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("POST %s: %w", rec.TokenEndpoint, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+		return nil, fmt.Errorf("token endpoint %s: unexpected status %d: %s",
+			rec.TokenEndpoint, resp.StatusCode, strings.TrimSpace(string(snippet)))
+	}
+
+	var tr tokenExchangeResponse
+	if err := json.NewDecoder(resp.Body).Decode(&tr); err != nil {
+		return nil, fmt.Errorf("decoding token response from %s: %w", rec.TokenEndpoint, err)
+	}
+	if tr.AccessToken == "" {
+		return nil, fmt.Errorf("token response from %s missing access_token", rec.TokenEndpoint)
+	}
+	return &tr, nil
 }

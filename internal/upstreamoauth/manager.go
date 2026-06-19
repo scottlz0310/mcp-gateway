@@ -52,10 +52,12 @@ func NewManager(store ClientStore, publicURL string) *Manager {
 //     issuer URL (RFC 8414 one-step).
 //   - resourceURL: the upstream URL for "auto" discovery (e.g.
 //     "https://mcp.example.com/sse"). Ignored when upstreamOAuth is an issuer URL.
+//   - grant: "authorization_code" or "client_credentials". Controls which grant
+//     type is registered via DCR. Empty string defaults to "authorization_code".
 //
 // Concurrent calls for the same routeName are coalesced via singleflight so
 // that discovery + DCR + store.Save only executes once.
-func (m *Manager) EnsureClient(ctx context.Context, routeName, upstreamOAuth, resourceURL string) (ClientRecord, error) {
+func (m *Manager) EnsureClient(ctx context.Context, routeName, upstreamOAuth, resourceURL, grant string) (ClientRecord, error) {
 	if rec, ok := m.store.Load(routeName); ok && rec.ClientID != "" {
 		return rec, nil
 	}
@@ -77,13 +79,22 @@ func (m *Manager) EnsureClient(ctx context.Context, routeName, upstreamOAuth, re
 			return nil, fmt.Errorf("upstream AS for route %q does not expose a registration_endpoint; Dynamic Client Registration is required", routeName)
 		}
 
-		redirectURI := m.publicURL + "/upstream/callback/" + url.PathEscape(routeName)
-		dcrReq := DCRRequest{
-			RedirectURIs:            []string{redirectURI},
-			ClientName:              "mcp-gateway/" + routeName,
-			GrantTypes:              []string{"authorization_code"},
-			ResponseTypes:           []string{"code"},
-			TokenEndpointAuthMethod: "client_secret_basic",
+		var dcrReq DCRRequest
+		if grant == "client_credentials" {
+			dcrReq = DCRRequest{
+				ClientName:              "mcp-gateway/" + routeName,
+				GrantTypes:              []string{"client_credentials"},
+				TokenEndpointAuthMethod: "client_secret_basic",
+			}
+		} else {
+			redirectURI := m.publicURL + "/upstream/callback/" + url.PathEscape(routeName)
+			dcrReq = DCRRequest{
+				RedirectURIs:            []string{redirectURI},
+				ClientName:              "mcp-gateway/" + routeName,
+				GrantTypes:              []string{"authorization_code"},
+				ResponseTypes:           []string{"code"},
+				TokenEndpointAuthMethod: "client_secret_basic",
+			}
 		}
 		dcrResp, err := RegisterClient(ctx, m.httpClient, meta.RegistrationEndpoint, dcrReq)
 		if err != nil {

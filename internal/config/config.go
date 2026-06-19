@@ -39,6 +39,11 @@ type RouteConfig struct {
 	// space-separated internally.
 	// Use *string for the same presence-vs-empty reason as UpstreamOAuth.
 	UpstreamOAuthScope *string `yaml:"upstream_oauth_scope,omitempty" json:"upstream_oauth_scope,omitempty"`
+	// UpstreamOAuthGrant is the OAuth 2.0 grant type used for upstream token acquisition.
+	// Valid values: "authorization_code" (user-interactive, default) or
+	// "client_credentials" (service-to-service, no user interaction required).
+	// Use *string for the same presence-vs-empty reason as UpstreamOAuth.
+	UpstreamOAuthGrant *string `yaml:"upstream_oauth_grant,omitempty" json:"upstream_oauth_grant,omitempty"`
 }
 
 // SetupConfig holds first-run wizard state.

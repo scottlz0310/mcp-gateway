@@ -63,7 +63,7 @@ func TestManager_EnsureClient_FullFlow(t *testing.T) {
 
 	m.httpClient = asSrv.Client()
 
-	rec, err := m.EnsureClient(context.Background(), "route1", asSrv.URL, "")
+	rec, err := m.EnsureClient(context.Background(), "route1", asSrv.URL, "", "authorization_code")
 	if err != nil {
 		t.Fatalf("EnsureClient: %v", err)
 	}
@@ -88,12 +88,12 @@ func TestManager_EnsureClient_CacheHit(t *testing.T) {
 	m.httpClient = asSrv.Client()
 
 	// 1 回目: discovery + DCR
-	if _, err := m.EnsureClient(context.Background(), "route-cache", asSrv.URL, ""); err != nil {
+	if _, err := m.EnsureClient(context.Background(), "route-cache", asSrv.URL, "", "authorization_code"); err != nil {
 		t.Fatalf("EnsureClient (first): %v", err)
 	}
 
 	// 2 回目: store から即返却（network call なし）
-	if _, err := m.EnsureClient(context.Background(), "route-cache", asSrv.URL, ""); err != nil {
+	if _, err := m.EnsureClient(context.Background(), "route-cache", asSrv.URL, "", "authorization_code"); err != nil {
 		t.Fatalf("EnsureClient (second): %v", err)
 	}
 
@@ -127,7 +127,7 @@ func TestManager_EnsureClient_SkipDCRWhenClientIDExists(t *testing.T) {
 	defer asSrv.Close()
 	m.httpClient = asSrv.Client()
 
-	rec, err := m.EnsureClient(context.Background(), "pre-registered", asSrv.URL, "")
+	rec, err := m.EnsureClient(context.Background(), "pre-registered", asSrv.URL, "", "authorization_code")
 	if err != nil {
 		t.Fatalf("EnsureClient: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestManager_EnsureClient_MissingRegistrationEndpoint(t *testing.T) {
 
 	m.httpClient = asSrv.Client()
 
-	_, err := m.EnsureClient(context.Background(), "no-dcr-route", asSrv.URL, "")
+	_, err := m.EnsureClient(context.Background(), "no-dcr-route", asSrv.URL, "", "authorization_code")
 	if err == nil {
 		t.Fatal("expected error for missing registration_endpoint, got nil")
 	}
@@ -207,7 +207,7 @@ func TestManager_EnsureClient_Auto_TwoStep(t *testing.T) {
 	// auto 検索: httpClient は両サーバーに接続できる必要がある（どちらも plain HTTP）
 	m.httpClient = prmSrv.Client()
 
-	rec, err := m.EnsureClient(context.Background(), "auto-route", "auto", prmSrv.URL+"/sse")
+	rec, err := m.EnsureClient(context.Background(), "auto-route", "auto", prmSrv.URL+"/sse", "authorization_code")
 	if err != nil {
 		t.Fatalf("EnsureClient (auto): %v", err)
 	}
@@ -243,7 +243,7 @@ func TestManager_EnsureClient_SaveFailureReturnsError(t *testing.T) {
 	defer asSrv.Close()
 	m.httpClient = asSrv.Client()
 
-	_, err := m.EnsureClient(context.Background(), "save-fail-route", asSrv.URL, "")
+	_, err := m.EnsureClient(context.Background(), "save-fail-route", asSrv.URL, "", "authorization_code")
 	if err == nil {
 		t.Fatal("expected error when store.Save fails, got nil")
 	}
