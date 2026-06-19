@@ -51,15 +51,15 @@ func upstreamTokenKey(subject, routeName string) string {
 // token record. Subject and RouteName are intentionally absent from the JSON
 // so that raw identity information is never written to disk.
 type upstreamTokenFileEntry struct {
-	Issuer       string    `json:"issuer"`
-	AccessToken  string    `json:"access_token"`
-	RefreshToken string    `json:"refresh_token,omitempty"`
-	ExpiresAt    time.Time `json:"expires_at"`
-	Scope        string    `json:"scope,omitempty"`
+	Issuer       string     `json:"issuer"`
+	AccessToken  string     `json:"access_token"`
+	RefreshToken string     `json:"refresh_token,omitempty"`
+	ExpiresAt    *time.Time `json:"expires_at,omitempty"`
+	Scope        string     `json:"scope,omitempty"`
 }
 
 func (e upstreamTokenFileEntry) expired() bool {
-	return !e.ExpiresAt.IsZero() && time.Now().After(e.ExpiresAt)
+	return e.ExpiresAt != nil && time.Now().After(*e.ExpiresAt)
 }
 
 // ── in-memory implementation ─────────────────────────────────────────────────
@@ -183,11 +183,16 @@ func (s *fileUpstreamTokenStore) Save(subject, routeName string, record Upstream
 	defer s.mu.Unlock()
 	key := upstreamTokenKey(subject, routeName)
 	prev, hadPrev := s.entries[key]
+	var expiresAt *time.Time
+	if !record.ExpiresAt.IsZero() {
+		t := record.ExpiresAt
+		expiresAt = &t
+	}
 	s.entries[key] = upstreamTokenFileEntry{
 		Issuer:       record.Issuer,
 		AccessToken:  record.AccessToken,
 		RefreshToken: record.RefreshToken,
-		ExpiresAt:    record.ExpiresAt,
+		ExpiresAt:    expiresAt,
 		Scope:        record.Scope,
 	}
 	if err := s.flush(); err != nil {
@@ -208,13 +213,17 @@ func (s *fileUpstreamTokenStore) Lookup(subject, routeName string) (UpstreamToke
 	if !ok || entry.expired() {
 		return UpstreamTokenRecord{}, false
 	}
+	var expiresAt time.Time
+	if entry.ExpiresAt != nil {
+		expiresAt = *entry.ExpiresAt
+	}
 	return UpstreamTokenRecord{
 		Subject:      subject,
 		RouteName:    routeName,
 		Issuer:       entry.Issuer,
 		AccessToken:  entry.AccessToken,
 		RefreshToken: entry.RefreshToken,
-		ExpiresAt:    entry.ExpiresAt,
+		ExpiresAt:    expiresAt,
 		Scope:        entry.Scope,
 	}, true
 }
@@ -222,8 +231,16 @@ func (s *fileUpstreamTokenStore) Lookup(subject, routeName string) (UpstreamToke
 func (s *fileUpstreamTokenStore) Delete(subject, routeName string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.entries, upstreamTokenKey(subject, routeName))
-	return s.flush()
+	key := upstreamTokenKey(subject, routeName)
+	prev, hadPrev := s.entries[key]
+	delete(s.entries, key)
+	if err := s.flush(); err != nil {
+		if hadPrev {
+			s.entries[key] = prev
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *fileUpstreamTokenStore) Sweep() error {
