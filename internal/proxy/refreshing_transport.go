@@ -40,6 +40,19 @@ func (t *refreshingTransport) RoundTrip(req *http.Request) (*http.Response, erro
 		return resp, nil
 	}
 
+	// Only retry when the body is absent or replayable. Non-replayable streaming
+	// bodies (e.g. SSE, chunked POST) cannot be re-sent after the first read;
+	// attempting to do so would send an empty body and corrupt the upstream call.
+	hasBody := req.Body != nil && req.Body != http.NoBody
+	bodyReplayable := !hasBody || req.GetBody != nil
+	if !bodyReplayable {
+		slog.Warn("upstream OAuth 401 retry: request body is not replayable; returning 401 to caller",
+			"route", t.opts.RouteName,
+			"path", req.URL.Path,
+		)
+		return resp, nil
+	}
+
 	// Close the original 401 body before retrying to avoid connection leaks.
 	_ = resp.Body.Close()
 

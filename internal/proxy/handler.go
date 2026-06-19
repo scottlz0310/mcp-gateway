@@ -41,17 +41,23 @@ type UpstreamOAuthOptions struct {
 // NewHandler returns an HTTP handler that reverse-proxies authenticated
 // requests to the upstream MCP server. It performs header sanitization,
 // injects the verified user identifier as X-Authenticated-User (and the
-// legacy X-GitHub-Login during the migration window), and invalidates the
-// token cache when the upstream returns HTTP 401.
+// legacy X-GitHub-Login during the migration window), and handles upstream
+// HTTP 401 responses according to the configured token source.
 //
 // Token injection priority:
-//  1. upstreamOAuth non-nil → per-user token from UpstreamTokenStore
-//  2. upstreamBearerTokenEnv non-empty → token from named env var
-//  3. otherwise → gateway client OAuth token from context
+//  1. upstreamOAuth non-nil → per-user token from UpstreamTokenStore,
+//     with optional proactive refresh via UpstreamOAuthOptions.Refresher.
+//  2. upstreamBearerTokenEnv non-empty → token from named env var.
+//  3. otherwise → gateway client OAuth token from context.
 //
-// When upstreamOAuth is set and upstream returns 401, the stale token is
-// deleted from TokenStore and re-authorization is required (#118 handles
-// automatic refresh).
+// Upstream 401 handling:
+//   - upstreamOAuth with Refresher: refreshingTransport intercepts the 401,
+//     calls RefreshAfter401, and retries with the new token transparently.
+//     If refresh fails, the 401 propagates and ModifyResponse logs it.
+//   - upstreamOAuth without Refresher: the stale token is deleted from
+//     TokenStore so the next request triggers re-authorization.
+//   - upstreamBearerTokenEnv: logs a warning; env var token must be rotated.
+//   - otherwise: invalidates the gateway client token cache.
 func NewHandler(upstream *url.URL, inv TokenInvalidator, upstreamBearerTokenEnv string, prefix string, upstreamOAuth *UpstreamOAuthOptions) http.Handler {
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {

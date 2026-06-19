@@ -127,22 +127,29 @@ func (r *Refresher) doRefresh(ctx context.Context, subject, routeName, refreshTo
 			return sfResult{}, nil
 		}
 
+		// Reject refresh responses without expires_in: saving a zero ExpiresAt would
+		// make UpstreamTokenStore.Lookup treat the refreshed token as permanently valid,
+		// which is inconsistent with callback.go's policy. Keep the existing token instead.
+		if newToken.ExpiresIn <= 0 {
+			slog.Warn("upstream OAuth refresh: response missing expires_in, keeping existing token",
+				"route", routeName)
+			if existing, ok := r.tokenStore.Lookup(subject, routeName); ok {
+				return sfResult{rec: existing, ok: true}, nil
+			}
+			return sfResult{}, nil
+		}
+
 		// Preserve old refresh_token when AS does not rotate it.
 		keepRefreshToken := newToken.RefreshToken
 		if keepRefreshToken == "" {
 			keepRefreshToken = refreshToken
 		}
 
-		var expiresAt time.Time
-		if newToken.ExpiresIn > 0 {
-			expiresAt = time.Now().Add(time.Duration(newToken.ExpiresIn) * time.Second)
-		}
-
 		updated := auth.UpstreamTokenRecord{
 			Issuer:       clientRec.Issuer,
 			AccessToken:  newToken.AccessToken,
 			RefreshToken: keepRefreshToken,
-			ExpiresAt:    expiresAt,
+			ExpiresAt:    time.Now().Add(time.Duration(newToken.ExpiresIn) * time.Second),
 			Scope:        newToken.Scope,
 		}
 		if err := r.tokenStore.Save(subject, routeName, updated); err != nil {

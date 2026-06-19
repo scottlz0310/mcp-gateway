@@ -2,9 +2,11 @@ package proxy
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -123,6 +125,87 @@ func TestRefreshingTransport_RefreshFailedReturns401(t *testing.T) {
 	}
 	if mr.calls401 != 1 {
 		t.Errorf("RefreshAfter401 called %d times, want 1", mr.calls401)
+	}
+}
+
+func TestRefreshingTransport_NonReplayableBodySkipsRetry(t *testing.T) {
+	// When req.Body is set but GetBody is nil (non-replayable stream), retry
+	// must not be attempted: the body has already been consumed by the first
+	// RoundTrip, so a second RoundTrip would send an empty body.
+	mr := &mockRefresher{
+		after401OK:  true,
+		after401Rec: auth.UpstreamTokenRecord{AccessToken: "new-tok"},
+	}
+
+	callCount := 0
+	base := rtFunc(func(_ *http.Request) (*http.Response, error) {
+		callCount++
+		return makeResponse(http.StatusUnauthorized), nil
+	})
+
+	rt := &refreshingTransport{
+		base: base,
+		opts: &UpstreamOAuthOptions{RouteName: "myroute", Refresher: mr},
+	}
+
+	req := requestWithIdentity("alice")
+	// Attach a non-replayable body (GetBody == nil).
+	req.Body = io.NopCloser(strings.NewReader(`{"method":"test"}`))
+	req.ContentLength = 18
+	// GetBody is intentionally nil (default for non-buffered readers).
+
+	resp, err := rt.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// 401 must be returned as-is; no retry.
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d (non-replayable body: retry must be skipped)", resp.StatusCode, http.StatusUnauthorized)
+	}
+	if callCount != 1 {
+		t.Errorf("base called %d times, want 1 (no retry for non-replayable body)", callCount)
+	}
+}
+
+func TestRefreshingTransport_ReplayableBodyRetries(t *testing.T) {
+	// When GetBody is set (replayable), retry must proceed.
+	mr := &mockRefresher{
+		after401OK:  true,
+		after401Rec: auth.UpstreamTokenRecord{AccessToken: "new-tok"},
+	}
+
+	callCount := 0
+	base := rtFunc(func(_ *http.Request) (*http.Response, error) {
+		callCount++
+		if callCount == 1 {
+			return makeResponse(http.StatusUnauthorized), nil
+		}
+		return makeResponse(http.StatusOK), nil
+	})
+
+	rt := &refreshingTransport{
+		base: base,
+		opts: &UpstreamOAuthOptions{RouteName: "myroute", Refresher: mr},
+	}
+
+	req := requestWithIdentity("alice")
+	body := `{"method":"test"}`
+	req.Body = io.NopCloser(strings.NewReader(body))
+	req.ContentLength = int64(len(body))
+	// Set GetBody so the body is replayable.
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(strings.NewReader(body)), nil
+	}
+
+	resp, err := rt.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want %d (replayable body: retry should succeed)", resp.StatusCode, http.StatusOK)
+	}
+	if callCount != 2 {
+		t.Errorf("base called %d times, want 2 (initial + retry)", callCount)
 	}
 }
 

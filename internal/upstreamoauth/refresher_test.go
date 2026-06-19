@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -439,5 +441,137 @@ func TestRefreshEndpointSendsGrantTypeRefreshToken(t *testing.T) {
 	}
 	if capturedForm["client_id"] != "my-client-id" {
 		t.Errorf("client_id = %q, want %q", capturedForm["client_id"], "my-client-id")
+	}
+}
+
+func TestEnsureFreshToken_ConcurrentCallsCoalesceToOneEndpointRequest(t *testing.T) {
+	// Verifies the singleflight invariant: N concurrent EnsureFreshToken calls
+	// for the same (subject, routeName) result in exactly 1 token endpoint request.
+	const goroutines = 10
+
+	var endpointCalls atomic.Int64
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		endpointCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  "new-tok",
+			"refresh_token": "new-ref",
+			"expires_in":    3600,
+		})
+	}))
+	defer ts.Close()
+
+	store := auth.NewMemUpstreamTokenStore()
+	_ = store.Save("user", "myroute", auth.UpstreamTokenRecord{
+		AccessToken:  "old-tok",
+		RefreshToken: "old-ref",
+		ExpiresAt:    nearExpiry(),
+	})
+
+	refresher := makeRefresher(t, map[string]upstreamoauth.ClientRecord{
+		"myroute": {
+			RouteName:     "myroute",
+			TokenEndpoint: ts.URL + "/token",
+			ClientID:      "cid",
+		},
+	}, store, ts.Client())
+
+	rec := auth.UpstreamTokenRecord{
+		AccessToken:  "old-tok",
+		RefreshToken: "old-ref",
+		ExpiresAt:    nearExpiry(),
+	}
+
+	var wg sync.WaitGroup
+	results := make([]auth.UpstreamTokenRecord, goroutines)
+	oks := make([]bool, goroutines)
+
+	wg.Add(goroutines)
+	var start sync.WaitGroup
+	start.Add(1)
+	for i := range goroutines {
+		go func(idx int) {
+			defer wg.Done()
+			start.Wait() // all goroutines start simultaneously
+			results[idx], oks[idx] = refresher.EnsureFreshToken(context.Background(), "user", "myroute", rec)
+		}(i)
+	}
+	start.Done() // release all goroutines
+	wg.Wait()
+
+	calls := endpointCalls.Load()
+	if calls != 1 {
+		t.Errorf("token endpoint called %d times, want 1 (singleflight coalescing)", calls)
+	}
+	for i, ok := range oks {
+		if !ok {
+			t.Errorf("goroutine %d: expected ok=true", i)
+		}
+		if results[i].AccessToken != "new-tok" {
+			t.Errorf("goroutine %d: AccessToken = %q, want %q", i, results[i].AccessToken, "new-tok")
+		}
+	}
+}
+
+func TestRefreshAfter401_ConcurrentCallsCoalesceToOneEndpointRequest(t *testing.T) {
+	// Verifies the singleflight invariant for RefreshAfter401:
+	// N concurrent calls for the same key result in exactly 1 endpoint request.
+	const goroutines = 10
+
+	var endpointCalls atomic.Int64
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		endpointCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  "new-tok",
+			"refresh_token": "new-ref",
+			"expires_in":    3600,
+		})
+	}))
+	defer ts.Close()
+
+	store := auth.NewMemUpstreamTokenStore()
+	_ = store.Save("user", "myroute", auth.UpstreamTokenRecord{
+		AccessToken:  "old-tok",
+		RefreshToken: "old-ref",
+		ExpiresAt:    futureExpiry(),
+	})
+
+	refresher := makeRefresher(t, map[string]upstreamoauth.ClientRecord{
+		"myroute": {
+			RouteName:     "myroute",
+			TokenEndpoint: ts.URL + "/token",
+			ClientID:      "cid",
+		},
+	}, store, ts.Client())
+
+	var wg sync.WaitGroup
+	results := make([]auth.UpstreamTokenRecord, goroutines)
+	oks := make([]bool, goroutines)
+
+	wg.Add(goroutines)
+	var start sync.WaitGroup
+	start.Add(1)
+	for i := range goroutines {
+		go func(idx int) {
+			defer wg.Done()
+			start.Wait()
+			results[idx], oks[idx] = refresher.RefreshAfter401(context.Background(), "user", "myroute")
+		}(i)
+	}
+	start.Done()
+	wg.Wait()
+
+	calls := endpointCalls.Load()
+	if calls != 1 {
+		t.Errorf("token endpoint called %d times, want 1 (singleflight coalescing)", calls)
+	}
+	for i, ok := range oks {
+		if !ok {
+			t.Errorf("goroutine %d: expected ok=true", i)
+		}
+		if results[i].AccessToken != "new-tok" {
+			t.Errorf("goroutine %d: AccessToken = %q, want %q", i, results[i].AccessToken, "new-tok")
+		}
 	}
 }
