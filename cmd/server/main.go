@@ -23,6 +23,7 @@ import (
 	"github.com/scottlz0310/mcp-gateway/internal/proxy"
 	"github.com/scottlz0310/mcp-gateway/internal/router"
 	"github.com/scottlz0310/mcp-gateway/internal/setup"
+	"github.com/scottlz0310/mcp-gateway/internal/upstreamoauth"
 )
 
 func main() {
@@ -291,6 +292,46 @@ func main() {
 		_, _ = fmt.Fprintln(w, `{"status":"ok"}`)
 	})
 
+	// Initialize upstream OAuth components when any route has upstream_oauth configured.
+	var upstreamManager *upstreamoauth.Manager
+	var upstreamStateStore upstreamoauth.StateStore
+	var upstreamTokenStore auth.UpstreamTokenStore
+	for _, r := range routes {
+		if r.UpstreamOAuth != "" {
+			clientStore, err := upstreamoauth.NewFileClientStore(cfg.upstreamClientStorePath)
+			if err != nil {
+				slog.Error("failed to initialize upstream client store", "err", err)
+				os.Exit(1)
+			}
+			upstreamManager = upstreamoauth.NewManager(clientStore, publicURL)
+			upstreamStateStore = upstreamoauth.NewStateStore()
+			upstreamTokenStore, err = auth.NewFileUpstreamTokenStore(cfg.upstreamTokenStorePath)
+			if err != nil {
+				slog.Error("failed to initialize upstream token store", "err", err)
+				os.Exit(1)
+			}
+			callbackHandler := upstreamoauth.NewCallbackHandler(
+				upstreamStateStore, upstreamManager, upstreamTokenStore, publicURL, nil,
+			)
+			mux.Handle("GET /upstream/callback/{routeName}", callbackHandler)
+			slog.Info("upstream OAuth callback endpoint registered", "path", "/upstream/callback/{routeName}")
+
+			// Background sweeper: remove expired state entries and token records
+			// so that abandoned auth flows do not accumulate indefinitely.
+			go func() {
+				t := time.NewTicker(5 * time.Minute)
+				defer t.Stop()
+				for range t.C {
+					upstreamStateStore.Sweep()
+					if err := upstreamTokenStore.Sweep(); err != nil {
+						slog.Warn("upstream token store sweep failed", "err", err)
+					}
+				}
+			}()
+			break
+		}
+	}
+
 	// Proxy routes — apply auth middleware unless the route opts out.
 	// Each authenticated route also exposes its own RFC 9728 PRM document at
 	// /.well-known/oauth-protected-resource{prefix}, and 401 responses point
@@ -323,7 +364,25 @@ func main() {
 				authOpts = append(authOpts, middleware.WithResourceMetadataURL(publicURL+routePRMPath))
 			}
 			routeAuth := middleware.Auth(oauthHandler, authOpts...)
-			wrapped = routeAuth(h)
+
+			// For routes with upstream OAuth, insert the authorize middleware
+			// between the gateway auth middleware and the proxy handler so that
+			// authenticated users without a valid upstream token are redirected
+			// to the upstream authorization endpoint.
+			proxyHandler := http.Handler(h)
+			if route.UpstreamOAuth != "" && upstreamManager != nil {
+				proxyHandler = upstreamoauth.NewAuthorizeMiddleware(
+					route.Name,
+					route.UpstreamOAuth,
+					route.UpstreamOAuthScope,
+					route.Upstream.String(),
+					upstreamManager,
+					upstreamStateStore,
+					upstreamTokenStore,
+					publicURL,
+				)(h)
+			}
+			wrapped = routeAuth(proxyHandler)
 		}
 		mux.Handle(route.Prefix, wrapped)
 		mux.Handle(route.Prefix+"/", wrapped)
@@ -333,6 +392,7 @@ func main() {
 			"upstream", route.Upstream.String(),
 			"auth_required", !route.NoAuth,
 			"upstream_bearer_token_env", route.UpstreamBearerTokenEnv != "",
+			"upstream_oauth", route.UpstreamOAuth != "",
 		)
 	}
 
@@ -438,6 +498,9 @@ type config struct {
 	configPath           string
 	allowedRedirectHosts   []string
 	allowedRedirectSchemes []string
+	// upstream OAuth state paths
+	upstreamClientStorePath string
+	upstreamTokenStorePath  string
 }
 
 func loadConfig() config {
@@ -485,6 +548,8 @@ func loadConfig() config {
 		configPath:           getEnv("MCP_CONFIG_FILE", filepath.Join(stateDir, "config.yaml")),
 		allowedRedirectHosts:   splitCSV(os.Getenv("MCP_GATEWAY_ALLOWED_REDIRECT_HOSTS")),
 		allowedRedirectSchemes: splitCSV(os.Getenv("MCP_GATEWAY_ALLOWED_REDIRECT_SCHEMES")),
+		upstreamClientStorePath: filepath.Join(stateDir, "upstream_clients.json"),
+		upstreamTokenStorePath:  filepath.Join(stateDir, "upstream_tokens.json"),
 	}
 }
 

@@ -749,3 +749,55 @@ func TestParseFromConfig_UpstreamOAuthScopeNilTreatedAsAbsent(t *testing.T) {
 		t.Errorf("UpstreamOAuthScope should be empty for nil input, got %q", routes[0].UpstreamOAuthScope)
 	}
 }
+
+// upstream_oauth + auth=none の非互換性テスト（回帰）
+
+func TestParseRoutes_UpstreamOAuthIncompatibleWithAuthNone(t *testing.T) {
+	env := []string{"ROUTE_CF=/mcp/cf|https://mcp.cloudflare.com/mcp|auth=none|upstream_oauth=auto"}
+	_, err := parseRoutes(env)
+	if err == nil {
+		t.Fatal("expected error: upstream_oauth is incompatible with auth=none")
+	}
+	if !strings.Contains(err.Error(), "incompatible") {
+		t.Errorf("error message should mention incompatibility, got: %v", err)
+	}
+}
+
+func TestParseRoutes_UpstreamOAuthWithAuthOAuthIsValid(t *testing.T) {
+	env := []string{"ROUTE_CF=/mcp/cf|https://mcp.cloudflare.com/mcp|auth=oauth|upstream_oauth=auto"}
+	routes, err := parseRoutes(env)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(routes) != 1 || routes[0].UpstreamOAuth != "auto" {
+		t.Errorf("expected valid route with upstream_oauth=auto")
+	}
+}
+
+func TestParseFromConfig_UpstreamOAuthIncompatibleWithNoAuth(t *testing.T) {
+	cfgRoutes := []appconfig.RouteConfig{
+		{Name: "cf", Prefix: "/mcp/cf", Upstream: "https://mcp.cloudflare.com/mcp",
+			NoAuth: true, UpstreamOAuth: strPtr("auto")},
+	}
+	_, err := ParseFromConfig(cfgRoutes)
+	if err == nil {
+		t.Fatal("expected error: upstream_oauth is incompatible with no_auth")
+	}
+	if !strings.Contains(err.Error(), "incompatible") {
+		t.Errorf("error message should mention incompatibility, got: %v", err)
+	}
+}
+
+func TestParseFromConfig_UpstreamOAuthWithAuthRequiredIsValid(t *testing.T) {
+	cfgRoutes := []appconfig.RouteConfig{
+		{Name: "cf", Prefix: "/mcp/cf", Upstream: "https://mcp.cloudflare.com/mcp",
+			NoAuth: false, UpstreamOAuth: strPtr("auto")},
+	}
+	routes, err := ParseFromConfig(cfgRoutes)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(routes) != 1 || routes[0].UpstreamOAuth != "auto" {
+		t.Errorf("expected valid route with upstream_oauth=auto")
+	}
+}

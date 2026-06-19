@@ -111,6 +111,12 @@ func (m *Manager) EnsureClient(ctx context.Context, routeName, upstreamOAuth, re
 	return v.(sfResult).record, nil
 }
 
+// LoadClient returns the persisted ClientRecord for routeName without
+// performing discovery or DCR. Returns (zero, false) when no record exists.
+func (m *Manager) LoadClient(routeName string) (ClientRecord, bool) {
+	return m.store.Load(routeName)
+}
+
 // discoverCached returns AS metadata for routeName, using the in-memory
 // cache to avoid repeated network calls for the same route.
 func (m *Manager) discoverCached(ctx context.Context, routeName, upstreamOAuth, resourceURL string) (*AuthServerMetadata, error) {
