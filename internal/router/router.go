@@ -35,6 +35,13 @@ type Route struct {
 	// access this route. Clients request a token with this audience by passing
 	// resource=<route-name> to the /token endpoint. Defaults to "mcp-gateway".
 	RequiredAudience string
+	// UpstreamOAuth is "auto" or an absolute issuer URL (http/https) for upstream
+	// OAuth delegation. Empty means disabled. Discovery and token exchange are
+	// handled by subsequent issues; this field is parsed and validated only.
+	UpstreamOAuth string
+	// UpstreamOAuthScope is the space-separated OAuth scope string requested from
+	// the upstream authorization server.
+	UpstreamOAuthScope string
 }
 
 // ParseEnv reads ROUTE_<NAME>=<prefix>|<upstream_url>[|opt=val...] environment
@@ -124,6 +131,52 @@ func parseRoutes(env []string) ([]Route, error) {
 			delete(options, "required_audience")
 		}
 
+		// upstream_oauth: enables upstream OAuth delegation.
+		// Value must be "auto" or an absolute http/https issuer URL.
+		// Mutually exclusive with upstream_bearer_token_env (fail-closed).
+		var upstreamOAuth string
+		if oauthVal, ok := options["upstream_oauth"]; ok {
+			oauthVal = strings.TrimSpace(oauthVal)
+			if oauthVal == "" {
+				return nil, fmt.Errorf("%s: upstream_oauth value must not be empty", key)
+			}
+			if upstreamBearerTokenEnv != "" {
+				return nil, fmt.Errorf("%s: upstream_oauth and upstream_bearer_token_env are mutually exclusive", key)
+			}
+			if oauthVal != "auto" {
+				u, err := url.Parse(oauthVal)
+				if err != nil || u.Scheme == "" || u.Host == "" {
+					return nil, fmt.Errorf("%s: upstream_oauth must be \"auto\" or an absolute http/https URL (got %q)", key, oauthVal)
+				}
+				if u.Scheme != "http" && u.Scheme != "https" {
+					return nil, fmt.Errorf("%s: upstream_oauth URL scheme must be http or https (got %q)", key, u.Scheme)
+				}
+				oauthVal = strings.TrimRight(oauthVal, "/")
+			}
+			upstreamOAuth = oauthVal
+			delete(options, "upstream_oauth")
+		}
+
+		// upstream_oauth_scope: space-separated OAuth scope string.
+		// Comma-separated values are normalised to space-separated.
+		// upstream_oauth must be set when upstream_oauth_scope is specified.
+		var upstreamOAuthScope string
+		if scopeVal, ok := options["upstream_oauth_scope"]; ok {
+			if upstreamOAuth == "" {
+				return nil, fmt.Errorf("%s: upstream_oauth_scope requires upstream_oauth to be set", key)
+			}
+			scopeVal = strings.TrimSpace(scopeVal)
+			if scopeVal == "" {
+				return nil, fmt.Errorf("%s: upstream_oauth_scope value must not be empty or whitespace-only", key)
+			}
+			// Normalise comma-separated to space-separated.
+			scopeVal = strings.ReplaceAll(scopeVal, ",", " ")
+			// Collapse multiple spaces.
+			fields := strings.Fields(scopeVal)
+			upstreamOAuthScope = strings.Join(fields, " ")
+			delete(options, "upstream_oauth_scope")
+		}
+
 		// Reject any unrecognised option keys.
 		if len(options) > 0 {
 			unknown := make([]string, 0, len(options))
@@ -168,6 +221,8 @@ func parseRoutes(env []string) ([]Route, error) {
 			NoAuth:                 noAuth,
 			UpstreamBearerTokenEnv: upstreamBearerTokenEnv,
 			RequiredAudience:       requiredAudience,
+			UpstreamOAuth:          upstreamOAuth,
+			UpstreamOAuthScope:     upstreamOAuthScope,
 		})
 	}
 	// Longest prefix first for correct matching order.
@@ -234,6 +289,44 @@ func ParseFromConfig(cfgRoutes []appconfig.RouteConfig) ([]Route, error) {
 		if requiredAudience == "" {
 			requiredAudience = DefaultRequiredAudience
 		}
+		// upstream_oauth: same validation as parseRoutes.
+		// RouteConfig.UpstreamOAuth is *string so that explicit empty values are
+		// distinguishable from absent fields (nil = absent, ptr("") = empty → error).
+		var upstreamOAuth string
+		if r.UpstreamOAuth != nil {
+			upstreamOAuth = strings.TrimSpace(*r.UpstreamOAuth)
+			if upstreamOAuth == "" {
+				return nil, fmt.Errorf("route %q: upstream_oauth value must not be empty", name)
+			}
+			if upstreamBearerTokenEnv != "" {
+				return nil, fmt.Errorf("route %q: upstream_oauth and upstream_bearer_token_env are mutually exclusive", name)
+			}
+			if upstreamOAuth != "auto" {
+				pu, err := url.Parse(upstreamOAuth)
+				if err != nil || pu.Scheme == "" || pu.Host == "" {
+					return nil, fmt.Errorf("route %q: upstream_oauth must be \"auto\" or an absolute http/https URL (got %q)", name, upstreamOAuth)
+				}
+				if pu.Scheme != "http" && pu.Scheme != "https" {
+					return nil, fmt.Errorf("route %q: upstream_oauth URL scheme must be http or https (got %q)", name, pu.Scheme)
+				}
+				upstreamOAuth = strings.TrimRight(upstreamOAuth, "/")
+			}
+		}
+		// upstream_oauth_scope: normalise comma-separated to space-separated.
+		// upstream_oauth must be set when upstream_oauth_scope is specified.
+		// RouteConfig.UpstreamOAuthScope is *string for the same presence-vs-empty reason.
+		var upstreamOAuthScope string
+		if r.UpstreamOAuthScope != nil {
+			if upstreamOAuth == "" {
+				return nil, fmt.Errorf("route %q: upstream_oauth_scope requires upstream_oauth to be set", name)
+			}
+			upstreamOAuthScope = strings.TrimSpace(*r.UpstreamOAuthScope)
+			if upstreamOAuthScope == "" {
+				return nil, fmt.Errorf("route %q: upstream_oauth_scope value must not be empty or whitespace-only", name)
+			}
+			upstreamOAuthScope = strings.ReplaceAll(upstreamOAuthScope, ",", " ")
+			upstreamOAuthScope = strings.Join(strings.Fields(upstreamOAuthScope), " ")
+		}
 		seen[prefix] = struct{}{}
 		routes = append(routes, Route{
 			Name:                   name,
@@ -242,6 +335,8 @@ func ParseFromConfig(cfgRoutes []appconfig.RouteConfig) ([]Route, error) {
 			NoAuth:                 r.NoAuth,
 			UpstreamBearerTokenEnv: upstreamBearerTokenEnv,
 			RequiredAudience:       requiredAudience,
+			UpstreamOAuth:          upstreamOAuth,
+			UpstreamOAuthScope:     upstreamOAuthScope,
 		})
 	}
 	sort.Slice(routes, func(i, j int) bool {

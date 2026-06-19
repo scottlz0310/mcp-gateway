@@ -7,6 +7,8 @@ import (
 	appconfig "github.com/scottlz0310/mcp-gateway/internal/config"
 )
 
+func strPtr(s string) *string { return &s }
+
 func TestParseRoutesEmpty(t *testing.T) {
 	routes, err := parseRoutes(nil)
 	if err != nil {
@@ -420,5 +422,330 @@ func TestParseRoutesEmptyValueSkipped(t *testing.T) {
 	}
 	if routes[0].Name != "github" {
 		t.Errorf("expected route name %q, got %q", "github", routes[0].Name)
+	}
+}
+
+// upstream_oauth テスト群
+
+func TestParseRoutesUpstreamOAuthAuto(t *testing.T) {
+	env := []string{"ROUTE_CF=/mcp/cf|https://mcp.cloudflare.com/mcp|upstream_oauth=auto"}
+	routes, err := parseRoutes(env)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(routes))
+	}
+	if routes[0].UpstreamOAuth != "auto" {
+		t.Errorf("UpstreamOAuth: got %q, want %q", routes[0].UpstreamOAuth, "auto")
+	}
+}
+
+func TestParseRoutesUpstreamOAuthExplicitIssuer(t *testing.T) {
+	env := []string{"ROUTE_CF=/mcp/cf|https://mcp.cloudflare.com/mcp|upstream_oauth=https://mcp.cloudflare.com"}
+	routes, err := parseRoutes(env)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(routes))
+	}
+	if routes[0].UpstreamOAuth != "https://mcp.cloudflare.com" {
+		t.Errorf("UpstreamOAuth: got %q, want %q", routes[0].UpstreamOAuth, "https://mcp.cloudflare.com")
+	}
+}
+
+func TestParseRoutesUpstreamOAuthTrailingSlashTrimmed(t *testing.T) {
+	env := []string{"ROUTE_CF=/mcp/cf|https://mcp.cloudflare.com/mcp|upstream_oauth=https://mcp.cloudflare.com/"}
+	routes, err := parseRoutes(env)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(routes))
+	}
+	if routes[0].UpstreamOAuth != "https://mcp.cloudflare.com" {
+		t.Errorf("UpstreamOAuth trailing slash not trimmed: got %q", routes[0].UpstreamOAuth)
+	}
+}
+
+func TestParseRoutesUpstreamOAuthWithScope(t *testing.T) {
+	env := []string{"ROUTE_CF=/mcp/cf|https://mcp.cloudflare.com/mcp|upstream_oauth=auto|upstream_oauth_scope=account:read offline_access"}
+	routes, err := parseRoutes(env)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(routes))
+	}
+	if routes[0].UpstreamOAuthScope != "account:read offline_access" {
+		t.Errorf("UpstreamOAuthScope: got %q, want %q", routes[0].UpstreamOAuthScope, "account:read offline_access")
+	}
+}
+
+func TestParseRoutesUpstreamOAuthScopeCommaNormalized(t *testing.T) {
+	env := []string{"ROUTE_CF=/mcp/cf|https://mcp.cloudflare.com/mcp|upstream_oauth=auto|upstream_oauth_scope=account:read,offline_access,d1:write"}
+	routes, err := parseRoutes(env)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(routes))
+	}
+	if routes[0].UpstreamOAuthScope != "account:read offline_access d1:write" {
+		t.Errorf("UpstreamOAuthScope: got %q, want %q", routes[0].UpstreamOAuthScope, "account:read offline_access d1:write")
+	}
+}
+
+func TestParseRoutesUpstreamOAuthEmpty(t *testing.T) {
+	env := []string{"ROUTE_CF=/mcp/cf|https://mcp.cloudflare.com/mcp|upstream_oauth="}
+	_, err := parseRoutes(env)
+	if err == nil {
+		t.Fatal("expected error for empty upstream_oauth value")
+	}
+}
+
+func TestParseRoutesUpstreamOAuthInvalidURL(t *testing.T) {
+	env := []string{"ROUTE_CF=/mcp/cf|https://mcp.cloudflare.com/mcp|upstream_oauth=not-a-url"}
+	_, err := parseRoutes(env)
+	if err == nil {
+		t.Fatal("expected error for invalid upstream_oauth URL")
+	}
+}
+
+func TestParseRoutesUpstreamOAuthNonHTTPScheme(t *testing.T) {
+	env := []string{"ROUTE_CF=/mcp/cf|https://mcp.cloudflare.com/mcp|upstream_oauth=ftp://issuer.example.com"}
+	_, err := parseRoutes(env)
+	if err == nil {
+		t.Fatal("expected error for non-http/https upstream_oauth scheme")
+	}
+}
+
+func TestParseRoutesUpstreamOAuthAndBearerTokenMutuallyExclusive(t *testing.T) {
+	t.Setenv("CF_TOKEN", "my-token")
+	env := []string{"ROUTE_CF=/mcp/cf|https://mcp.cloudflare.com/mcp|upstream_oauth=auto|upstream_bearer_token_env=CF_TOKEN"}
+	_, err := parseRoutes(env)
+	if err == nil {
+		t.Fatal("expected error for upstream_oauth + upstream_bearer_token_env combination")
+	}
+}
+
+func TestParseRoutesUpstreamOAuthScopeEmptyRejected(t *testing.T) {
+	env := []string{"ROUTE_CF=/mcp/cf|https://mcp.cloudflare.com/mcp|upstream_oauth=auto|upstream_oauth_scope="}
+	_, err := parseRoutes(env)
+	if err == nil {
+		t.Fatal("expected error for empty upstream_oauth_scope value")
+	}
+}
+
+func TestParseRoutesUpstreamOAuthScopeWithoutOAuthRejected(t *testing.T) {
+	env := []string{"ROUTE_CF=/mcp/cf|https://mcp.cloudflare.com/mcp|upstream_oauth_scope=account:read"}
+	_, err := parseRoutes(env)
+	if err == nil {
+		t.Fatal("expected error for upstream_oauth_scope without upstream_oauth")
+	}
+}
+
+func TestParseRoutesUnknownOptionStillRejected(t *testing.T) {
+	env := []string{"ROUTE_CF=/mcp/cf|https://mcp.cloudflare.com/mcp|upstream_oauth=auto|some_future_opt=value"}
+	_, err := parseRoutes(env)
+	if err == nil {
+		t.Fatal("expected error for unknown option alongside upstream_oauth")
+	}
+}
+
+// ParseFromConfig upstream_oauth テスト群
+
+func TestParseFromConfig_UpstreamOAuthAuto(t *testing.T) {
+	cfgRoutes := []appconfig.RouteConfig{
+		{Name: "cf", Prefix: "/mcp/cf", Upstream: "https://mcp.cloudflare.com/mcp", UpstreamOAuth: strPtr("auto")},
+	}
+	routes, err := ParseFromConfig(cfgRoutes)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(routes))
+	}
+	if routes[0].UpstreamOAuth != "auto" {
+		t.Errorf("UpstreamOAuth: got %q, want %q", routes[0].UpstreamOAuth, "auto")
+	}
+}
+
+func TestParseFromConfig_UpstreamOAuthExplicitIssuer(t *testing.T) {
+	cfgRoutes := []appconfig.RouteConfig{
+		{Name: "cf", Prefix: "/mcp/cf", Upstream: "https://mcp.cloudflare.com/mcp", UpstreamOAuth: strPtr("https://mcp.cloudflare.com")},
+	}
+	routes, err := ParseFromConfig(cfgRoutes)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(routes))
+	}
+	if routes[0].UpstreamOAuth != "https://mcp.cloudflare.com" {
+		t.Errorf("UpstreamOAuth: got %q, want %q", routes[0].UpstreamOAuth, "https://mcp.cloudflare.com")
+	}
+}
+
+func TestParseFromConfig_UpstreamOAuthTrailingSlashTrimmed(t *testing.T) {
+	cfgRoutes := []appconfig.RouteConfig{
+		{Name: "cf", Prefix: "/mcp/cf", Upstream: "https://mcp.cloudflare.com/mcp", UpstreamOAuth: strPtr("https://mcp.cloudflare.com/")},
+	}
+	routes, err := ParseFromConfig(cfgRoutes)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(routes))
+	}
+	if routes[0].UpstreamOAuth != "https://mcp.cloudflare.com" {
+		t.Errorf("UpstreamOAuth trailing slash not trimmed: got %q", routes[0].UpstreamOAuth)
+	}
+}
+
+func TestParseFromConfig_UpstreamOAuthWithScope(t *testing.T) {
+	cfgRoutes := []appconfig.RouteConfig{
+		{Name: "cf", Prefix: "/mcp/cf", Upstream: "https://mcp.cloudflare.com/mcp",
+			UpstreamOAuth: strPtr("auto"), UpstreamOAuthScope: strPtr("account:read offline_access d1:write workers:edit")},
+	}
+	routes, err := ParseFromConfig(cfgRoutes)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(routes))
+	}
+	if routes[0].UpstreamOAuthScope != "account:read offline_access d1:write workers:edit" {
+		t.Errorf("UpstreamOAuthScope: got %q", routes[0].UpstreamOAuthScope)
+	}
+}
+
+func TestParseFromConfig_UpstreamOAuthScopeCommaNormalized(t *testing.T) {
+	cfgRoutes := []appconfig.RouteConfig{
+		{Name: "cf", Prefix: "/mcp/cf", Upstream: "https://mcp.cloudflare.com/mcp",
+			UpstreamOAuth: strPtr("auto"), UpstreamOAuthScope: strPtr("account:read,offline_access")},
+	}
+	routes, err := ParseFromConfig(cfgRoutes)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(routes))
+	}
+	if routes[0].UpstreamOAuthScope != "account:read offline_access" {
+		t.Errorf("UpstreamOAuthScope: got %q, want %q", routes[0].UpstreamOAuthScope, "account:read offline_access")
+	}
+}
+
+func TestParseFromConfig_UpstreamOAuthInvalidURL(t *testing.T) {
+	cfgRoutes := []appconfig.RouteConfig{
+		{Name: "cf", Prefix: "/mcp/cf", Upstream: "https://mcp.cloudflare.com/mcp", UpstreamOAuth: strPtr("not-a-url")},
+	}
+	_, err := ParseFromConfig(cfgRoutes)
+	if err == nil {
+		t.Fatal("expected error for invalid upstream_oauth URL")
+	}
+}
+
+func TestParseFromConfig_UpstreamOAuthNonHTTPScheme(t *testing.T) {
+	cfgRoutes := []appconfig.RouteConfig{
+		{Name: "cf", Prefix: "/mcp/cf", Upstream: "https://mcp.cloudflare.com/mcp", UpstreamOAuth: strPtr("ftp://issuer.example.com")},
+	}
+	_, err := ParseFromConfig(cfgRoutes)
+	if err == nil {
+		t.Fatal("expected error for non-http/https upstream_oauth scheme")
+	}
+}
+
+func TestParseFromConfig_UpstreamOAuthAndBearerTokenMutuallyExclusive(t *testing.T) {
+	t.Setenv("CF_TOKEN", "my-token")
+	cfgRoutes := []appconfig.RouteConfig{
+		{Name: "cf", Prefix: "/mcp/cf", Upstream: "https://mcp.cloudflare.com/mcp",
+			UpstreamOAuth: strPtr("auto"), UpstreamBearerTokenEnv: "CF_TOKEN"},
+	}
+	_, err := ParseFromConfig(cfgRoutes)
+	if err == nil {
+		t.Fatal("expected error for upstream_oauth + upstream_bearer_token_env combination")
+	}
+}
+
+func TestParseFromConfig_UpstreamOAuthScopeWhitespaceOnlyRejected(t *testing.T) {
+	cfgRoutes := []appconfig.RouteConfig{
+		{Name: "cf", Prefix: "/mcp/cf", Upstream: "https://mcp.cloudflare.com/mcp",
+			UpstreamOAuth: strPtr("auto"), UpstreamOAuthScope: strPtr("   ")},
+	}
+	_, err := ParseFromConfig(cfgRoutes)
+	if err == nil {
+		t.Fatal("expected error for whitespace-only upstream_oauth_scope")
+	}
+}
+
+func TestParseFromConfig_UpstreamOAuthEmptyStringRejected(t *testing.T) {
+	cfgRoutes := []appconfig.RouteConfig{
+		{Name: "cf", Prefix: "/mcp/cf", Upstream: "https://mcp.cloudflare.com/mcp", UpstreamOAuth: strPtr("")},
+	}
+	_, err := ParseFromConfig(cfgRoutes)
+	if err == nil {
+		t.Fatal("expected error for explicit empty upstream_oauth value in config")
+	}
+}
+
+func TestParseFromConfig_UpstreamOAuthScopeEmptyStringRejected(t *testing.T) {
+	cfgRoutes := []appconfig.RouteConfig{
+		{Name: "cf", Prefix: "/mcp/cf", Upstream: "https://mcp.cloudflare.com/mcp",
+			UpstreamOAuth: strPtr("auto"), UpstreamOAuthScope: strPtr("")},
+	}
+	_, err := ParseFromConfig(cfgRoutes)
+	if err == nil {
+		t.Fatal("expected error for explicit empty upstream_oauth_scope value in config")
+	}
+}
+
+func TestParseFromConfig_UpstreamOAuthScopeWithoutOAuthRejected(t *testing.T) {
+	cfgRoutes := []appconfig.RouteConfig{
+		{Name: "cf", Prefix: "/mcp/cf", Upstream: "https://mcp.cloudflare.com/mcp",
+			UpstreamOAuthScope: strPtr("account:read")},
+	}
+	_, err := ParseFromConfig(cfgRoutes)
+	if err == nil {
+		t.Fatal("expected error for upstream_oauth_scope without upstream_oauth")
+	}
+}
+
+// yaml.v3 decodes `null` and blank (key with no value) to nil for *string fields.
+// nil is treated as absent (disabled); these tests pin that specification so that
+// any future UnmarshalYAML change that alters this behaviour is caught immediately.
+
+func TestParseFromConfig_UpstreamOAuthNilTreatedAsAbsent(t *testing.T) {
+	cfgRoutes := []appconfig.RouteConfig{
+		{Name: "cf", Prefix: "/mcp/cf", Upstream: "https://mcp.cloudflare.com/mcp", UpstreamOAuth: nil},
+	}
+	routes, err := ParseFromConfig(cfgRoutes)
+	if err != nil {
+		t.Fatalf("unexpected error for nil upstream_oauth: %v", err)
+	}
+	if len(routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(routes))
+	}
+	if routes[0].UpstreamOAuth != "" {
+		t.Errorf("UpstreamOAuth should be empty for nil input, got %q", routes[0].UpstreamOAuth)
+	}
+}
+
+func TestParseFromConfig_UpstreamOAuthScopeNilTreatedAsAbsent(t *testing.T) {
+	cfgRoutes := []appconfig.RouteConfig{
+		{Name: "cf", Prefix: "/mcp/cf", Upstream: "https://mcp.cloudflare.com/mcp",
+			UpstreamOAuth: strPtr("auto"), UpstreamOAuthScope: nil},
+	}
+	routes, err := ParseFromConfig(cfgRoutes)
+	if err != nil {
+		t.Fatalf("unexpected error for nil upstream_oauth_scope: %v", err)
+	}
+	if len(routes) != 1 {
+		t.Fatalf("expected 1 route, got %d", len(routes))
+	}
+	if routes[0].UpstreamOAuthScope != "" {
+		t.Errorf("UpstreamOAuthScope should be empty for nil input, got %q", routes[0].UpstreamOAuthScope)
 	}
 }
