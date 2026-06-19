@@ -168,18 +168,28 @@ func TestRefreshingTransport_NonReplayableBodySkipsRetry(t *testing.T) {
 }
 
 func TestRefreshingTransport_ReplayableBodyRetries(t *testing.T) {
-	// When GetBody is set (replayable), retry must proceed.
+	// When GetBody is set (replayable), retry must proceed and the body must be
+	// rewound via GetBody so the second RoundTrip receives the original content.
+	// The first RoundTrip consumes req.Body; without GetBody rewind the retry
+	// would send an empty body and silently corrupt the upstream request.
 	mr := &mockRefresher{
 		after401OK:  true,
 		after401Rec: auth.UpstreamTokenRecord{AccessToken: "new-tok"},
 	}
 
+	const bodyContent = `{"method":"test"}`
+	var capturedRetryBody string
 	callCount := 0
-	base := rtFunc(func(_ *http.Request) (*http.Response, error) {
+	base := rtFunc(func(req *http.Request) (*http.Response, error) {
 		callCount++
 		if callCount == 1 {
+			// Consume the body exactly as a real RoundTripper would.
+			_, _ = io.ReadAll(req.Body)
 			return makeResponse(http.StatusUnauthorized), nil
 		}
+		// On retry: body must have been rewound by GetBody().
+		b, _ := io.ReadAll(req.Body)
+		capturedRetryBody = string(b)
 		return makeResponse(http.StatusOK), nil
 	})
 
@@ -189,12 +199,10 @@ func TestRefreshingTransport_ReplayableBodyRetries(t *testing.T) {
 	}
 
 	req := requestWithIdentity("alice")
-	body := `{"method":"test"}`
-	req.Body = io.NopCloser(strings.NewReader(body))
-	req.ContentLength = int64(len(body))
-	// Set GetBody so the body is replayable.
+	req.Body = io.NopCloser(strings.NewReader(bodyContent))
+	req.ContentLength = int64(len(bodyContent))
 	req.GetBody = func() (io.ReadCloser, error) {
-		return io.NopCloser(strings.NewReader(body)), nil
+		return io.NopCloser(strings.NewReader(bodyContent)), nil
 	}
 
 	resp, err := rt.RoundTrip(req)
@@ -206,6 +214,9 @@ func TestRefreshingTransport_ReplayableBodyRetries(t *testing.T) {
 	}
 	if callCount != 2 {
 		t.Errorf("base called %d times, want 2 (initial + retry)", callCount)
+	}
+	if capturedRetryBody != bodyContent {
+		t.Errorf("retry body = %q, want %q (body must be rewound for retry)", capturedRetryBody, bodyContent)
 	}
 }
 
