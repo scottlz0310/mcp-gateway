@@ -7,6 +7,8 @@ import (
 	appconfig "github.com/scottlz0310/mcp-gateway/internal/config"
 )
 
+func strPtr(s string) *string { return &s }
+
 func TestParseRoutesEmpty(t *testing.T) {
 	routes, err := parseRoutes(nil)
 	if err != nil {
@@ -556,7 +558,7 @@ func TestParseRoutesUnknownOptionStillRejected(t *testing.T) {
 
 func TestParseFromConfig_UpstreamOAuthAuto(t *testing.T) {
 	cfgRoutes := []appconfig.RouteConfig{
-		{Name: "cf", Prefix: "/mcp/cf", Upstream: "https://mcp.cloudflare.com/mcp", UpstreamOAuth: "auto"},
+		{Name: "cf", Prefix: "/mcp/cf", Upstream: "https://mcp.cloudflare.com/mcp", UpstreamOAuth: strPtr("auto")},
 	}
 	routes, err := ParseFromConfig(cfgRoutes)
 	if err != nil {
@@ -572,7 +574,7 @@ func TestParseFromConfig_UpstreamOAuthAuto(t *testing.T) {
 
 func TestParseFromConfig_UpstreamOAuthExplicitIssuer(t *testing.T) {
 	cfgRoutes := []appconfig.RouteConfig{
-		{Name: "cf", Prefix: "/mcp/cf", Upstream: "https://mcp.cloudflare.com/mcp", UpstreamOAuth: "https://mcp.cloudflare.com"},
+		{Name: "cf", Prefix: "/mcp/cf", Upstream: "https://mcp.cloudflare.com/mcp", UpstreamOAuth: strPtr("https://mcp.cloudflare.com")},
 	}
 	routes, err := ParseFromConfig(cfgRoutes)
 	if err != nil {
@@ -588,7 +590,7 @@ func TestParseFromConfig_UpstreamOAuthExplicitIssuer(t *testing.T) {
 
 func TestParseFromConfig_UpstreamOAuthTrailingSlashTrimmed(t *testing.T) {
 	cfgRoutes := []appconfig.RouteConfig{
-		{Name: "cf", Prefix: "/mcp/cf", Upstream: "https://mcp.cloudflare.com/mcp", UpstreamOAuth: "https://mcp.cloudflare.com/"},
+		{Name: "cf", Prefix: "/mcp/cf", Upstream: "https://mcp.cloudflare.com/mcp", UpstreamOAuth: strPtr("https://mcp.cloudflare.com/")},
 	}
 	routes, err := ParseFromConfig(cfgRoutes)
 	if err != nil {
@@ -605,7 +607,7 @@ func TestParseFromConfig_UpstreamOAuthTrailingSlashTrimmed(t *testing.T) {
 func TestParseFromConfig_UpstreamOAuthWithScope(t *testing.T) {
 	cfgRoutes := []appconfig.RouteConfig{
 		{Name: "cf", Prefix: "/mcp/cf", Upstream: "https://mcp.cloudflare.com/mcp",
-			UpstreamOAuth: "auto", UpstreamOAuthScope: "account:read offline_access d1:write workers:edit"},
+			UpstreamOAuth: strPtr("auto"), UpstreamOAuthScope: strPtr("account:read offline_access d1:write workers:edit")},
 	}
 	routes, err := ParseFromConfig(cfgRoutes)
 	if err != nil {
@@ -622,7 +624,7 @@ func TestParseFromConfig_UpstreamOAuthWithScope(t *testing.T) {
 func TestParseFromConfig_UpstreamOAuthScopeCommaNormalized(t *testing.T) {
 	cfgRoutes := []appconfig.RouteConfig{
 		{Name: "cf", Prefix: "/mcp/cf", Upstream: "https://mcp.cloudflare.com/mcp",
-			UpstreamOAuth: "auto", UpstreamOAuthScope: "account:read,offline_access"},
+			UpstreamOAuth: strPtr("auto"), UpstreamOAuthScope: strPtr("account:read,offline_access")},
 	}
 	routes, err := ParseFromConfig(cfgRoutes)
 	if err != nil {
@@ -638,7 +640,7 @@ func TestParseFromConfig_UpstreamOAuthScopeCommaNormalized(t *testing.T) {
 
 func TestParseFromConfig_UpstreamOAuthInvalidURL(t *testing.T) {
 	cfgRoutes := []appconfig.RouteConfig{
-		{Name: "cf", Prefix: "/mcp/cf", Upstream: "https://mcp.cloudflare.com/mcp", UpstreamOAuth: "not-a-url"},
+		{Name: "cf", Prefix: "/mcp/cf", Upstream: "https://mcp.cloudflare.com/mcp", UpstreamOAuth: strPtr("not-a-url")},
 	}
 	_, err := ParseFromConfig(cfgRoutes)
 	if err == nil {
@@ -648,7 +650,7 @@ func TestParseFromConfig_UpstreamOAuthInvalidURL(t *testing.T) {
 
 func TestParseFromConfig_UpstreamOAuthNonHTTPScheme(t *testing.T) {
 	cfgRoutes := []appconfig.RouteConfig{
-		{Name: "cf", Prefix: "/mcp/cf", Upstream: "https://mcp.cloudflare.com/mcp", UpstreamOAuth: "ftp://issuer.example.com"},
+		{Name: "cf", Prefix: "/mcp/cf", Upstream: "https://mcp.cloudflare.com/mcp", UpstreamOAuth: strPtr("ftp://issuer.example.com")},
 	}
 	_, err := ParseFromConfig(cfgRoutes)
 	if err == nil {
@@ -660,7 +662,7 @@ func TestParseFromConfig_UpstreamOAuthAndBearerTokenMutuallyExclusive(t *testing
 	t.Setenv("CF_TOKEN", "my-token")
 	cfgRoutes := []appconfig.RouteConfig{
 		{Name: "cf", Prefix: "/mcp/cf", Upstream: "https://mcp.cloudflare.com/mcp",
-			UpstreamOAuth: "auto", UpstreamBearerTokenEnv: "CF_TOKEN"},
+			UpstreamOAuth: strPtr("auto"), UpstreamBearerTokenEnv: "CF_TOKEN"},
 	}
 	_, err := ParseFromConfig(cfgRoutes)
 	if err == nil {
@@ -671,7 +673,7 @@ func TestParseFromConfig_UpstreamOAuthAndBearerTokenMutuallyExclusive(t *testing
 func TestParseFromConfig_UpstreamOAuthScopeWhitespaceOnlyRejected(t *testing.T) {
 	cfgRoutes := []appconfig.RouteConfig{
 		{Name: "cf", Prefix: "/mcp/cf", Upstream: "https://mcp.cloudflare.com/mcp",
-			UpstreamOAuth: "auto", UpstreamOAuthScope: "   "},
+			UpstreamOAuth: strPtr("auto"), UpstreamOAuthScope: strPtr("   ")},
 	}
 	_, err := ParseFromConfig(cfgRoutes)
 	if err == nil {
@@ -679,10 +681,31 @@ func TestParseFromConfig_UpstreamOAuthScopeWhitespaceOnlyRejected(t *testing.T) 
 	}
 }
 
+func TestParseFromConfig_UpstreamOAuthEmptyStringRejected(t *testing.T) {
+	cfgRoutes := []appconfig.RouteConfig{
+		{Name: "cf", Prefix: "/mcp/cf", Upstream: "https://mcp.cloudflare.com/mcp", UpstreamOAuth: strPtr("")},
+	}
+	_, err := ParseFromConfig(cfgRoutes)
+	if err == nil {
+		t.Fatal("expected error for explicit empty upstream_oauth value in config")
+	}
+}
+
+func TestParseFromConfig_UpstreamOAuthScopeEmptyStringRejected(t *testing.T) {
+	cfgRoutes := []appconfig.RouteConfig{
+		{Name: "cf", Prefix: "/mcp/cf", Upstream: "https://mcp.cloudflare.com/mcp",
+			UpstreamOAuth: strPtr("auto"), UpstreamOAuthScope: strPtr("")},
+	}
+	_, err := ParseFromConfig(cfgRoutes)
+	if err == nil {
+		t.Fatal("expected error for explicit empty upstream_oauth_scope value in config")
+	}
+}
+
 func TestParseFromConfig_UpstreamOAuthScopeWithoutOAuthRejected(t *testing.T) {
 	cfgRoutes := []appconfig.RouteConfig{
 		{Name: "cf", Prefix: "/mcp/cf", Upstream: "https://mcp.cloudflare.com/mcp",
-			UpstreamOAuthScope: "account:read"},
+			UpstreamOAuthScope: strPtr("account:read")},
 	}
 	_, err := ParseFromConfig(cfgRoutes)
 	if err == nil {

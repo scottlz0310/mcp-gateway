@@ -290,8 +290,11 @@ func ParseFromConfig(cfgRoutes []appconfig.RouteConfig) ([]Route, error) {
 			requiredAudience = DefaultRequiredAudience
 		}
 		// upstream_oauth: same validation as parseRoutes.
-		upstreamOAuth := strings.TrimSpace(r.UpstreamOAuth)
-		if r.UpstreamOAuth != "" {
+		// RouteConfig.UpstreamOAuth is *string so that explicit empty values are
+		// distinguishable from absent fields (nil = absent, ptr("") = empty → error).
+		var upstreamOAuth string
+		if r.UpstreamOAuth != nil {
+			upstreamOAuth = strings.TrimSpace(*r.UpstreamOAuth)
 			if upstreamOAuth == "" {
 				return nil, fmt.Errorf("route %q: upstream_oauth value must not be empty", name)
 			}
@@ -311,11 +314,13 @@ func ParseFromConfig(cfgRoutes []appconfig.RouteConfig) ([]Route, error) {
 		}
 		// upstream_oauth_scope: normalise comma-separated to space-separated.
 		// upstream_oauth must be set when upstream_oauth_scope is specified.
-		upstreamOAuthScope := strings.TrimSpace(r.UpstreamOAuthScope)
-		if r.UpstreamOAuthScope != "" {
+		// RouteConfig.UpstreamOAuthScope is *string for the same presence-vs-empty reason.
+		var upstreamOAuthScope string
+		if r.UpstreamOAuthScope != nil {
 			if upstreamOAuth == "" {
 				return nil, fmt.Errorf("route %q: upstream_oauth_scope requires upstream_oauth to be set", name)
 			}
+			upstreamOAuthScope = strings.TrimSpace(*r.UpstreamOAuthScope)
 			if upstreamOAuthScope == "" {
 				return nil, fmt.Errorf("route %q: upstream_oauth_scope value must not be empty or whitespace-only", name)
 			}

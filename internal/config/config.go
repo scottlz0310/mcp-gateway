@@ -31,11 +31,14 @@ type RouteConfig struct {
 	// UpstreamOAuth enables upstream OAuth delegation. Value is "auto" or an
 	// absolute issuer URL (http/https). Discovery and token exchange are handled by
 	// subsequent issues; this field is parsed and validated only at startup.
-	UpstreamOAuth string `yaml:"upstream_oauth,omitempty"       json:"upstream_oauth,omitempty"`
+	// Use *string so that an explicit empty value ("") is distinguishable from
+	// the field being absent (nil), enabling fail-closed validation for empty strings.
+	UpstreamOAuth *string `yaml:"upstream_oauth,omitempty"       json:"upstream_oauth,omitempty"`
 	// UpstreamOAuthScope is the space-separated OAuth scope string requested from
 	// the upstream authorization server. Comma-separated values are normalised to
 	// space-separated internally.
-	UpstreamOAuthScope string `yaml:"upstream_oauth_scope,omitempty" json:"upstream_oauth_scope,omitempty"`
+	// Use *string for the same presence-vs-empty reason as UpstreamOAuth.
+	UpstreamOAuthScope *string `yaml:"upstream_oauth_scope,omitempty" json:"upstream_oauth_scope,omitempty"`
 }
 
 // SetupConfig holds first-run wizard state.
