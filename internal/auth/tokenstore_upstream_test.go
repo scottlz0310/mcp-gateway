@@ -310,6 +310,105 @@ func TestFileUpstreamTokenStore_ParentDirNotExist(t *testing.T) {
 	}
 }
 
+func TestFileUpstreamTokenStore_LoadInvalidJSON(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "upstream_tokens.json")
+	if err := os.WriteFile(path, []byte("not json"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	_, err := NewFileUpstreamTokenStore(path)
+	if err == nil {
+		t.Fatal("expected error for invalid JSON, got nil")
+	}
+}
+
+func TestFileUpstreamTokenStore_SaveRollbackOnFlushFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows では chmod によるフラッシュ失敗シミュレーションは不可")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "upstream_tokens.json")
+	s, err := NewFileUpstreamTokenStore(path)
+	if err != nil {
+		t.Fatalf("NewFileUpstreamTokenStore: %v", err)
+	}
+	// 先に 1 エントリ保存してから上書き Save でロールバックをテスト
+	existing := UpstreamTokenRecord{
+		Issuer:      "https://as.example.com",
+		AccessToken: "at-existing",
+		ExpiresAt:   time.Now().Add(time.Hour),
+	}
+	if err := s.Save("user-rb", "route-rb", existing); err != nil {
+		t.Fatalf("Save (initial): %v", err)
+	}
+
+	// ディレクトリを read-only にして flush を失敗させる
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatalf("Chmod dir: %v", err)
+	}
+	defer func() { _ = os.Chmod(dir, 0o755) }()
+
+	newRec := UpstreamTokenRecord{
+		Issuer:      "https://as.example.com",
+		AccessToken: "at-new",
+		ExpiresAt:   time.Now().Add(time.Hour),
+	}
+	saveErr := s.Save("user-rb", "route-rb", newRec)
+	_ = os.Chmod(dir, 0o755)
+	if saveErr == nil {
+		t.Fatal("expected error when flush fails, got nil")
+	}
+
+	// rollback: 元のエントリが復元されているはず
+	got, ok := s.Lookup("user-rb", "route-rb")
+	if !ok {
+		t.Fatal("entry should be restored after failed Save")
+	}
+	if got.AccessToken != existing.AccessToken {
+		t.Errorf("rollback: AccessToken got %q, want %q", got.AccessToken, existing.AccessToken)
+	}
+}
+
+func TestFileUpstreamTokenStore_DeleteRollbackOnFlushFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows では chmod によるフラッシュ失敗シミュレーションは不可")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "upstream_tokens.json")
+	s, err := NewFileUpstreamTokenStore(path)
+	if err != nil {
+		t.Fatalf("NewFileUpstreamTokenStore: %v", err)
+	}
+	rec := UpstreamTokenRecord{
+		Issuer:      "https://as.example.com",
+		AccessToken: "at-del-rb",
+		ExpiresAt:   time.Now().Add(time.Hour),
+	}
+	if err := s.Save("user-drb", "route-drb", rec); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatalf("Chmod dir: %v", err)
+	}
+	defer func() { _ = os.Chmod(dir, 0o755) }()
+
+	delErr := s.Delete("user-drb", "route-drb")
+	_ = os.Chmod(dir, 0o755)
+	if delErr == nil {
+		t.Fatal("expected error when flush fails, got nil")
+	}
+
+	// rollback: エントリが復元されているはず
+	got, ok := s.Lookup("user-drb", "route-drb")
+	if !ok {
+		t.Fatal("entry should be restored after failed Delete")
+	}
+	if got.AccessToken != rec.AccessToken {
+		t.Errorf("rollback: AccessToken got %q, want %q", got.AccessToken, rec.AccessToken)
+	}
+}
+
 func TestFileUpstreamTokenStore_FileMode(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows では POSIX ファイルパーミッションは適用されない")
