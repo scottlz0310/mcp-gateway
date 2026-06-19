@@ -14,6 +14,7 @@ and versioning follows [Semantic Versioning](https://semver.org/).
   - `RefreshTokenStore` gains `SaveNonce` / `LookupNonce` to key nonce on the refresh token, outliving the access-token TTL (Copilot review PRRT_kwDOSNXuJs6KuAH4)
   - `tokenAuthCode` calls `SaveTokenNonce` and `SaveRefreshTokenNonce` after caching (both builtin and non-builtin paths)
   - `tokenRefresh` reads the nonce via `LookupRefreshTokenNonce` before `ReserveRefreshToken` so it is available even after soft-revocation, and forwards it to `writeTokenResponse` (both paths)
+  - `tokenRefresh` now calls `SaveRefreshTokenNonce(newRT, nonce)` after issuing the rotated refresh token (both builtin and non-builtin), so nonce survives across consecutive refresh cycles (thread-owl PRRT_kwDOSNXuJs6KuAH4 follow-up)
   - `SaveTokenNonce` empty-string guard removed so a subsequent grant with no nonce correctly clears a previously stored value (thread-owl review PRRT_kwDOSNXuJs6KuLsC)
   - `fileEntry` and `fileRTEntry` OIDC nonce JSON key standardised to `"n"` for consistency with existing short field names (Copilot review PRRT_kwDOSNXuJs6KuAIE)
 

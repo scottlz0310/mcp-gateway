@@ -834,6 +834,7 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 			oauthError(w, "server_error", "internal error", http.StatusInternalServerError)
 			return
 		}
+		h.store.SaveRefreshTokenNonce(newRT, nonce)
 		h.writeTokenResponse(w, newGatewayToken, "", newRT, sub, nonce)
 		h.auditSuccess("refresh", "refresh token exchange completed (builtin)", http.StatusOK)
 		return
@@ -873,6 +874,7 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 		oauthError(w, "server_error", "internal error", http.StatusInternalServerError)
 		return
 	}
+	h.store.SaveRefreshTokenNonce(newRT, nonce)
 
 	h.writeTokenResponse(w, accessToken, "", newRT, id.Subject, nonce)
 	h.auditSuccess("refresh", "refresh token exchange completed", http.StatusOK)
