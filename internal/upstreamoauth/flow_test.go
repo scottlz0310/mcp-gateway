@@ -365,6 +365,87 @@ func TestAuthorizeMiddleware_ClientCredentials_MissingExpiresIn(t *testing.T) {
 	}
 }
 
+func TestAuthorizeMiddleware_GrantMismatch_StaleTokenDeleted(t *testing.T) {
+	// authorization_code トークンが保存済みの状態で client_credentials リクエストが来た場合、
+	// 旧トークンが削除されて client_credentials フローへ進むことを確認する。
+	const (
+		routeName   = "switch-grant"
+		publicURL   = "http://localhost:8080"
+		subject     = "svc@example.com"
+		newToken    = "cc-token-after-switch"
+	)
+
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/token" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = r.ParseForm()
+		if r.FormValue("grant_type") != "client_credentials" {
+			http.Error(w, "wrong grant_type", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": newToken,
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer tokenSrv.Close()
+
+	cs := &testClientStore{records: map[string]upstreamoauth.ClientRecord{
+		routeName: {
+			RouteName:     routeName,
+			Grant:         "client_credentials",
+			Issuer:        tokenSrv.URL,
+			TokenEndpoint: tokenSrv.URL + "/token",
+			ClientID:      "svc-client",
+			ClientSecret:  "svc-secret",
+		},
+	}}
+	mgr := upstreamoauth.NewManager(cs, publicURL)
+	tokenStore := auth.NewMemUpstreamTokenStore()
+
+	// authorization_code トークンを事前に保存（旧 grant）
+	_ = tokenStore.Save(subject, routeName, auth.UpstreamTokenRecord{
+		Grant:       "authorization_code",
+		AccessToken: "stale-user-token",
+		ExpiresAt:   time.Now().Add(time.Hour),
+	})
+
+	mw := upstreamoauth.NewAuthorizeMiddleware(
+		routeName, tokenSrv.URL, "read", "client_credentials", "", mgr,
+		upstreamoauth.NewStateStore(), tokenStore, publicURL,
+	)
+	nextCalled := false
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nextCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("GET", "/mcp/switch-grant/sse", nil)
+	req = withIdentity(req, subject)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if !nextCalled {
+		t.Error("expected next handler to be called after grant-switch token acquisition")
+	}
+
+	// 新しい client_credentials トークンが保存されていること
+	rec, ok := tokenStore.Lookup(subject, routeName)
+	if !ok {
+		t.Fatal("expected new token to be stored after grant switch")
+	}
+	if rec.AccessToken != newToken {
+		t.Errorf("AccessToken = %q, want %q", rec.AccessToken, newToken)
+	}
+}
+
 func TestAuthorizeMiddleware_DefaultGrant_IsAuthCode(t *testing.T) {
 	// grant="" should default to authorization_code (redirect, not client_credentials fetch).
 	const routeName = "default-grant"

@@ -19,6 +19,7 @@ import (
 type UpstreamTokenRecord struct {
 	Subject      string    // in-memory only; not written to disk
 	RouteName    string    // in-memory only; not written to disk
+	Grant        string    // "authorization_code" or "client_credentials"; empty = "authorization_code"
 	Issuer       string
 	AccessToken  string
 	RefreshToken string
@@ -51,6 +52,7 @@ func upstreamTokenKey(subject, routeName string) string {
 // token record. Subject and RouteName are intentionally absent from the JSON
 // so that raw identity information is never written to disk.
 type upstreamTokenFileEntry struct {
+	Grant        string     `json:"grant,omitempty"`
 	Issuer       string     `json:"issuer"`
 	AccessToken  string     `json:"access_token"`
 	RefreshToken string     `json:"refresh_token,omitempty"`
@@ -189,6 +191,7 @@ func (s *fileUpstreamTokenStore) Save(subject, routeName string, record Upstream
 		expiresAt = &t
 	}
 	s.entries[key] = upstreamTokenFileEntry{
+		Grant:        record.Grant,
 		Issuer:       record.Issuer,
 		AccessToken:  record.AccessToken,
 		RefreshToken: record.RefreshToken,
@@ -220,6 +223,7 @@ func (s *fileUpstreamTokenStore) Lookup(subject, routeName string) (UpstreamToke
 	return UpstreamTokenRecord{
 		Subject:      subject,
 		RouteName:    routeName,
+		Grant:        entry.Grant,
 		Issuer:       entry.Issuer,
 		AccessToken:  entry.AccessToken,
 		RefreshToken: entry.RefreshToken,

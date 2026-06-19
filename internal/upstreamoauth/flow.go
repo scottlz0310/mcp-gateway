@@ -61,9 +61,13 @@ func NewAuthorizeMiddleware(
 				return
 			}
 
-			if _, ok := tokenStore.Lookup(subject, routeName); ok {
-				next.ServeHTTP(w, r)
-				return
+			if rec, ok := tokenStore.Lookup(subject, routeName); ok {
+				if grantMatches(rec.Grant, grant) {
+					next.ServeHTTP(w, r)
+					return
+				}
+				// grant mismatch: delete stale token and fall through to re-acquisition
+				_ = tokenStore.Delete(subject, routeName)
 			}
 
 			rec, err := manager.EnsureClient(r.Context(), routeName, upstreamOAuth, resourceURL, grant)
@@ -88,6 +92,7 @@ func NewAuthorizeMiddleware(
 				}
 				expiresAt := time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
 				if err := tokenStore.Save(subject, routeName, auth.UpstreamTokenRecord{
+					Grant:       "client_credentials",
 					Issuer:      rec.Issuer,
 					AccessToken: tokenResp.AccessToken,
 					ExpiresAt:   expiresAt,
