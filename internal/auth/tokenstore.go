@@ -226,7 +226,7 @@ type fileEntry struct {
 	ProviderRefreshToken string    `json:"prt,omitempty"`
 	ProviderAccessExpiry time.Time `json:"pae,omitempty"`
 	RotationFailed       bool      `json:"rf,omitempty"`
-	Nonce                string    `json:"nonce,omitempty"`
+	Nonce                string    `json:"n,omitempty"`
 }
 
 type fileTokenStore struct {
@@ -506,6 +506,14 @@ type RefreshTokenStore interface {
 	RevokeFamily(familyID string) error
 	// Delete removes a single refresh token entry immediately.
 	Delete(refreshToken string) error
+	// SaveNonce attaches the OIDC nonce to an existing refresh-token entry so it
+	// can be forwarded in id_token on refresh (OIDC Core §12.2). No-op when
+	// entry is absent or expired. An empty nonce clears any previously stored value.
+	SaveNonce(refreshToken, nonce string) error
+	// LookupNonce returns the OIDC nonce stored for refreshToken, or "" when
+	// absent, expired, or nonce was never set. Returns the nonce even for
+	// soft-revoked (already-rotated) entries so it can be read after ReserveRefreshToken.
+	LookupNonce(refreshToken string) string
 	// Sweep removes all expired entries. Called periodically by the Store janitor.
 	Sweep() error
 }
@@ -518,6 +526,7 @@ type memRTEntry struct {
 	familyID    string
 	expiresAt   time.Time
 	revoked     bool
+	nonce       string
 }
 
 type memRefreshTokenStore struct {
@@ -588,6 +597,29 @@ func (m *memRefreshTokenStore) RevokeFamily(familyID string) error {
 	return nil
 }
 
+func (m *memRefreshTokenStore) SaveNonce(refreshToken, nonce string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := tokenKey(refreshToken)
+	e, ok := m.entries[key]
+	if !ok || time.Now().After(e.expiresAt) {
+		return nil
+	}
+	e.nonce = nonce
+	m.entries[key] = e
+	return nil
+}
+
+func (m *memRefreshTokenStore) LookupNonce(refreshToken string) string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	e, ok := m.entries[tokenKey(refreshToken)]
+	if !ok || time.Now().After(e.expiresAt) {
+		return ""
+	}
+	return e.nonce
+}
+
 func (m *memRefreshTokenStore) Delete(refreshToken string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -619,6 +651,7 @@ type fileRTEntry struct {
 	FamilyID    string    `json:"fid,omitempty"`
 	ExpiresAt   time.Time `json:"e"`
 	Revoked     bool      `json:"rv,omitempty"`
+	Nonce       string    `json:"n,omitempty"`
 }
 
 type fileRefreshTokenStore struct {
@@ -750,6 +783,34 @@ func (f *fileRefreshTokenStore) RevokeFamily(familyID string) error {
 		return nil
 	}
 	return f.flush()
+}
+
+func (f *fileRefreshTokenStore) SaveNonce(refreshToken, nonce string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := tokenKey(refreshToken)
+	entry, ok := f.entries[key]
+	if !ok || time.Now().After(entry.ExpiresAt) {
+		return nil
+	}
+	previous := entry
+	entry.Nonce = nonce
+	f.entries[key] = entry
+	if err := f.flush(); err != nil {
+		f.entries[key] = previous
+		return err
+	}
+	return nil
+}
+
+func (f *fileRefreshTokenStore) LookupNonce(refreshToken string) string {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	e, ok := f.entries[tokenKey(refreshToken)]
+	if !ok || time.Now().After(e.ExpiresAt) {
+		return ""
+	}
+	return e.Nonce
 }
 
 func (f *fileRefreshTokenStore) Delete(refreshToken string) error {

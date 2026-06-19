@@ -542,6 +542,32 @@ func testRefreshTokenStoreContract(t *testing.T, rts RefreshTokenStore) {
 	if err := rts.Sweep(); err != nil {
 		t.Fatalf("Sweep: %v", err)
 	}
+
+	// SaveNonce attaches nonce to an existing RT entry; LookupNonce returns it.
+	if err := rts.Save("rt-nonce", "access-tok-n", "", "fid-n", time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("Save rt-nonce: %v", err)
+	}
+	if err := rts.SaveNonce("rt-nonce", "nonce-abc"); err != nil {
+		t.Fatalf("SaveNonce: %v", err)
+	}
+	if got := rts.LookupNonce("rt-nonce"); got != "nonce-abc" {
+		t.Errorf("LookupNonce: got %q, want %q", got, "nonce-abc")
+	}
+	// LookupNonce returns "" for unknown token.
+	if got := rts.LookupNonce("no-such-rt"); got != "" {
+		t.Errorf("LookupNonce on absent: got %q, want empty", got)
+	}
+	// SaveNonce on absent token is a no-op (no error).
+	if err := rts.SaveNonce("no-such-rt", "nonce-xyz"); err != nil {
+		t.Fatalf("SaveNonce on absent returned error: %v", err)
+	}
+	// LookupNonce returns "" for expired token.
+	if err := rts.Save("rt-nonce-exp", "access-tok-exp", "", "fid-exp", time.Now().Add(-time.Second)); err != nil {
+		t.Fatalf("Save expired rt-nonce: %v", err)
+	}
+	if got := rts.LookupNonce("rt-nonce-exp"); got != "" {
+		t.Errorf("LookupNonce on expired: got %q, want empty", got)
+	}
 }
 
 // ── memRefreshTokenStore ──────────────────────────────────────────────────────
@@ -753,10 +779,12 @@ func (f *alwaysFailRefreshStore) Lookup(_ string) (string, string, string, time.
 func (f *alwaysFailRefreshStore) LookupAny(_ string) (string, string, string, time.Time, bool, bool) {
 	return "", "", "", time.Time{}, false, false
 }
-func (f *alwaysFailRefreshStore) Revoke(_ string) error       { return nil }
-func (f *alwaysFailRefreshStore) RevokeFamily(_ string) error { return nil }
-func (f *alwaysFailRefreshStore) Delete(_ string) error       { return errInjectedStoreFailure }
-func (f *alwaysFailRefreshStore) Sweep() error                { return nil }
+func (f *alwaysFailRefreshStore) Revoke(_ string) error          { return nil }
+func (f *alwaysFailRefreshStore) RevokeFamily(_ string) error    { return nil }
+func (f *alwaysFailRefreshStore) SaveNonce(_, _ string) error    { return nil }
+func (f *alwaysFailRefreshStore) LookupNonce(_ string) string    { return "" }
+func (f *alwaysFailRefreshStore) Delete(_ string) error          { return errInjectedStoreFailure }
+func (f *alwaysFailRefreshStore) Sweep() error                   { return nil }
 
 // testRefreshTokenStoreReuseDetection exercises LookupAny and RevokeFamily on
 // the given RefreshTokenStore.  It is shared across in-memory and file-backed

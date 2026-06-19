@@ -1399,10 +1399,12 @@ func (d *deleteFailRefreshStore) Lookup(rt string) (string, string, string, time
 func (d *deleteFailRefreshStore) LookupAny(rt string) (string, string, string, time.Time, bool, bool) {
 	return d.inner.LookupAny(rt)
 }
-func (d *deleteFailRefreshStore) Revoke(_ string) error         { return fmt.Errorf("disk I/O error") }
-func (d *deleteFailRefreshStore) RevokeFamily(fid string) error { return d.inner.RevokeFamily(fid) }
-func (d *deleteFailRefreshStore) Delete(_ string) error         { return fmt.Errorf("disk I/O error") }
-func (d *deleteFailRefreshStore) Sweep() error                  { return d.inner.Sweep() }
+func (d *deleteFailRefreshStore) Revoke(_ string) error            { return fmt.Errorf("disk I/O error") }
+func (d *deleteFailRefreshStore) RevokeFamily(fid string) error    { return d.inner.RevokeFamily(fid) }
+func (d *deleteFailRefreshStore) SaveNonce(rt, n string) error     { return d.inner.SaveNonce(rt, n) }
+func (d *deleteFailRefreshStore) LookupNonce(rt string) string     { return d.inner.LookupNonce(rt) }
+func (d *deleteFailRefreshStore) Delete(_ string) error            { return fmt.Errorf("disk I/O error") }
+func (d *deleteFailRefreshStore) Sweep() error                     { return d.inner.Sweep() }
 
 // TestTokenRefreshDeleteFailed503 verifies that when the refresh token store
 // fails to delete the token during rotation (ErrRefreshTokenDeleteFailed),
@@ -2529,12 +2531,16 @@ func TestIDTokenNonceClaim(t *testing.T) {
 // emitted on refresh.
 func TestTokenRefreshNoncePropagated(t *testing.T) {
 	tests := []struct {
-		name          string
-		nonce         string
-		expectInToken bool
+		name           string
+		nonce          string
+		expireATBefore bool // simulate AT TTL expiry before refresh
+		expectInToken  bool
 	}{
-		{"nonce present", "original-nonce-xyz", true},
-		{"nonce absent", "", false},
+		{"nonce present", "original-nonce-xyz", false, true},
+		{"nonce absent", "", false, false},
+		// Thread-owl PRRT_kwDOSNXuJs6KuAH4: nonce must survive past the AT TTL
+		// because the refresh token grace period exceeds the access token TTL.
+		{"nonce present, AT store expired", "original-nonce-xyz", true, true},
 	}
 
 	for _, tc := range tests {
@@ -2589,6 +2595,15 @@ func TestTokenRefreshNoncePropagated(t *testing.T) {
 			rt, _ := tokenResp["refresh_token"].(string)
 			if rt == "" {
 				t.Fatal("expected refresh_token in authorization_code response")
+			}
+
+			if tc.expireATBefore {
+				// Simulate the access-token TTL expiring before the refresh-token
+				// grace period (PRRT_kwDOSNXuJs6KuAH4): the AT record is evicted
+				// from the token store while the RT is still valid. Nonce must
+				// still be propagated via the RT-keyed entry.
+				at, _ := tokenResp["access_token"].(string)
+				h.store.InvalidateCachedToken(at)
 			}
 
 			// Refresh — nonce must be propagated to the new id_token.

@@ -604,6 +604,7 @@ func (h *Handler) tokenAuthCode(w http.ResponseWriter, r *http.Request) {
 		if rtErr != nil {
 			slog.Warn("failed to create refresh token", "err", rtErr)
 		}
+		h.store.SaveRefreshTokenNonce(refreshToken, result.Nonce)
 		h.writeTokenResponse(w, gatewayToken, result.Scope, refreshToken, result.Subject, result.Nonce)
 		h.auditSuccess("token_exchange", "authorization code exchange completed (builtin)", http.StatusOK)
 		return
@@ -621,6 +622,7 @@ func (h *Handler) tokenAuthCode(w http.ResponseWriter, r *http.Request) {
 	if rtErr != nil {
 		slog.Warn("failed to create refresh token", "err", rtErr)
 	}
+	h.store.SaveRefreshTokenNonce(refreshToken, result.Nonce)
 	h.writeTokenResponse(w, result.AccessToken, result.Scope, refreshToken, result.Subject, result.Nonce)
 	h.auditSuccess("token_exchange", "authorization code exchange completed", http.StatusOK)
 }
@@ -753,6 +755,13 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Look up the nonce before reserving (soft-revoking) the refresh token so
+	// the nonce is still readable via LookupNonce even after revocation.
+	// OIDC Core §12.2: the nonce in the refresh-issued id_token MUST match the
+	// original authentication request. We key on the refresh token (not the
+	// access token) so the nonce remains available past the access-token TTL.
+	nonce := h.store.LookupRefreshTokenNonce(rt)
+
 	// Atomically reserve (remove) the token. Concurrent callers presenting the
 	// same token will fail here, preventing double-rotation.
 	// On reuse detection (revoked token replay), ReserveRefreshToken revokes the
@@ -794,14 +803,6 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		audience = resolved
-	}
-
-	// Retrieve the nonce from the existing token entry before rotating.
-	// OIDC Core §12.2: if an id_token is returned from the refresh endpoint,
-	// the nonce claim MUST be the same as in the original authentication request.
-	var nonce string
-	if rec, ok := h.store.LookupToken(accessToken); ok {
-		nonce = rec.Nonce
 	}
 
 	if h.isBuiltinMode() {

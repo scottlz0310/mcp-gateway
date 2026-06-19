@@ -45,8 +45,8 @@ func migrateFileRefreshTokenStore(path string, dst RefreshTokenStore) error {
 		return fmt.Errorf("beginning migration transaction: %w", err)
 	}
 	stmt, err := tx.Prepare(
-		`INSERT OR IGNORE INTO refresh_tokens (token_hash, access_token, audience, family_id, expires_at, revoked)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
+		`INSERT OR IGNORE INTO refresh_tokens (token_hash, access_token, audience, family_id, expires_at, revoked, nonce)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 	)
 	if err != nil {
 		_ = tx.Rollback()
@@ -60,7 +60,7 @@ func migrateFileRefreshTokenStore(path string, dst RefreshTokenStore) error {
 		if e.Revoked {
 			revokedInt = 1
 		}
-		if _, err := stmt.Exec(hash, e.AccessToken, e.Audience, e.FamilyID, e.ExpiresAt.Unix(), revokedInt); err != nil {
+		if _, err := stmt.Exec(hash, e.AccessToken, e.Audience, e.FamilyID, e.ExpiresAt.Unix(), revokedInt, e.Nonce); err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("migrating refresh token entry: %w", err)
 		}
