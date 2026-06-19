@@ -296,6 +296,7 @@ func main() {
 	var upstreamManager *upstreamoauth.Manager
 	var upstreamStateStore upstreamoauth.StateStore
 	var upstreamTokenStore auth.UpstreamTokenStore
+	var upstreamRefresher *upstreamoauth.Refresher
 	for _, r := range routes {
 		if r.UpstreamOAuth != "" {
 			clientStore, err := upstreamoauth.NewFileClientStore(cfg.upstreamClientStorePath)
@@ -310,6 +311,7 @@ func main() {
 				slog.Error("failed to initialize upstream token store", "err", err)
 				os.Exit(1)
 			}
+			upstreamRefresher = upstreamoauth.NewRefresher(upstreamTokenStore, upstreamManager, nil)
 			callbackHandler := upstreamoauth.NewCallbackHandler(
 				upstreamStateStore, upstreamManager, upstreamTokenStore, publicURL, nil,
 			)
@@ -342,6 +344,7 @@ func main() {
 			upstreamOAuthOpts = &proxy.UpstreamOAuthOptions{
 				TokenStore: upstreamTokenStore,
 				RouteName:  route.Name,
+				Refresher:  upstreamRefresher,
 			}
 		}
 		h := proxy.NewHandler(route.Upstream, oauthHandler, route.UpstreamBearerTokenEnv, route.Prefix, upstreamOAuthOpts)
