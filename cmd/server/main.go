@@ -356,7 +356,7 @@ func main() {
 			// between the gateway auth middleware and the proxy handler so that
 			// authenticated users without a valid upstream token are redirected
 			// to the upstream authorization endpoint.
-			var proxyHandler http.Handler = h
+			proxyHandler := http.Handler(h)
 			if route.UpstreamOAuth != "" && upstreamManager != nil {
 				proxyHandler = upstreamoauth.NewAuthorizeMiddleware(
 					route.Name,
