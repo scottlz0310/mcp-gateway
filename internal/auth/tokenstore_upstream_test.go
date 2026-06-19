@@ -291,6 +291,58 @@ func TestFileUpstreamTokenStore_IdentityNotInJSON(t *testing.T) {
 	}
 }
 
+// TestFileUpstreamTokenStore_PermanentEntryHasNoExpiresAtInJSON verifies that
+// the on-disk contract for permanent entries (zero ExpiresAt) is upheld:
+// the expires_at JSON field must be absent, and the entry must survive a reload.
+// This guards against regressions where ExpiresAt reverts to value time.Time
+// (making omitempty ineffective) or the nil→zero conversion is lost.
+func TestFileUpstreamTokenStore_PermanentEntryHasNoExpiresAtInJSON(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "upstream_tokens.json")
+
+	s1, err := NewFileUpstreamTokenStore(path)
+	if err != nil {
+		t.Fatalf("NewFileUpstreamTokenStore: %v", err)
+	}
+	if err := s1.Save("user-perm", "route-perm", UpstreamTokenRecord{
+		Issuer:      "https://as.example.com",
+		AccessToken: "at-permanent",
+		ExpiresAt:   time.Time{}, // zero = permanent
+	}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	// on-disk JSON に expires_at フィールドが含まれないこと（omitempty が機能している証拠）
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if strings.Contains(string(raw), "expires_at") {
+		t.Errorf("permanent entry must not have expires_at in JSON; got: %s", raw)
+	}
+
+	// リロード後も permanent として扱われること（Lookup が成功し ExpiresAt がゼロ値）
+	s2, err := NewFileUpstreamTokenStore(path)
+	if err != nil {
+		t.Fatalf("NewFileUpstreamTokenStore (reload): %v", err)
+	}
+	got, ok := s2.Lookup("user-perm", "route-perm")
+	if !ok {
+		t.Fatal("permanent entry must be found after reload")
+	}
+	if !got.ExpiresAt.IsZero() {
+		t.Errorf("ExpiresAt after reload: got %v, want zero (permanent)", got.ExpiresAt)
+	}
+
+	// Sweep 後も残ること
+	if err := s2.Sweep(); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if _, ok := s2.Lookup("user-perm", "route-perm"); !ok {
+		t.Error("permanent entry must survive Sweep")
+	}
+}
+
 func TestFileUpstreamTokenStore_NonExistentFileOK(t *testing.T) {
 	dir := t.TempDir()
 	s, err := NewFileUpstreamTokenStore(filepath.Join(dir, "does_not_exist.json"))
