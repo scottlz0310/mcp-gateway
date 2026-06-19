@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"crypto/sha256"
 	"fmt"
 	"log/slog"
@@ -19,12 +20,22 @@ type TokenInvalidator interface {
 	InvalidateCachedToken(token string)
 }
 
+// UpstreamTokenRefresher handles proactive and 401-triggered upstream OAuth
+// token refresh. Implemented by upstreamoauth.Refresher.
+type UpstreamTokenRefresher interface {
+	EnsureFreshToken(ctx context.Context, subject, routeName string, rec auth.UpstreamTokenRecord) (auth.UpstreamTokenRecord, bool)
+	RefreshAfter401(ctx context.Context, subject, routeName string) (auth.UpstreamTokenRecord, bool)
+}
+
 // UpstreamOAuthOptions configures per-user upstream OAuth token injection.
 // When non-nil, the proxy reads the upstream access token from TokenStore
 // instead of forwarding the gateway client token.
+// Refresher is optional: when set, proactive refresh is attempted before
+// injection and 401 responses trigger transparent token refresh + retry.
 type UpstreamOAuthOptions struct {
 	TokenStore auth.UpstreamTokenStore
 	RouteName  string
+	Refresher  UpstreamTokenRefresher // nil = no proactive/auto refresh
 }
 
 // NewHandler returns an HTTP handler that reverse-proxies authenticated
@@ -88,7 +99,17 @@ func NewHandler(upstream *url.URL, inv TokenInvalidator, upstreamBearerTokenEnv 
 				// the Lookup is defensive against misconfigured middleware chains.
 				subject := middleware.IdentityFromContext(pr.In.Context())
 				if rec, ok := upstreamOAuth.TokenStore.Lookup(subject, upstreamOAuth.RouteName); ok {
-					pr.Out.Header.Set("Authorization", "Bearer "+rec.AccessToken)
+					if upstreamOAuth.Refresher != nil {
+						rec, ok = upstreamOAuth.Refresher.EnsureFreshToken(pr.In.Context(), subject, upstreamOAuth.RouteName, rec)
+					}
+					if ok {
+						pr.Out.Header.Set("Authorization", "Bearer "+rec.AccessToken)
+					} else {
+						slog.Warn("upstream OAuth: proactive refresh failed; forwarding without Authorization",
+							"route", upstreamOAuth.RouteName,
+							"path", pr.Out.URL.Path,
+						)
+					}
 				} else {
 					slog.Warn("upstream OAuth: token not found at proxy injection; request forwarded without Authorization",
 						"route", upstreamOAuth.RouteName,
@@ -130,26 +151,35 @@ func NewHandler(upstream *url.URL, inv TokenInvalidator, upstreamBearerTokenEnv 
 		ModifyResponse: func(resp *http.Response) error {
 			if resp.StatusCode == http.StatusUnauthorized {
 				if upstreamOAuth != nil {
-					// The 401 came from an upstream OAuth route.
-					// Delete the stale token so the next request triggers re-authorization.
-					// Automatic refresh is handled by #118.
-					subject := middleware.IdentityFromContext(resp.Request.Context())
-					if subject == "" {
-						slog.Warn("upstream OAuth: upstream 401; no authenticated subject in context, stale token not deleted",
+					if upstreamOAuth.Refresher != nil {
+						// refreshingTransport already attempted refresh+retry and deleted
+						// the token on permanent failure. A 401 reaching ModifyResponse
+						// means refresh failed; just log and let the 401 propagate.
+						slog.Warn("upstream OAuth: upstream 401 after refresh attempt; re-authorization required",
 							"route", upstreamOAuth.RouteName,
 							"path", resp.Request.URL.Path,
-						)
-					} else if err := upstreamOAuth.TokenStore.Delete(subject, upstreamOAuth.RouteName); err != nil {
-						slog.Warn("upstream OAuth: upstream 401; failed to delete stale token, re-authorization may not trigger",
-							"route", upstreamOAuth.RouteName,
-							"path", resp.Request.URL.Path,
-							"err", err,
 						)
 					} else {
-						slog.Warn("upstream OAuth: upstream 401; token deleted, re-authorization required",
-							"route", upstreamOAuth.RouteName,
-							"path", resp.Request.URL.Path,
-						)
+						// No refresher: delete the stale token so the next request
+						// triggers re-authorization via NewAuthorizeMiddleware.
+						subject := middleware.IdentityFromContext(resp.Request.Context())
+						if subject == "" {
+							slog.Warn("upstream OAuth: upstream 401; no authenticated subject in context, stale token not deleted",
+								"route", upstreamOAuth.RouteName,
+								"path", resp.Request.URL.Path,
+							)
+						} else if err := upstreamOAuth.TokenStore.Delete(subject, upstreamOAuth.RouteName); err != nil {
+							slog.Warn("upstream OAuth: upstream 401; failed to delete stale token, re-authorization may not trigger",
+								"route", upstreamOAuth.RouteName,
+								"path", resp.Request.URL.Path,
+								"err", err,
+							)
+						} else {
+							slog.Warn("upstream OAuth: upstream 401; token deleted, re-authorization required",
+								"route", upstreamOAuth.RouteName,
+								"path", resp.Request.URL.Path,
+							)
+						}
 					}
 				} else if upstreamBearerTokenEnv != "" {
 					// The 401 came from an upstream-credential route.
@@ -175,6 +205,15 @@ func NewHandler(upstream *url.URL, inv TokenInvalidator, upstreamBearerTokenEnv 
 			)
 			return nil
 		},
+	}
+
+	// When a Refresher is configured, wrap the default transport to intercept
+	// upstream 401 responses and retry with a refreshed token transparently.
+	if upstreamOAuth != nil && upstreamOAuth.Refresher != nil {
+		rp.Transport = &refreshingTransport{
+			base: http.DefaultTransport,
+			opts: upstreamOAuth,
+		}
 	}
 
 	return rp

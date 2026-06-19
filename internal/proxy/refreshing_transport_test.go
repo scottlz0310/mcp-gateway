@@ -1,0 +1,325 @@
+package proxy
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"testing"
+	"time"
+
+	"github.com/scottlz0310/mcp-gateway/internal/auth"
+	"github.com/scottlz0310/mcp-gateway/internal/middleware"
+)
+
+// mockRefresher is a test double for UpstreamTokenRefresher.
+type mockRefresher struct {
+	after401Rec auth.UpstreamTokenRecord
+	after401OK  bool
+	freshRec    auth.UpstreamTokenRecord
+	freshOK     bool
+	calls401    int
+}
+
+func (m *mockRefresher) EnsureFreshToken(_ context.Context, _, _ string, rec auth.UpstreamTokenRecord) (auth.UpstreamTokenRecord, bool) {
+	return m.freshRec, m.freshOK
+}
+
+func (m *mockRefresher) RefreshAfter401(_ context.Context, _, _ string) (auth.UpstreamTokenRecord, bool) {
+	m.calls401++
+	return m.after401Rec, m.after401OK
+}
+
+// rtFunc adapts a function to http.RoundTripper.
+type rtFunc func(*http.Request) (*http.Response, error)
+
+func (f rtFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+// makeResponse constructs a minimal *http.Response with the given status code.
+func makeResponse(code int) *http.Response {
+	return &http.Response{
+		StatusCode: code,
+		Body:       http.NoBody,
+		Header:     make(http.Header),
+	}
+}
+
+func requestWithIdentity(identity string) *http.Request {
+	req := httptest.NewRequest(http.MethodGet, "/mcp/test", nil)
+	ctx := context.WithValue(req.Context(), middleware.ContextKeyIdentity, identity)
+	return req.WithContext(ctx)
+}
+
+// ── refreshingTransport unit tests ──────────────────────────────────────────
+
+func TestRefreshingTransport_NonUnauthorizedPassthrough(t *testing.T) {
+	callCount := 0
+	base := rtFunc(func(_ *http.Request) (*http.Response, error) {
+		callCount++
+		return makeResponse(http.StatusOK), nil
+	})
+
+	rt := &refreshingTransport{
+		base: base,
+		opts: &UpstreamOAuthOptions{RouteName: "myroute", Refresher: &mockRefresher{}},
+	}
+
+	resp, err := rt.RoundTrip(requestWithIdentity("alice"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	if callCount != 1 {
+		t.Errorf("base called %d times, want 1", callCount)
+	}
+}
+
+func TestRefreshingTransport_EmptySubjectSkipsRefresh(t *testing.T) {
+	mr := &mockRefresher{}
+	base := rtFunc(func(_ *http.Request) (*http.Response, error) {
+		return makeResponse(http.StatusUnauthorized), nil
+	})
+
+	rt := &refreshingTransport{
+		base: base,
+		opts: &UpstreamOAuthOptions{RouteName: "myroute", Refresher: mr},
+	}
+
+	// Request without identity in context.
+	req := httptest.NewRequest(http.MethodGet, "/mcp/test", nil)
+	resp, err := rt.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	}
+	if mr.calls401 != 0 {
+		t.Errorf("RefreshAfter401 called %d times, want 0", mr.calls401)
+	}
+}
+
+func TestRefreshingTransport_RefreshFailedReturns401(t *testing.T) {
+	mr := &mockRefresher{
+		after401OK: false,
+	}
+	base := rtFunc(func(_ *http.Request) (*http.Response, error) {
+		return makeResponse(http.StatusUnauthorized), nil
+	})
+
+	rt := &refreshingTransport{
+		base: base,
+		opts: &UpstreamOAuthOptions{RouteName: "myroute", Refresher: mr},
+	}
+
+	resp, err := rt.RoundTrip(requestWithIdentity("alice"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	}
+	if mr.calls401 != 1 {
+		t.Errorf("RefreshAfter401 called %d times, want 1", mr.calls401)
+	}
+}
+
+func TestRefreshingTransport_RefreshSuccessRetries(t *testing.T) {
+	mr := &mockRefresher{
+		after401OK:  true,
+		after401Rec: auth.UpstreamTokenRecord{AccessToken: "new-tok"},
+	}
+
+	var capturedAuth string
+	callCount := 0
+	base := rtFunc(func(req *http.Request) (*http.Response, error) {
+		callCount++
+		if callCount == 1 {
+			return makeResponse(http.StatusUnauthorized), nil
+		}
+		capturedAuth = req.Header.Get("Authorization")
+		return makeResponse(http.StatusOK), nil
+	})
+
+	rt := &refreshingTransport{
+		base: base,
+		opts: &UpstreamOAuthOptions{RouteName: "myroute", Refresher: mr},
+	}
+
+	resp, err := rt.RoundTrip(requestWithIdentity("alice"))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want %d (retry should succeed)", resp.StatusCode, http.StatusOK)
+	}
+	if callCount != 2 {
+		t.Errorf("base called %d times, want 2 (initial + retry)", callCount)
+	}
+	if capturedAuth != "Bearer new-tok" {
+		t.Errorf("retry Authorization = %q, want %q", capturedAuth, "Bearer new-tok")
+	}
+}
+
+// ── NewHandler integration: proactive refresh ────────────────────────────────
+
+func TestProxyUpstreamOAuthProactiveRefreshUpdatesToken(t *testing.T) {
+	// EnsureFreshToken returns a newer token; proxy must inject it.
+	var gotAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	tokenStore := auth.NewMemUpstreamTokenStore()
+	_ = tokenStore.Save("alice@example.com", "myroute", auth.UpstreamTokenRecord{
+		AccessToken:  "old-tok",
+		RefreshToken: "ref",
+		ExpiresAt:    time.Now().Add(2 * time.Minute), // within proactive window
+	})
+
+	mr := &mockRefresher{
+		freshOK:  true,
+		freshRec: auth.UpstreamTokenRecord{AccessToken: "refreshed-tok"},
+	}
+
+	u, _ := url.Parse(upstream.URL)
+	h := NewHandler(u, &mockInvalidator{}, "", "", &UpstreamOAuthOptions{
+		TokenStore: tokenStore,
+		RouteName:  "myroute",
+		Refresher:  mr,
+	})
+
+	r := requestWithContext("alice@example.com", "gateway-tok")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if gotAuth != "Bearer refreshed-tok" {
+		t.Errorf("Authorization = %q, want %q", gotAuth, "Bearer refreshed-tok")
+	}
+}
+
+func TestProxyUpstreamOAuthProactiveRefreshFailureForwardsWithoutAuth(t *testing.T) {
+	// EnsureFreshToken returns ok=false (permanent failure); proxy forwards
+	// the request without an Authorization header.
+	var gotAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	tokenStore := auth.NewMemUpstreamTokenStore()
+	_ = tokenStore.Save("alice@example.com", "myroute", auth.UpstreamTokenRecord{
+		AccessToken:  "old-tok",
+		RefreshToken: "ref",
+		ExpiresAt:    time.Now().Add(2 * time.Minute),
+	})
+
+	mr := &mockRefresher{
+		freshOK: false, // permanent failure
+	}
+
+	u, _ := url.Parse(upstream.URL)
+	h := NewHandler(u, &mockInvalidator{}, "", "", &UpstreamOAuthOptions{
+		TokenStore: tokenStore,
+		RouteName:  "myroute",
+		Refresher:  mr,
+	})
+
+	r := requestWithContext("alice@example.com", "gateway-tok")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if gotAuth != "" {
+		t.Errorf("Authorization = %q, want empty (proactive refresh failed)", gotAuth)
+	}
+}
+
+func TestProxyUpstreamOAuthRefresherWith401TransparentRetry(t *testing.T) {
+	// End-to-end: upstream returns 401 first, then 200 after retry.
+	// refreshingTransport intercepts the 401, refreshes, and retries.
+	callCount := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if callCount == 1 {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	tokenStore := auth.NewMemUpstreamTokenStore()
+	_ = tokenStore.Save("bob@example.com", "myroute", auth.UpstreamTokenRecord{
+		AccessToken:  "old-tok",
+		RefreshToken: "ref",
+		ExpiresAt:    time.Now().Add(time.Hour),
+	})
+
+	mr := &mockRefresher{
+		after401OK:  true,
+		after401Rec: auth.UpstreamTokenRecord{AccessToken: "refreshed-tok"},
+		freshOK:     true, // EnsureFreshToken returns existing token unchanged
+	}
+	// Make EnsureFreshToken return the existing record (not near expiry).
+	mr.freshRec = auth.UpstreamTokenRecord{
+		AccessToken:  "old-tok",
+		RefreshToken: "ref",
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}
+
+	u, _ := url.Parse(upstream.URL)
+	h := NewHandler(u, &mockInvalidator{}, "", "", &UpstreamOAuthOptions{
+		TokenStore: tokenStore,
+		RouteName:  "myroute",
+		Refresher:  mr,
+	})
+
+	r := requestWithContext("bob@example.com", "gateway-tok")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("final status = %d, want %d (transparent retry should succeed)", w.Code, http.StatusOK)
+	}
+	if callCount != 2 {
+		t.Errorf("upstream called %d times, want 2 (initial 401 + retry)", callCount)
+	}
+}
+
+func TestProxyUpstreamOAuthWith401WhenRefresherNil(t *testing.T) {
+	// Backward compat: when Refresher is nil, 401 still deletes the stale token.
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer upstream.Close()
+
+	tokenStore := auth.NewMemUpstreamTokenStore()
+	_ = tokenStore.Save("carol@example.com", "myroute", auth.UpstreamTokenRecord{
+		AccessToken: "stale-tok",
+		ExpiresAt:   time.Now().Add(time.Hour),
+	})
+
+	u, _ := url.Parse(upstream.URL)
+	h := NewHandler(u, &mockInvalidator{}, "", "", &UpstreamOAuthOptions{
+		TokenStore: tokenStore,
+		RouteName:  "myroute",
+		Refresher:  nil, // no refresher
+	})
+
+	r := requestWithContext("carol@example.com", "gateway-tok")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusUnauthorized)
+	}
+	// Token must be deleted (#117 behavior preserved).
+	if _, ok := tokenStore.Lookup("carol@example.com", "myroute"); ok {
+		t.Error("expected stale token to be deleted when Refresher is nil")
+	}
+}
