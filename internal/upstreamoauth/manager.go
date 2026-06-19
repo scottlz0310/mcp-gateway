@@ -69,7 +69,7 @@ func (m *Manager) EnsureClient(ctx context.Context, routeName, upstreamOAuth, re
 	}
 	dcrResp, err := RegisterClient(ctx, m.httpClient, meta.RegistrationEndpoint, dcrReq)
 	if err != nil {
-		return ClientRecord{}, fmt.Errorf("Dynamic Client Registration for route %q: %w", routeName, err)
+		return ClientRecord{}, fmt.Errorf("dynamic client registration for route %q: %w", routeName, err)
 	}
 
 	record := ClientRecord{
