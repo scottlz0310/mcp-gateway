@@ -3,7 +3,9 @@ package upstreamoauth
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -47,8 +49,38 @@ func NewFileClientStore(path string) (ClientStore, error) {
 		path:    path,
 		records: make(map[string]ClientRecord),
 	}
-	if err := s.load(); err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("loading upstream client store %q: %w", path, err)
+	if err := s.load(); err != nil {
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("loading upstream client store %q: %w", path, err)
+		}
+		// File doesn't exist yet — verify the parent directory exists and is writable
+		// so the first Save doesn't fail silently at runtime.
+		dir := filepath.Dir(path)
+		info, statErr := os.Stat(dir)
+		if statErr != nil {
+			return nil, fmt.Errorf("upstream client store parent directory inaccessible %q: %w", dir, statErr)
+		}
+		if !info.IsDir() {
+			return nil, fmt.Errorf("upstream client store parent path is not a directory %q", dir)
+		}
+		f, createErr := os.CreateTemp(dir, ".upstreamclients-writecheck-*")
+		if createErr != nil {
+			return nil, fmt.Errorf("upstream client store parent directory not writable %q: %w", dir, createErr)
+		}
+		name := f.Name()
+		if closeErr := f.Close(); closeErr != nil {
+			_ = os.Remove(name)
+			return nil, fmt.Errorf("closing upstream client store probe file in %q: %w", dir, closeErr)
+		}
+		if removeErr := os.Remove(name); removeErr != nil {
+			return nil, fmt.Errorf("removing upstream client store probe file %q: %w", name, removeErr)
+		}
+	} else {
+		// Best-effort: enforce owner-only permissions on an existing file so
+		// client_secret is protected even when the file was created with looser perms.
+		if err := os.Chmod(path, 0o600); err != nil && !os.IsNotExist(err) {
+			slog.Warn("upstream client store chmod failed", "path", path, "err", err)
+		}
 	}
 	return s, nil
 }

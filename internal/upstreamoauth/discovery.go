@@ -31,8 +31,8 @@ type ProtectedResourceMetadata struct {
 const DefaultHTTPTimeout = 10 * time.Second
 
 // DiscoverFromIssuer retrieves RFC 8414 Authorization Server Metadata for
-// the given issuer URL. issuerURL must be a normalized absolute URL without
-// a trailing slash.
+// the given issuer URL. A trailing slash in issuerURL is trimmed automatically.
+// The response issuer is validated to match issuerURL per RFC 8414 §3.3.
 func DiscoverFromIssuer(ctx context.Context, client *http.Client, issuerURL string) (*AuthServerMetadata, error) {
 	wellKnownURL, err := buildASMetaURL(issuerURL)
 	if err != nil {
@@ -44,6 +44,10 @@ func DiscoverFromIssuer(ctx context.Context, client *http.Client, issuerURL stri
 	}
 	if meta.Issuer == "" || meta.AuthorizationEndpoint == "" || meta.TokenEndpoint == "" {
 		return nil, fmt.Errorf("AS metadata from %q is missing required fields (issuer/authorization_endpoint/token_endpoint)", wellKnownURL)
+	}
+	// RFC 8414 §3.3: the issuer in the response MUST be identical to the issuer used to build the well-known URL.
+	if strings.TrimRight(meta.Issuer, "/") != strings.TrimRight(issuerURL, "/") {
+		return nil, fmt.Errorf("AS metadata issuer %q does not match requested issuer %q", meta.Issuer, issuerURL)
 	}
 	return meta, nil
 }
@@ -59,6 +63,10 @@ func DiscoverFromResource(ctx context.Context, client *http.Client, resourceURL 
 	prm, err := fetchJSON[ProtectedResourceMetadata](ctx, client, prmURL)
 	if err != nil {
 		return nil, fmt.Errorf("PRM discovery at %q: %w", prmURL, err)
+	}
+	// RFC 9728 §4: the resource in the PRM response MUST match the resource identifier used to build the PRM URL.
+	if strings.TrimRight(prm.Resource, "/") != strings.TrimRight(resourceURL, "/") {
+		return nil, fmt.Errorf("PRM resource %q does not match requested resource %q", prm.Resource, resourceURL)
 	}
 	if len(prm.AuthorizationServers) == 0 {
 		return nil, fmt.Errorf("PRM at %q contains no authorization_servers", prmURL)
@@ -79,6 +87,9 @@ func buildPRMURL(resourceURL string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("parsing resource URL: %w", err)
 	}
+	if u.Scheme == "" || u.Host == "" {
+		return "", fmt.Errorf("resource URL %q must be an absolute URL with scheme and host", resourceURL)
+	}
 	path := strings.TrimRight(u.Path, "/")
 	out := *u
 	out.Path = "/.well-known/oauth-protected-resource" + path
@@ -97,6 +108,9 @@ func buildASMetaURL(issuerURL string) (string, error) {
 	u, err := url.Parse(issuerURL)
 	if err != nil {
 		return "", fmt.Errorf("parsing issuer URL: %w", err)
+	}
+	if u.Scheme == "" || u.Host == "" {
+		return "", fmt.Errorf("issuer URL %q must be an absolute URL with scheme and host", issuerURL)
 	}
 	issuerPath := strings.TrimRight(u.Path, "/")
 	out := *u

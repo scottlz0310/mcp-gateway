@@ -65,7 +65,7 @@ func TestRegisterClient_200OK(t *testing.T) {
 
 func TestRegisterClient_Non2xx(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		http.Error(w, "invalid_redirect_uri", http.StatusBadRequest)
 	}))
 	defer srv.Close()
 
@@ -74,6 +74,10 @@ func TestRegisterClient_Non2xx(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error for non-2xx response, got nil")
+	}
+	// レスポンスボディがエラーメッセージに含まれること
+	if errMsg := err.Error(); len(errMsg) == 0 {
+		t.Error("error message should not be empty")
 	}
 }
 

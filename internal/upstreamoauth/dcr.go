@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
 )
 
 // DCRRequest is the RFC 7591 §2 client metadata registration request body.
@@ -47,7 +49,8 @@ func RegisterClient(ctx context.Context, client *http.Client, registrationEndpoi
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("DCR at %s: unexpected status %d", registrationEndpoint, resp.StatusCode)
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+		return nil, fmt.Errorf("DCR at %s: unexpected status %d: %s", registrationEndpoint, resp.StatusCode, strings.TrimSpace(string(snippet)))
 	}
 	var dcrResp DCRResponse
 	if err := json.NewDecoder(resp.Body).Decode(&dcrResp); err != nil {

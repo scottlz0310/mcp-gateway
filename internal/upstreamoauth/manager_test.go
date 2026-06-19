@@ -3,6 +3,7 @@ package upstreamoauth
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -23,6 +24,7 @@ func newTestManager(t *testing.T, publicURL string) *Manager {
 
 // setupASAndDCR は AS metadata と DCR エンドポイントを提供するテストサーバーを返す。
 // dcrCalls に DCR リクエスト回数を記録する。
+// RFC 8414 §3.3 の issuer 検証に対応するため、issuer はサーバー自身の URL を返す。
 func setupASAndDCR(t *testing.T, clientID string, dcrCalls *atomic.Int32) *httptest.Server {
 	t.Helper()
 	var srv *httptest.Server
@@ -31,7 +33,7 @@ func setupASAndDCR(t *testing.T, clientID string, dcrCalls *atomic.Int32) *httpt
 		switch r.URL.Path {
 		case "/.well-known/oauth-authorization-server":
 			_ = json.NewEncoder(w).Encode(AuthServerMetadata{
-				Issuer:                srv.URL,
+				Issuer:                srv.URL, // must match issuerURL per RFC 8414 §3.3
 				AuthorizationEndpoint: srv.URL + "/authorize",
 				TokenEndpoint:         srv.URL + "/token",
 				RegistrationEndpoint:  srv.URL + "/register",
@@ -140,17 +142,18 @@ func TestManager_EnsureClient_SkipDCRWhenClientIDExists(t *testing.T) {
 func TestManager_EnsureClient_MissingRegistrationEndpoint(t *testing.T) {
 	m := newTestManager(t, "https://gateway.example.com")
 
-	// registration_endpoint のない AS
-	asSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// registration_endpoint のない AS（issuer は自身の URL に一致させ RFC 8414 §3.3 検証を通過させる）
+	var asSrv *httptest.Server
+	asSrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/.well-known/oauth-authorization-server" {
 			http.NotFound(w, r)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(AuthServerMetadata{
-			Issuer:                "https://as.example.com",
-			AuthorizationEndpoint: "https://as.example.com/authorize",
-			TokenEndpoint:         "https://as.example.com/token",
+			Issuer:                asSrv.URL,
+			AuthorizationEndpoint: asSrv.URL + "/authorize",
+			TokenEndpoint:         asSrv.URL + "/token",
 			// RegistrationEndpoint 欠落
 		})
 	}))
@@ -213,11 +216,52 @@ func TestManager_EnsureClient_Auto_TwoStep(t *testing.T) {
 	}
 }
 
+func TestManager_EnsureClient_SaveFailureReturnsError(t *testing.T) {
+	// store.Save が失敗した場合、EnsureClient はエラーを返す（警告のみで成功扱いにしない）
+	failStore := &alwaysFailClientStore{}
+
+	m := NewManager(failStore, "https://gateway.example.com")
+
+	var asSrv *httptest.Server
+	asSrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/.well-known/oauth-authorization-server":
+			_ = json.NewEncoder(w).Encode(AuthServerMetadata{
+				Issuer:                asSrv.URL,
+				AuthorizationEndpoint: asSrv.URL + "/authorize",
+				TokenEndpoint:         asSrv.URL + "/token",
+				RegistrationEndpoint:  asSrv.URL + "/register",
+			})
+		case "/register":
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(DCRResponse{ClientID: "cid-fail-save"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer asSrv.Close()
+	m.httpClient = asSrv.Client()
+
+	_, err := m.EnsureClient(context.Background(), "save-fail-route", asSrv.URL, "")
+	if err == nil {
+		t.Fatal("expected error when store.Save fails, got nil")
+	}
+}
+
+// alwaysFailClientStore は Save が常に失敗する ClientStore スタブ。
+type alwaysFailClientStore struct{}
+
+func (s *alwaysFailClientStore) Load(_ string) (ClientRecord, bool) { return ClientRecord{}, false }
+func (s *alwaysFailClientStore) Save(_ ClientRecord) error           { return fmt.Errorf("disk full") }
+func (s *alwaysFailClientStore) All() []ClientRecord                 { return nil }
+
 func TestManager_discoverCached_NoSecondNetworkCall(t *testing.T) {
 	m := newTestManager(t, "https://gateway.example.com")
 
 	var discoverCalls atomic.Int32
-	asSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var asSrv *httptest.Server
+	asSrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		discoverCalls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path != "/.well-known/oauth-authorization-server" {
@@ -225,10 +269,10 @@ func TestManager_discoverCached_NoSecondNetworkCall(t *testing.T) {
 			return
 		}
 		_ = json.NewEncoder(w).Encode(AuthServerMetadata{
-			Issuer:                "https://as.example.com",
-			AuthorizationEndpoint: "https://as.example.com/authorize",
-			TokenEndpoint:         "https://as.example.com/token",
-			RegistrationEndpoint:  "https://as.example.com/register",
+			Issuer:                asSrv.URL,
+			AuthorizationEndpoint: asSrv.URL + "/authorize",
+			TokenEndpoint:         asSrv.URL + "/token",
+			RegistrationEndpoint:  asSrv.URL + "/register",
 		})
 	}))
 	defer asSrv.Close()

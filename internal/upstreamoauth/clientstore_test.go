@@ -148,6 +148,14 @@ func TestFileClientStore_NonExistentFileIsOK(t *testing.T) {
 	}
 }
 
+func TestFileClientStore_ParentDirNotExist(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nonexistent-dir", "upstream_clients.json")
+	_, err := NewFileClientStore(path)
+	if err == nil {
+		t.Fatal("expected error when parent directory does not exist, got nil")
+	}
+}
+
 func TestFileClientStore_FileMode(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows では POSIX ファイルパーミッションは適用されない")

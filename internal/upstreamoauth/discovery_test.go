@@ -31,6 +31,13 @@ func TestBuildPRMURL(t *testing.T) {
 	}
 }
 
+func TestBuildPRMURL_NonAbsolute(t *testing.T) {
+	_, err := buildPRMURL("/sse")
+	if err == nil {
+		t.Fatal("expected error for non-absolute URL, got nil")
+	}
+}
+
 func TestBuildASMetaURL(t *testing.T) {
 	tests := []struct {
 		issuerURL string
@@ -53,33 +60,40 @@ func TestBuildASMetaURL(t *testing.T) {
 	}
 }
 
-func TestDiscoverFromIssuer(t *testing.T) {
-	asMeta := AuthServerMetadata{
-		Issuer:                "https://as.example.com",
-		AuthorizationEndpoint: "https://as.example.com/authorize",
-		TokenEndpoint:         "https://as.example.com/token",
-		RegistrationEndpoint:  "https://as.example.com/register",
+func TestBuildASMetaURL_NonAbsolute(t *testing.T) {
+	_, err := buildASMetaURL("/tenant1")
+	if err == nil {
+		t.Fatal("expected error for non-absolute issuer URL, got nil")
 	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+}
+
+func TestDiscoverFromIssuer(t *testing.T) {
+	// var 宣言後に代入することでクロージャ内でサーバー URL を issuer として使用できる（RFC 8414 §3.3 issuer 検証に対応）。
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/.well-known/oauth-authorization-server" {
 			http.NotFound(w, r)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(asMeta)
+		_ = json.NewEncoder(w).Encode(AuthServerMetadata{
+			Issuer:                srv.URL,
+			AuthorizationEndpoint: srv.URL + "/authorize",
+			TokenEndpoint:         srv.URL + "/token",
+			RegistrationEndpoint:  srv.URL + "/register",
+		})
 	}))
 	defer srv.Close()
 
-	client := srv.Client()
-	meta, err := DiscoverFromIssuer(context.Background(), client, srv.URL)
+	meta, err := DiscoverFromIssuer(context.Background(), srv.Client(), srv.URL)
 	if err != nil {
 		t.Fatalf("DiscoverFromIssuer: %v", err)
 	}
-	if meta.Issuer != asMeta.Issuer {
-		t.Errorf("Issuer: got %q, want %q", meta.Issuer, asMeta.Issuer)
+	if meta.Issuer != srv.URL {
+		t.Errorf("Issuer: got %q, want %q", meta.Issuer, srv.URL)
 	}
-	if meta.RegistrationEndpoint != asMeta.RegistrationEndpoint {
-		t.Errorf("RegistrationEndpoint: got %q, want %q", meta.RegistrationEndpoint, asMeta.RegistrationEndpoint)
+	if meta.RegistrationEndpoint != srv.URL+"/register" {
+		t.Errorf("RegistrationEndpoint: got %q, want %q", meta.RegistrationEndpoint, srv.URL+"/register")
 	}
 }
 
@@ -122,20 +136,39 @@ func TestDiscoverFromIssuer_InvalidJSON(t *testing.T) {
 	}
 }
 
+func TestDiscoverFromIssuer_IssuerMismatch(t *testing.T) {
+	// RFC 8414 §3.3: issuer in response must match requested issuer
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(AuthServerMetadata{
+			Issuer:                "https://different-as.example.com", // mismatch
+			AuthorizationEndpoint: "https://different-as.example.com/authorize",
+			TokenEndpoint:         "https://different-as.example.com/token",
+		})
+	}))
+	defer srv.Close()
+
+	_, err := DiscoverFromIssuer(context.Background(), srv.Client(), srv.URL)
+	if err == nil {
+		t.Fatal("expected error for issuer mismatch, got nil")
+	}
+}
+
 func TestDiscoverFromResource_TwoStep(t *testing.T) {
-	// asSrv: RFC 8414 Authorization Server Metadata endpoint
-	asSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// asSrv: RFC 8414 Authorization Server Metadata endpoint.
+	// var 宣言後に代入することで issuer を asSrv.URL に一致させる（RFC 8414 §3.3 issuer 検証に対応）。
+	var asSrv *httptest.Server
+	asSrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/.well-known/oauth-authorization-server" {
 			http.NotFound(w, r)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		// asSrv.URL is not accessible here (closure issue) so we hardcode stable fields.
 		_ = json.NewEncoder(w).Encode(AuthServerMetadata{
-			Issuer:                "https://as.example.com",
-			AuthorizationEndpoint: "https://as.example.com/authorize",
-			TokenEndpoint:         "https://as.example.com/token",
-			RegistrationEndpoint:  "https://as.example.com/register",
+			Issuer:                asSrv.URL,
+			AuthorizationEndpoint: asSrv.URL + "/authorize",
+			TokenEndpoint:         asSrv.URL + "/token",
+			RegistrationEndpoint:  asSrv.URL + "/register",
 		})
 	}))
 	defer asSrv.Close()
@@ -159,19 +192,20 @@ func TestDiscoverFromResource_TwoStep(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DiscoverFromResource: %v", err)
 	}
-	if meta.AuthorizationEndpoint != "https://as.example.com/authorize" {
-		t.Errorf("AuthorizationEndpoint: got %q", meta.AuthorizationEndpoint)
+	if meta.AuthorizationEndpoint != asSrv.URL+"/authorize" {
+		t.Errorf("AuthorizationEndpoint: got %q, want %q", meta.AuthorizationEndpoint, asSrv.URL+"/authorize")
 	}
-	if meta.RegistrationEndpoint != "https://as.example.com/register" {
-		t.Errorf("RegistrationEndpoint: got %q", meta.RegistrationEndpoint)
+	if meta.RegistrationEndpoint != asSrv.URL+"/register" {
+		t.Errorf("RegistrationEndpoint: got %q, want %q", meta.RegistrationEndpoint, asSrv.URL+"/register")
 	}
 }
 
 func TestDiscoverFromResource_NoAuthServers(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(ProtectedResourceMetadata{
-			Resource:             "https://mcp.example.com/sse",
+			Resource:             srv.URL + "/sse", // resource 一致させて authorization_servers チェックまで到達させる
 			AuthorizationServers: []string{},
 		})
 	}))
@@ -180,6 +214,24 @@ func TestDiscoverFromResource_NoAuthServers(t *testing.T) {
 	_, err := DiscoverFromResource(context.Background(), srv.Client(), srv.URL+"/sse")
 	if err == nil {
 		t.Fatal("expected error for empty authorization_servers, got nil")
+	}
+}
+
+func TestDiscoverFromResource_ResourceMismatch(t *testing.T) {
+	// RFC 9728 §4: PRM resource must match the requested resource identifier
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(ProtectedResourceMetadata{
+			Resource:             "https://different-resource.example.com/sse", // mismatch
+			AuthorizationServers: []string{srv.URL},
+		})
+	}))
+	defer srv.Close()
+
+	_, err := DiscoverFromResource(context.Background(), srv.Client(), srv.URL+"/sse")
+	if err == nil {
+		t.Fatal("expected error for resource mismatch, got nil")
 	}
 }
 
