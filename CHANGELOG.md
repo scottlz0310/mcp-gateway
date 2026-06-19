@@ -20,6 +20,12 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Upstream OAuth metadata discovery and Dynamic Client Registration (`internal/upstreamoauth` package) ([#114](https://github.com/scottlz0310/mcp-gateway/issues/114))
+  - `DiscoverFromIssuer`: RFC 8414 one-step AS metadata fetch (`/.well-known/oauth-authorization-server{issuerPath}`)
+  - `DiscoverFromResource`: RFC 9728 → RFC 8414 two-step discovery (`/.well-known/oauth-protected-resource{path}` → AS metadata)
+  - `RegisterClient`: RFC 7591 Dynamic Client Registration (`POST registration_endpoint`); accepts 200 OK and 201 Created
+  - `ClientStore` / `fileClientStore`: JSON-backed `upstream_clients.json` with atomic write (temp+rename, mode 0600) and Windows fallback
+  - `Manager.EnsureClient`: lazy discovery + DCR on first access per route; fast-path store hit when `client_id` already registered; in-memory AS metadata cache to avoid repeated network calls per route
 - Upstream OAuth route option parsing and validation ([#113](https://github.com/scottlz0310/mcp-gateway/issues/113))
   - `Route` struct gains `UpstreamOAuth` ("auto" or absolute issuer URL) and `UpstreamOAuthScope` (space-separated scopes) fields
   - `ROUTE_*` env-var parser accepts `upstream_oauth=auto|<issuer-url>` and `upstream_oauth_scope=<scopes>`
