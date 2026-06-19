@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -559,5 +560,72 @@ func TestProxyUpstreamOAuthDoesNotInvalidateGatewayTokenOn401(t *testing.T) {
 
 	if len(inv.tokens) != 0 {
 		t.Errorf("expected no gateway token invalidation for upstream_oauth route, got %v", inv.tokens)
+	}
+}
+
+// deleteErrStore wraps UpstreamTokenStore and returns a fixed error from Delete.
+type deleteErrStore struct {
+	inner     auth.UpstreamTokenStore
+	deleteErr error
+}
+
+func (s *deleteErrStore) Save(subject, routeName string, rec auth.UpstreamTokenRecord) error {
+	return s.inner.Save(subject, routeName, rec)
+}
+func (s *deleteErrStore) Lookup(subject, routeName string) (auth.UpstreamTokenRecord, bool) {
+	return s.inner.Lookup(subject, routeName)
+}
+func (s *deleteErrStore) Delete(_, _ string) error { return s.deleteErr }
+func (s *deleteErrStore) Sweep() error             { return s.inner.Sweep() }
+
+func TestProxyUpstreamOAuthNoSubjectOn401(t *testing.T) {
+	// subject が空（middleware なし）の場合 Delete は呼ばれず 401 がそのまま返る。
+	upstream := upstreamWithStatus(http.StatusUnauthorized)
+	defer upstream.Close()
+
+	tokenStore := auth.NewMemUpstreamTokenStore()
+	u, _ := url.Parse(upstream.URL)
+	h := NewHandler(u, &mockInvalidator{}, "", "", &UpstreamOAuthOptions{
+		TokenStore: tokenStore,
+		RouteName:  "myroute",
+	})
+
+	// request without identity in context
+	req := httptest.NewRequest(http.MethodGet, "/mcp/myroute/sse", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestProxyUpstreamOAuthDeleteErrorOn401(t *testing.T) {
+	// Delete が失敗した場合も 401 がそのまま返る（panic しない）。
+	upstream := upstreamWithStatus(http.StatusUnauthorized)
+	defer upstream.Close()
+
+	inner := auth.NewMemUpstreamTokenStore()
+	_ = inner.Save("dave@example.com", "myroute", auth.UpstreamTokenRecord{
+		AccessToken: "tok",
+		ExpiresAt:   time.Now().Add(time.Hour),
+	})
+	tokenStore := &deleteErrStore{inner: inner, deleteErr: fmt.Errorf("flush error")}
+
+	u, _ := url.Parse(upstream.URL)
+	h := NewHandler(u, &mockInvalidator{}, "", "", &UpstreamOAuthOptions{
+		TokenStore: tokenStore,
+		RouteName:  "myroute",
+	})
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, requestWithContext("dave@example.com", "gateway-client-token"))
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusUnauthorized)
+	}
+	// token must remain in store (Delete failed)
+	if _, ok := inner.Lookup("dave@example.com", "myroute"); !ok {
+		t.Error("token should remain when Delete fails")
 	}
 }
