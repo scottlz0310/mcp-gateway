@@ -20,6 +20,13 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Upstream OAuth user token store (`UpstreamTokenStore`) ([#115](https://github.com/scottlz0310/mcp-gateway/issues/115))
+  - `UpstreamTokenRecord`: in-memory型（`Subject`/`RouteName` はメモリ上のみ）
+  - `upstreamTokenFileEntry`: on-disk型（`Subject`/`RouteName` を含まず、identity情報をディスクに書かない）
+  - キーは `sha256(subject + "\x00" + routeName)` の hex 文字列
+  - `UpstreamTokenStore` インターフェース: `Save` / `Lookup` / `Delete` / `Sweep`
+  - `memUpstreamTokenStore`: テスト・デフォルト用 in-memory 実装
+  - `fileUpstreamTokenStore`: JSON file-backed 実装（`upstream_tokens.json`）、atomic write (mode 0600)、起動時 sweep、親ディレクトリ確認 + chmod
 - Upstream OAuth metadata discovery and Dynamic Client Registration (`internal/upstreamoauth` package) ([#114](https://github.com/scottlz0310/mcp-gateway/issues/114))
   - `DiscoverFromIssuer`: RFC 8414 one-step AS metadata fetch (`/.well-known/oauth-authorization-server{issuerPath}`)
   - `DiscoverFromResource`: RFC 9728 → RFC 8414 two-step discovery (`/.well-known/oauth-protected-resource{path}` → AS metadata)
