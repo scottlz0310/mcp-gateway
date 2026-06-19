@@ -63,16 +63,9 @@ func (h *CallbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	code := r.URL.Query().Get("code")
-	if code == "" {
-		errParam := r.URL.Query().Get("error")
-		if errParam == "" {
-			errParam = "unknown_error"
-		}
-		http.Error(w, "authorization denied: "+errParam, http.StatusBadRequest)
-		return
-	}
-
+	// Pop the state immediately once stateKey is present, even when code is
+	// absent or the upstream returned an error. Consuming the state before any
+	// early return prevents state reuse if the state value is leaked.
 	state, ok := h.stateStore.Pop(stateKey)
 	if !ok {
 		slog.Warn("upstream OAuth callback: invalid or expired state",
@@ -80,6 +73,16 @@ func (h *CallbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"state_prefix", stateKey[:min(8, len(stateKey))],
 		)
 		http.Error(w, "invalid or expired state", http.StatusBadRequest)
+		return
+	}
+
+	code := r.URL.Query().Get("code")
+	if code == "" {
+		errParam := r.URL.Query().Get("error")
+		if errParam == "" {
+			errParam = "unknown_error"
+		}
+		http.Error(w, "authorization denied: "+errParam, http.StatusBadRequest)
 		return
 	}
 
@@ -109,10 +112,16 @@ func (h *CallbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var expiresAt time.Time
-	if tokenResp.ExpiresIn > 0 {
-		expiresAt = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
+	// Reject tokens with no expiry information: storing a zero ExpiresAt would
+	// cause Lookup to treat the token as permanently valid, which is unsafe for
+	// upstream access tokens that may be silently revoked by the upstream AS.
+	if tokenResp.ExpiresIn <= 0 {
+		slog.Error("upstream OAuth callback: token response missing required expires_in",
+			"route", routeName, "token_endpoint", rec.TokenEndpoint)
+		http.Error(w, "upstream token missing required expiry", http.StatusBadGateway)
+		return
 	}
+	expiresAt := time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
 
 	if err := h.tokenStore.Save(state.Subject, routeName, auth.UpstreamTokenRecord{
 		Issuer:       rec.Issuer,

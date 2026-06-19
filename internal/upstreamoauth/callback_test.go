@@ -164,6 +164,7 @@ func TestCallbackHandler_SubjectFromStateNotFromContext(t *testing.T) {
 	ts := makeTokenServer(t, map[string]any{
 		"access_token": "tok-alice",
 		"token_type":   "Bearer",
+		"expires_in":   3600,
 	})
 	defer ts.Close()
 
@@ -211,7 +212,7 @@ func TestCallbackHandler_RedirectURIConstruction(t *testing.T) {
 			capturedForm = r.Form
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"access_token":"tok","token_type":"Bearer"}`))
+		_, _ = w.Write([]byte(`{"access_token":"tok","token_type":"Bearer","expires_in":3600}`))
 	}))
 	defer ts.Close()
 
@@ -250,8 +251,17 @@ func TestCallbackHandler_RedirectURIConstruction(t *testing.T) {
 }
 
 func TestCallbackHandler_MissingCode_ErrorParam(t *testing.T) {
+	// Upstream AS denies authorization and returns error=access_denied (no code).
+	// The state must still be consumed (Pop) to prevent reuse.
 	stateStore := upstreamoauth.NewStateStore()
 	tokenStore := auth.NewMemUpstreamTokenStore()
+
+	stateStore.Save("s", upstreamoauth.OAuthState{
+		Subject:      "user",
+		RouteName:    "myroute",
+		CodeVerifier: "ver",
+		ExpiresAt:    time.Now().Add(10 * time.Minute),
+	})
 
 	handler := makeCallbackHandler(stateStore, map[string]upstreamoauth.ClientRecord{},
 		tokenStore, "http://localhost:8080", nil)
@@ -264,5 +274,55 @@ func TestCallbackHandler_MissingCode_ErrorParam(t *testing.T) {
 
 	if rr.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+	}
+	// State must have been consumed: a second request with the same state must fail.
+	rr2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest("GET", "/upstream/callback/myroute?state=s&code=code2", nil)
+	req2.SetPathValue("routeName", "myroute")
+	handler.ServeHTTP(rr2, req2)
+	if rr2.Code != http.StatusBadRequest {
+		t.Errorf("state reuse after error: status = %d, want %d (state should be consumed)", rr2.Code, http.StatusBadRequest)
+	}
+}
+
+func TestCallbackHandler_MissingExpiresIn(t *testing.T) {
+	// Token response without expires_in must be rejected (zero ExpiresAt is unsafe).
+	ts := makeTokenServer(t, map[string]any{
+		"access_token": "tok",
+		"token_type":   "Bearer",
+		// expires_in intentionally omitted
+	})
+	defer ts.Close()
+
+	stateStore := upstreamoauth.NewStateStore()
+	tokenStore := auth.NewMemUpstreamTokenStore()
+
+	stateStore.Save("s", upstreamoauth.OAuthState{
+		Subject:      "user",
+		RouteName:    "myroute",
+		CodeVerifier: "ver",
+		ExpiresAt:    time.Now().Add(10 * time.Minute),
+	})
+
+	handler := makeCallbackHandler(stateStore, map[string]upstreamoauth.ClientRecord{
+		"myroute": {
+			RouteName:     "myroute",
+			TokenEndpoint: ts.URL + "/token",
+			ClientID:      "cid",
+		},
+	}, tokenStore, "http://localhost:8080", ts.Client())
+
+	req := httptest.NewRequest("GET", "/upstream/callback/myroute?state=s&code=c", nil)
+	req.SetPathValue("routeName", "myroute")
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want %d; token without expires_in should be rejected", rr.Code, http.StatusBadGateway)
+	}
+	// Token must not be saved when expires_in is missing.
+	if _, ok := tokenStore.Lookup("user", "myroute"); ok {
+		t.Error("token must not be saved when expires_in is missing")
 	}
 }

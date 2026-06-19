@@ -315,6 +315,19 @@ func main() {
 			)
 			mux.Handle("GET /upstream/callback/{routeName}", callbackHandler)
 			slog.Info("upstream OAuth callback endpoint registered", "path", "/upstream/callback/{routeName}")
+
+			// Background sweeper: remove expired state entries and token records
+			// so that abandoned auth flows do not accumulate indefinitely.
+			go func() {
+				t := time.NewTicker(5 * time.Minute)
+				defer t.Stop()
+				for range t.C {
+					upstreamStateStore.Sweep()
+					if err := upstreamTokenStore.Sweep(); err != nil {
+						slog.Warn("upstream token store sweep failed", "err", err)
+					}
+				}
+			}()
 			break
 		}
 	}

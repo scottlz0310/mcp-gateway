@@ -157,6 +157,12 @@ func parseRoutes(env []string) ([]Route, error) {
 			delete(options, "upstream_oauth")
 		}
 
+		// upstream_oauth is incompatible with auth=none: per-user OAuth delegation
+		// requires an authenticated subject from the gateway Auth middleware.
+		if upstreamOAuth != "" && noAuth {
+			return nil, fmt.Errorf("%s: upstream_oauth is incompatible with auth=none; upstream OAuth requires gateway authentication", key)
+		}
+
 		// upstream_oauth_scope: space-separated OAuth scope string.
 		// Comma-separated values are normalised to space-separated.
 		// upstream_oauth must be set when upstream_oauth_scope is specified.
@@ -311,6 +317,10 @@ func ParseFromConfig(cfgRoutes []appconfig.RouteConfig) ([]Route, error) {
 				}
 				upstreamOAuth = strings.TrimRight(upstreamOAuth, "/")
 			}
+		}
+		// upstream_oauth is incompatible with no_auth for the same reason as parseRoutes.
+		if upstreamOAuth != "" && r.NoAuth {
+			return nil, fmt.Errorf("route %q: upstream_oauth is incompatible with no_auth; upstream OAuth requires gateway authentication", name)
 		}
 		// upstream_oauth_scope: normalise comma-separated to space-separated.
 		// upstream_oauth must be set when upstream_oauth_scope is specified.
