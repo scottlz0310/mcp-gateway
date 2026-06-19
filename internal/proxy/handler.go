@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/scottlz0310/mcp-gateway/internal/auth"
 	"github.com/scottlz0310/mcp-gateway/internal/middleware"
 )
 
@@ -18,19 +19,29 @@ type TokenInvalidator interface {
 	InvalidateCachedToken(token string)
 }
 
+// UpstreamOAuthOptions configures per-user upstream OAuth token injection.
+// When non-nil, the proxy reads the upstream access token from TokenStore
+// instead of forwarding the gateway client token.
+type UpstreamOAuthOptions struct {
+	TokenStore auth.UpstreamTokenStore
+	RouteName  string
+}
+
 // NewHandler returns an HTTP handler that reverse-proxies authenticated
 // requests to the upstream MCP server. It performs header sanitization,
 // injects the verified user identifier as X-Authenticated-User (and the
 // legacy X-GitHub-Login during the migration window), and invalidates the
 // token cache when the upstream returns HTTP 401.
 //
-// When upstreamBearerTokenEnv is non-empty, the named environment variable
-// is read on each request and its value is injected as the upstream
-// Authorization Bearer token instead of the client OAuth context token.
-// In this mode, upstream 401 responses are NOT treated as client token
-// invalidation events — the failure belongs to the upstream credential,
-// not the client session.
-func NewHandler(upstream *url.URL, inv TokenInvalidator, upstreamBearerTokenEnv string, prefix string) http.Handler {
+// Token injection priority:
+//  1. upstreamOAuth non-nil → per-user token from UpstreamTokenStore
+//  2. upstreamBearerTokenEnv non-empty → token from named env var
+//  3. otherwise → gateway client OAuth token from context
+//
+// When upstreamOAuth is set and upstream returns 401, the stale token is
+// deleted from TokenStore and re-authorization is required (#118 handles
+// automatic refresh).
+func NewHandler(upstream *url.URL, inv TokenInvalidator, upstreamBearerTokenEnv string, prefix string, upstreamOAuth *UpstreamOAuthOptions) http.Handler {
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			// Strip prefix before SetURL so that SetURL correctly joins
@@ -71,7 +82,20 @@ func NewHandler(upstream *url.URL, inv TokenInvalidator, upstreamBearerTokenEnv 
 			// Always strip client-supplied Authorization first to prevent spoofing,
 			// then inject the appropriate upstream credential.
 			pr.Out.Header.Del("Authorization")
-			if upstreamBearerTokenEnv != "" {
+			if upstreamOAuth != nil {
+				// Per-user upstream OAuth token: inject the user's upstream access token.
+				// NewAuthorizeMiddleware guarantees a token exists before reaching here;
+				// the Lookup is defensive against misconfigured middleware chains.
+				subject := middleware.IdentityFromContext(pr.In.Context())
+				if rec, ok := upstreamOAuth.TokenStore.Lookup(subject, upstreamOAuth.RouteName); ok {
+					pr.Out.Header.Set("Authorization", "Bearer "+rec.AccessToken)
+				} else {
+					slog.Warn("upstream OAuth: token not found at proxy injection; request forwarded without Authorization",
+						"route", upstreamOAuth.RouteName,
+						"path", pr.Out.URL.Path,
+					)
+				}
+			} else if upstreamBearerTokenEnv != "" {
 				// Upstream credential injection: read the named env var at request time.
 				// A warning is emitted when the env var is unset or empty so that
 				// rotated or missing credentials are visible in logs.
@@ -105,7 +129,29 @@ func NewHandler(upstream *url.URL, inv TokenInvalidator, upstreamBearerTokenEnv 
 
 		ModifyResponse: func(resp *http.Response) error {
 			if resp.StatusCode == http.StatusUnauthorized {
-				if upstreamBearerTokenEnv != "" {
+				if upstreamOAuth != nil {
+					// The 401 came from an upstream OAuth route.
+					// Delete the stale token so the next request triggers re-authorization.
+					// Automatic refresh is handled by #118.
+					subject := middleware.IdentityFromContext(resp.Request.Context())
+					if subject == "" {
+						slog.Warn("upstream OAuth: upstream 401; no authenticated subject in context, stale token not deleted",
+							"route", upstreamOAuth.RouteName,
+							"path", resp.Request.URL.Path,
+						)
+					} else if err := upstreamOAuth.TokenStore.Delete(subject, upstreamOAuth.RouteName); err != nil {
+						slog.Warn("upstream OAuth: upstream 401; failed to delete stale token, re-authorization may not trigger",
+							"route", upstreamOAuth.RouteName,
+							"path", resp.Request.URL.Path,
+							"err", err,
+						)
+					} else {
+						slog.Warn("upstream OAuth: upstream 401; token deleted, re-authorization required",
+							"route", upstreamOAuth.RouteName,
+							"path", resp.Request.URL.Path,
+						)
+					}
+				} else if upstreamBearerTokenEnv != "" {
 					// The 401 came from an upstream-credential route.
 					// This is a problem with the upstream API token, not the
 					// client OAuth session — do NOT invalidate the client cache.

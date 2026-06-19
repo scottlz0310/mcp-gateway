@@ -2,12 +2,15 @@ package proxy
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/scottlz0310/mcp-gateway/internal/auth"
 	"github.com/scottlz0310/mcp-gateway/internal/middleware"
 )
 
@@ -52,7 +55,7 @@ func TestProxyInjectsIdentityHeaders(t *testing.T) {
 	defer upstream.Close()
 
 	u, _ := url.Parse(upstream.URL)
-	h := NewHandler(u, &mockInvalidator{}, "", "")
+	h := NewHandler(u, &mockInvalidator{}, "", "", nil)
 
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, requestWithContext("alice", "tok"))
@@ -88,7 +91,7 @@ func TestProxyStripsClientSpoofableHeaders(t *testing.T) {
 	defer upstream.Close()
 
 	u, _ := url.Parse(upstream.URL)
-	h := NewHandler(u, &mockInvalidator{}, "", "")
+	h := NewHandler(u, &mockInvalidator{}, "", "", nil)
 
 	r := requestWithContext("bob", "tok")
 	r.Header.Set("X-Forwarded-For", "1.2.3.4")
@@ -134,7 +137,7 @@ func TestProxyNormalizesAuthorization(t *testing.T) {
 	defer upstream.Close()
 
 	u, _ := url.Parse(upstream.URL)
-	h := NewHandler(u, &mockInvalidator{}, "", "")
+	h := NewHandler(u, &mockInvalidator{}, "", "", nil)
 
 	r := requestWithContext("carol", "ctx-token")
 	r.Header.Set("Authorization", "Bearer client-supplied-token")
@@ -153,7 +156,7 @@ func TestProxyInvalidatesCacheOn401(t *testing.T) {
 
 	u, _ := url.Parse(upstream.URL)
 	inv := &mockInvalidator{}
-	h := NewHandler(u, inv, "", "")
+	h := NewHandler(u, inv, "", "", nil)
 
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, requestWithContext("dave", "secret-token"))
@@ -172,7 +175,7 @@ func TestProxySanitizesHeaderInjectionCharacters(t *testing.T) {
 	defer upstream.Close()
 
 	u, _ := url.Parse(upstream.URL)
-	h := NewHandler(u, &mockInvalidator{}, "", "")
+	h := NewHandler(u, &mockInvalidator{}, "", "", nil)
 
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, requestWithContext("alice\r\nevil: injected", "tok"))
@@ -187,7 +190,7 @@ func TestProxyNilInvalidatorDoesNotPanicOn401(t *testing.T) {
 	defer upstream.Close()
 
 	u, _ := url.Parse(upstream.URL)
-	h := NewHandler(u, nil, "", "")
+	h := NewHandler(u, nil, "", "", nil)
 
 	w := httptest.NewRecorder()
 	// Must not panic.
@@ -214,7 +217,7 @@ func TestMiddlewareToProxyInjectsIdentityHeaders(t *testing.T) {
 
 	u, _ := url.Parse(upstream.URL)
 	validator := &testValidator{login: "octocat"}
-	chain := middleware.Auth(validator)(NewHandler(u, &mockInvalidator{}, "", ""))
+	chain := middleware.Auth(validator)(NewHandler(u, &mockInvalidator{}, "", "", nil))
 
 	r := httptest.NewRequest(http.MethodGet, "/mcp/test", nil)
 	r.Header.Set("Authorization", "Bearer real-github-token")
@@ -245,7 +248,7 @@ func TestProxyUpstreamBearerEnvInjectsToken(t *testing.T) {
 
 	t.Setenv("UPSTREAM_TEST_TOKEN", "env-api-token")
 	u, _ := url.Parse(upstream.URL)
-	h := NewHandler(u, &mockInvalidator{}, "UPSTREAM_TEST_TOKEN", "")
+	h := NewHandler(u, &mockInvalidator{}, "UPSTREAM_TEST_TOKEN", "", nil)
 
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, requestWithContext("alice", "client-oauth-token"))
@@ -265,7 +268,7 @@ func TestProxyUpstreamBearerEnvStripsClientAuth(t *testing.T) {
 
 	t.Setenv("UPSTREAM_TEST_TOKEN2", "real-env-token")
 	u, _ := url.Parse(upstream.URL)
-	h := NewHandler(u, &mockInvalidator{}, "UPSTREAM_TEST_TOKEN2", "")
+	h := NewHandler(u, &mockInvalidator{}, "UPSTREAM_TEST_TOKEN2", "", nil)
 
 	req := requestWithContext("bob", "client-token")
 	req.Header.Set("Authorization", "Bearer client-supplied-auth")
@@ -284,7 +287,7 @@ func TestProxyUpstreamBearerEnvDoesNotInvalidateOn401(t *testing.T) {
 	t.Setenv("UPSTREAM_TEST_TOKEN3", "some-api-token")
 	u, _ := url.Parse(upstream.URL)
 	inv := &mockInvalidator{}
-	h := NewHandler(u, inv, "UPSTREAM_TEST_TOKEN3", "")
+	h := NewHandler(u, inv, "UPSTREAM_TEST_TOKEN3", "", nil)
 
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, requestWithContext("carol", "client-oauth-token"))
@@ -343,7 +346,7 @@ func TestProxyStripsRoutingPrefix(t *testing.T) {
 			defer upstream.Close()
 
 			u, _ := url.Parse(upstream.URL)
-			h := NewHandler(u, &mockInvalidator{}, "", tc.prefix)
+			h := NewHandler(u, &mockInvalidator{}, "", tc.prefix, nil)
 
 			r := httptest.NewRequest(http.MethodGet, tc.requestPath, nil)
 			ctx := context.WithValue(r.Context(), middleware.ContextKeyIdentity, "alice")
@@ -424,7 +427,7 @@ func TestProxyStripsRoutingPrefixWithUpstreamBasePath(t *testing.T) {
 			defer upstream.Close()
 
 			u, _ := url.Parse(upstream.URL + tc.upstreamBase)
-			h := NewHandler(u, &mockInvalidator{}, "", tc.prefix)
+			h := NewHandler(u, &mockInvalidator{}, "", tc.prefix, nil)
 
 			r := httptest.NewRequest(http.MethodGet, tc.requestTarget, nil)
 			ctx := context.WithValue(r.Context(), middleware.ContextKeyIdentity, "alice")
@@ -460,7 +463,7 @@ func TestProxyStripsRoutingPrefixRawPath(t *testing.T) {
 	defer upstream.Close()
 
 	u, _ := url.Parse(upstream.URL)
-	h := NewHandler(u, &mockInvalidator{}, "", "/mcp/test")
+	h := NewHandler(u, &mockInvalidator{}, "", "/mcp/test", nil)
 
 	// %40 encodes '@': Path = /mcp/test/file@name, RawPath = /mcp/test/file%40name.
 	r := httptest.NewRequest(http.MethodGet, "/mcp/test/file%40name", nil)
@@ -476,5 +479,153 @@ func TestProxyStripsRoutingPrefixRawPath(t *testing.T) {
 	}
 	if gotRawPath != "/file%40name" {
 		t.Errorf("upstream RawPath: got %q, want %q", gotRawPath, "/file%40name")
+	}
+}
+
+func TestProxyUpstreamOAuthInjectsToken(t *testing.T) {
+	var gotAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	tokenStore := auth.NewMemUpstreamTokenStore()
+	_ = tokenStore.Save("alice@example.com", "myroute", auth.UpstreamTokenRecord{
+		AccessToken: "upstream-access-token",
+		ExpiresAt:   time.Now().Add(time.Hour),
+	})
+
+	u, _ := url.Parse(upstream.URL)
+	h := NewHandler(u, &mockInvalidator{}, "", "", &UpstreamOAuthOptions{
+		TokenStore: tokenStore,
+		RouteName:  "myroute",
+	})
+
+	r := requestWithContext("alice@example.com", "gateway-client-token")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if gotAuth != "Bearer upstream-access-token" {
+		t.Errorf("Authorization: got %q, want %q", gotAuth, "Bearer upstream-access-token")
+	}
+}
+
+func TestProxyUpstreamOAuthDeletesTokenOn401(t *testing.T) {
+	upstream := upstreamWithStatus(http.StatusUnauthorized)
+	defer upstream.Close()
+
+	tokenStore := auth.NewMemUpstreamTokenStore()
+	_ = tokenStore.Save("bob@example.com", "myroute", auth.UpstreamTokenRecord{
+		AccessToken: "stale-token",
+		ExpiresAt:   time.Now().Add(time.Hour),
+	})
+
+	u, _ := url.Parse(upstream.URL)
+	h := NewHandler(u, &mockInvalidator{}, "", "", &UpstreamOAuthOptions{
+		TokenStore: tokenStore,
+		RouteName:  "myroute",
+	})
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, requestWithContext("bob@example.com", "gateway-client-token"))
+
+	if _, ok := tokenStore.Lookup("bob@example.com", "myroute"); ok {
+		t.Error("expected upstream token to be deleted after upstream 401")
+	}
+}
+
+func TestProxyUpstreamOAuthDoesNotInvalidateGatewayTokenOn401(t *testing.T) {
+	// When upstream_oauth is set and upstream returns 401, the gateway
+	// client token cache must NOT be invalidated (the 401 is the upstream AS
+	// rejecting our per-user token, not the gateway session token).
+	upstream := upstreamWithStatus(http.StatusUnauthorized)
+	defer upstream.Close()
+
+	tokenStore := auth.NewMemUpstreamTokenStore()
+	_ = tokenStore.Save("carol@example.com", "myroute", auth.UpstreamTokenRecord{
+		AccessToken: "upstream-tok",
+		ExpiresAt:   time.Now().Add(time.Hour),
+	})
+
+	u, _ := url.Parse(upstream.URL)
+	inv := &mockInvalidator{}
+	h := NewHandler(u, inv, "", "", &UpstreamOAuthOptions{
+		TokenStore: tokenStore,
+		RouteName:  "myroute",
+	})
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, requestWithContext("carol@example.com", "gateway-client-token"))
+
+	if len(inv.tokens) != 0 {
+		t.Errorf("expected no gateway token invalidation for upstream_oauth route, got %v", inv.tokens)
+	}
+}
+
+// deleteErrStore wraps UpstreamTokenStore and returns a fixed error from Delete.
+type deleteErrStore struct {
+	inner     auth.UpstreamTokenStore
+	deleteErr error
+}
+
+func (s *deleteErrStore) Save(subject, routeName string, rec auth.UpstreamTokenRecord) error {
+	return s.inner.Save(subject, routeName, rec)
+}
+func (s *deleteErrStore) Lookup(subject, routeName string) (auth.UpstreamTokenRecord, bool) {
+	return s.inner.Lookup(subject, routeName)
+}
+func (s *deleteErrStore) Delete(_, _ string) error { return s.deleteErr }
+func (s *deleteErrStore) Sweep() error             { return s.inner.Sweep() }
+
+func TestProxyUpstreamOAuthNoSubjectOn401(t *testing.T) {
+	// subject が空（middleware なし）の場合 Delete は呼ばれず 401 がそのまま返る。
+	upstream := upstreamWithStatus(http.StatusUnauthorized)
+	defer upstream.Close()
+
+	tokenStore := auth.NewMemUpstreamTokenStore()
+	u, _ := url.Parse(upstream.URL)
+	h := NewHandler(u, &mockInvalidator{}, "", "", &UpstreamOAuthOptions{
+		TokenStore: tokenStore,
+		RouteName:  "myroute",
+	})
+
+	// request without identity in context
+	req := httptest.NewRequest(http.MethodGet, "/mcp/myroute/sse", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestProxyUpstreamOAuthDeleteErrorOn401(t *testing.T) {
+	// Delete が失敗した場合も 401 がそのまま返る（panic しない）。
+	upstream := upstreamWithStatus(http.StatusUnauthorized)
+	defer upstream.Close()
+
+	inner := auth.NewMemUpstreamTokenStore()
+	_ = inner.Save("dave@example.com", "myroute", auth.UpstreamTokenRecord{
+		AccessToken: "tok",
+		ExpiresAt:   time.Now().Add(time.Hour),
+	})
+	tokenStore := &deleteErrStore{inner: inner, deleteErr: fmt.Errorf("flush error")}
+
+	u, _ := url.Parse(upstream.URL)
+	h := NewHandler(u, &mockInvalidator{}, "", "", &UpstreamOAuthOptions{
+		TokenStore: tokenStore,
+		RouteName:  "myroute",
+	})
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, requestWithContext("dave@example.com", "gateway-client-token"))
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusUnauthorized)
+	}
+	// token must remain in store (Delete failed)
+	if _, ok := inner.Lookup("dave@example.com", "myroute"); !ok {
+		t.Error("token should remain when Delete fails")
 	}
 }
