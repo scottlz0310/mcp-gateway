@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -255,6 +256,77 @@ type alwaysFailClientStore struct{}
 func (s *alwaysFailClientStore) Load(_ string) (ClientRecord, bool) { return ClientRecord{}, false }
 func (s *alwaysFailClientStore) Save(_ ClientRecord) error           { return fmt.Errorf("disk full") }
 func (s *alwaysFailClientStore) All() []ClientRecord                 { return nil }
+
+func TestManager_EnsureClient_ClientCredentials_DCRBody(t *testing.T) {
+	m := newTestManager(t, "https://gateway.example.com")
+
+	var capturedBody []byte
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/.well-known/oauth-authorization-server":
+			_ = json.NewEncoder(w).Encode(AuthServerMetadata{
+				Issuer:                srv.URL,
+				AuthorizationEndpoint: srv.URL + "/authorize",
+				TokenEndpoint:         srv.URL + "/token",
+				RegistrationEndpoint:  srv.URL + "/register",
+			})
+		case "/register":
+			capturedBody, _ = io.ReadAll(r.Body)
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(DCRResponse{ClientID: "cc-client", ClientSecret: "cc-secret"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	m.httpClient = srv.Client()
+
+	if _, err := m.EnsureClient(context.Background(), "cc-dcr-route", srv.URL, "", "client_credentials"); err != nil {
+		t.Fatalf("EnsureClient: %v", err)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(capturedBody, &body); err != nil {
+		t.Fatalf("invalid DCR body JSON: %v", err)
+	}
+	if _, ok := body["redirect_uris"]; ok {
+		t.Error("redirect_uris must not be present in client_credentials DCR request")
+	}
+	if _, ok := body["response_types"]; ok {
+		t.Error("response_types must not be present in client_credentials DCR request")
+	}
+	grantTypes, _ := body["grant_types"].([]any)
+	if len(grantTypes) != 1 || grantTypes[0] != "client_credentials" {
+		t.Errorf("grant_types = %v, want [\"client_credentials\"]", grantTypes)
+	}
+}
+
+func TestManager_EnsureClient_GrantChangeTriggersDCR(t *testing.T) {
+	m := newTestManager(t, "https://gateway.example.com")
+
+	var dcrCalls atomic.Int32
+	asSrv := setupASAndDCR(t, "cid-grant", &dcrCalls)
+	defer asSrv.Close()
+	m.httpClient = asSrv.Client()
+
+	// 1 回目: authorization_code
+	if _, err := m.EnsureClient(context.Background(), "grant-change", asSrv.URL, "", "authorization_code"); err != nil {
+		t.Fatalf("EnsureClient (auth_code): %v", err)
+	}
+	if dcrCalls.Load() != 1 {
+		t.Errorf("DCR calls after auth_code: got %d, want 1", dcrCalls.Load())
+	}
+
+	// 2 回目: 同じ routeName で client_credentials → 再 DCR が走ること
+	if _, err := m.EnsureClient(context.Background(), "grant-change", asSrv.URL, "", "client_credentials"); err != nil {
+		t.Fatalf("EnsureClient (client_credentials): %v", err)
+	}
+	if dcrCalls.Load() != 2 {
+		t.Errorf("DCR calls after grant change: got %d, want 2 (grant change must trigger re-DCR)", dcrCalls.Load())
+	}
+}
 
 func TestManager_discoverCached_NoSecondNetworkCall(t *testing.T) {
 	m := newTestManager(t, "https://gateway.example.com")

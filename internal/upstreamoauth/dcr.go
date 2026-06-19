@@ -12,7 +12,7 @@ import (
 
 // DCRRequest is the RFC 7591 §2 client metadata registration request body.
 type DCRRequest struct {
-	RedirectURIs            []string `json:"redirect_uris"`
+	RedirectURIs            []string `json:"redirect_uris,omitempty"`
 	ClientName              string   `json:"client_name,omitempty"`
 	GrantTypes              []string `json:"grant_types,omitempty"`
 	ResponseTypes           []string `json:"response_types,omitempty"`

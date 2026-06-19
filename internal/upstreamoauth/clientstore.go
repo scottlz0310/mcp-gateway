@@ -14,6 +14,7 @@ import (
 // for a single gateway route.
 type ClientRecord struct {
 	RouteName             string    `json:"route_name"`
+	Grant                 string    `json:"grant,omitempty"`
 	Issuer                string    `json:"issuer"`
 	AuthorizationEndpoint string    `json:"authorization_endpoint"`
 	TokenEndpoint         string    `json:"token_endpoint"`

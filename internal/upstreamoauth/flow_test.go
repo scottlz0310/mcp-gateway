@@ -250,6 +250,7 @@ func TestAuthorizeMiddleware_ClientCredentials_Success(t *testing.T) {
 	cs := &testClientStore{records: map[string]upstreamoauth.ClientRecord{
 		routeName: {
 			RouteName:     routeName,
+			Grant:         "client_credentials",
 			Issuer:        tokenSrv.URL,
 			TokenEndpoint: tokenSrv.URL + "/token",
 			ClientID:      "svc-client",

@@ -74,8 +74,7 @@ func NewAuthorizeMiddleware(
 			}
 
 			if grant == "client_credentials" {
-				h := &http.Client{Timeout: DefaultHTTPTimeout}
-				tokenResp, err := fetchClientCredentialsToken(r.Context(), h, rec, upstreamOAuthScope)
+				tokenResp, err := fetchClientCredentialsToken(r.Context(), manager.httpClient, rec, upstreamOAuthScope)
 				if err != nil {
 					slog.Error("upstream OAuth: client_credentials token fetch failed", "route", routeName, "err", err)
 					http.Error(w, "upstream OAuth error", http.StatusBadGateway)

@@ -57,16 +57,30 @@ func NewManager(store ClientStore, publicURL string) *Manager {
 //
 // Concurrent calls for the same routeName are coalesced via singleflight so
 // that discovery + DCR + store.Save only executes once.
+// grantMatches reports whether stored matches the requested grant.
+// An empty stored grant is treated as "authorization_code" for backward
+// compatibility with records saved before this field existed.
+func grantMatches(stored, requested string) bool {
+	if stored == "" {
+		stored = "authorization_code"
+	}
+	if requested == "" {
+		requested = "authorization_code"
+	}
+	return stored == requested
+}
+
 func (m *Manager) EnsureClient(ctx context.Context, routeName, upstreamOAuth, resourceURL, grant string) (ClientRecord, error) {
-	if rec, ok := m.store.Load(routeName); ok && rec.ClientID != "" {
+	if rec, ok := m.store.Load(routeName); ok && rec.ClientID != "" && grantMatches(rec.Grant, grant) {
 		return rec, nil
 	}
 
 	type sfResult struct{ record ClientRecord }
-	v, err, _ := m.sfGroup.Do(routeName, func() (any, error) {
+	sfKey := routeName + "|" + grant
+	v, err, _ := m.sfGroup.Do(sfKey, func() (any, error) {
 		// Re-check inside the singleflight critical section so that the follower
 		// goroutines skip DCR when the leader already persisted the record.
-		if rec, ok := m.store.Load(routeName); ok && rec.ClientID != "" {
+		if rec, ok := m.store.Load(routeName); ok && rec.ClientID != "" && grantMatches(rec.Grant, grant) {
 			return sfResult{record: rec}, nil
 		}
 
@@ -101,8 +115,13 @@ func (m *Manager) EnsureClient(ctx context.Context, routeName, upstreamOAuth, re
 			return nil, fmt.Errorf("dynamic client registration for route %q: %w", routeName, err)
 		}
 
+		effectiveGrant := grant
+		if effectiveGrant == "" {
+			effectiveGrant = "authorization_code"
+		}
 		record := ClientRecord{
 			RouteName:             routeName,
+			Grant:                 effectiveGrant,
 			Issuer:                meta.Issuer,
 			AuthorizationEndpoint: meta.AuthorizationEndpoint,
 			TokenEndpoint:         meta.TokenEndpoint,
