@@ -2523,6 +2523,121 @@ func TestIDTokenNonceClaim(t *testing.T) {
 	}
 }
 
+// TestTokenRefreshNoncePropagated verifies that the nonce from the original
+// authorization request is forwarded in the id_token issued by the refresh
+// endpoint (OIDC Core §12.2). Tested in builtin mode where id_token is always
+// emitted on refresh.
+func TestTokenRefreshNoncePropagated(t *testing.T) {
+	tests := []struct {
+		name          string
+		nonce         string
+		expectInToken bool
+	}{
+		{"nonce present", "original-nonce-xyz", true},
+		{"nonce absent", "", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newBuiltinTestHandler(t,
+				func(_ context.Context, _ string) (provider.TokenResponse, error) {
+					return provider.TokenResponse{AccessToken: "gh-tok"}, nil
+				},
+				func(_ context.Context, _ string) (provider.Identity, error) {
+					return provider.Identity{Subject: "alice"}, nil
+				},
+			)
+
+			// Authorize → Callback → Token (authorization_code) with nonce.
+			verifier := "test-verifier-abcdefghijklmnopqrstuvwxyz01234"
+			challenge := pkceChallenge(verifier)
+			state := "nonce-test-state"
+			redirectURI := "http://localhost/cb"
+
+			authURL := "/authorize?response_type=code&state=" + state +
+				"&redirect_uri=" + url.QueryEscape(redirectURI) +
+				"&code_challenge=" + challenge +
+				"&code_challenge_method=S256"
+			if tc.nonce != "" {
+				authURL += "&nonce=" + url.QueryEscape(tc.nonce)
+			}
+			h.Authorize(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, authURL, nil))
+
+			cbRec := httptest.NewRecorder()
+			h.Callback(cbRec, httptest.NewRequest(http.MethodGet, "/callback?code=gh-code&state="+state, nil))
+			if cbRec.Code != http.StatusFound {
+				t.Fatalf("callback: got %d", cbRec.Code)
+			}
+			loc, _ := url.Parse(cbRec.Header().Get("Location"))
+			internalCode := loc.Query().Get("code")
+
+			tokenBody := "grant_type=authorization_code" +
+				"&redirect_uri=" + url.QueryEscape(redirectURI) +
+				"&code=" + url.QueryEscape(internalCode) +
+				"&code_verifier=" + url.QueryEscape(verifier)
+			tokenRec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(tokenBody))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			h.Token(tokenRec, req)
+			if tokenRec.Code != http.StatusOK {
+				t.Fatalf("token exchange: got %d; body=%s", tokenRec.Code, tokenRec.Body.String())
+			}
+			var tokenResp map[string]any
+			if err := json.NewDecoder(tokenRec.Body).Decode(&tokenResp); err != nil {
+				t.Fatalf("decode token response: %v", err)
+			}
+			rt, _ := tokenResp["refresh_token"].(string)
+			if rt == "" {
+				t.Fatal("expected refresh_token in authorization_code response")
+			}
+
+			// Refresh — nonce must be propagated to the new id_token.
+			refreshBody := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(rt)
+			refreshRec := httptest.NewRecorder()
+			req2 := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(refreshBody))
+			req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			h.Token(refreshRec, req2)
+			if refreshRec.Code != http.StatusOK {
+				t.Fatalf("refresh: got %d; body=%s", refreshRec.Code, refreshRec.Body.String())
+			}
+			var refreshResp map[string]any
+			if err := json.NewDecoder(refreshRec.Body).Decode(&refreshResp); err != nil {
+				t.Fatalf("decode refresh response: %v", err)
+			}
+
+			idToken, _ := refreshResp["id_token"].(string)
+			if idToken == "" {
+				t.Fatal("expected id_token in refresh response (builtin mode always issues id_token)")
+			}
+			parts := strings.Split(idToken, ".")
+			if len(parts) != 3 {
+				t.Fatalf("invalid JWT: got %d parts", len(parts))
+			}
+			payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+			if err != nil {
+				t.Fatalf("decode JWT payload: %v", err)
+			}
+			var claims map[string]any
+			if err := json.Unmarshal(payload, &claims); err != nil {
+				t.Fatalf("unmarshal claims: %v", err)
+			}
+
+			nonceClaim, hasClaim := claims["nonce"]
+			if tc.expectInToken {
+				if !hasClaim {
+					t.Error("expected nonce claim in refresh id_token, but not found")
+				} else if nonceClaim != tc.nonce {
+					t.Errorf("nonce claim: got %v, want %q", nonceClaim, tc.nonce)
+				}
+			} else {
+				if hasClaim {
+					t.Errorf("expected no nonce claim in refresh id_token, but got %v", nonceClaim)
+				}
+			}
+		})
+	}
+}
+
 func assertJSONStringsContain(t *testing.T, doc map[string]any, key, want string) {
 	t.Helper()
 

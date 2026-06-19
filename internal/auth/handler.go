@@ -594,6 +594,7 @@ func (h *Handler) tokenAuthCode(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.store.CacheToken(gatewayToken, result.Subject, result.Audience)
+		h.store.SaveTokenNonce(gatewayToken, result.Nonce)
 		familyID, fidErr := generateCode()
 		if fidErr != nil {
 			slog.Warn("failed to generate refresh token family ID", "err", fidErr)
@@ -609,6 +610,7 @@ func (h *Handler) tokenAuthCode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.store.CacheToken(result.AccessToken, result.Subject, result.Audience)
+	h.store.SaveTokenNonce(result.AccessToken, result.Nonce)
 	h.persistProviderRefresh(result.AccessToken, result.ProviderRefreshToken, result.ProviderAccessExpiry)
 	familyID, fidErr := generateCode()
 	if fidErr != nil {
@@ -794,6 +796,14 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 		audience = resolved
 	}
 
+	// Retrieve the nonce from the existing token entry before rotating.
+	// OIDC Core §12.2: if an id_token is returned from the refresh endpoint,
+	// the nonce claim MUST be the same as in the original authentication request.
+	var nonce string
+	if rec, ok := h.store.LookupToken(accessToken); ok {
+		nonce = rec.Nonce
+	}
+
 	if h.isBuiltinMode() {
 		// builtin mode: verify the existing gateway JWT locally to extract subject,
 		// then issue a new gateway JWT. GitHub API is not consulted.
@@ -813,6 +823,7 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.store.CacheToken(newGatewayToken, sub, audience)
+		h.store.SaveTokenNonce(newGatewayToken, nonce)
 		// Propagate the same familyID so the token lineage remains traceable.
 		newRT, rtErr := h.store.CreateRefreshToken(newGatewayToken, audience, familyID, h.refreshTokenTTL())
 		if rtErr != nil {
@@ -822,7 +833,7 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 			oauthError(w, "server_error", "internal error", http.StatusInternalServerError)
 			return
 		}
-		h.writeTokenResponse(w, newGatewayToken, "", newRT, sub, "")
+		h.writeTokenResponse(w, newGatewayToken, "", newRT, sub, nonce)
 		h.auditSuccess("refresh", "refresh token exchange completed (builtin)", http.StatusOK)
 		return
 	}
@@ -862,7 +873,7 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.writeTokenResponse(w, accessToken, "", newRT, id.Subject, "")
+	h.writeTokenResponse(w, accessToken, "", newRT, id.Subject, nonce)
 	h.auditSuccess("refresh", "refresh token exchange completed", http.StatusOK)
 }
 

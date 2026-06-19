@@ -7,6 +7,13 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Propagate OIDC nonce to `id_token` issued by the `refresh_token` endpoint (OIDC Core §12.2) ([#160](https://github.com/scottlz0310/mcp-gateway/issues/160))
+  - Added `Nonce` field to `TokenRecord`, `memEntry`, and `fileEntry` so the nonce from the original authorization request is persisted alongside the access token
+  - `tokenAuthCode` now calls `SaveTokenNonce` after caching the token (both builtin and non-builtin paths)
+  - `tokenRefresh` looks up the nonce via `LookupToken` before rotating and forwards it to `writeTokenResponse` (both builtin and non-builtin paths)
+
 ### Added
 
 - Upstream OAuth route option parsing and validation ([#113](https://github.com/scottlz0310/mcp-gateway/issues/113))

@@ -716,6 +716,18 @@ func (s *Store) RecordProviderRefresh(token, providerRefreshToken string, provid
 	// is no separate index hint to update here.
 }
 
+// SaveTokenNonce attaches the OIDC nonce to an existing token entry so it can
+// be forwarded in the id_token on refresh (OIDC Core §12.2). No-op when the
+// nonce is empty or the entry is absent/expired.
+func (s *Store) SaveTokenNonce(token, nonce string) {
+	if nonce == "" {
+		return
+	}
+	if err := s.tokens.SaveNonce(token, nonce); err != nil {
+		slog.Warn("token store nonce save failed", "err", err)
+	}
+}
+
 // ClearProviderRefresh drops the provider refresh metadata for token (sets
 // both the refresh token and access expiry to their zero values). Used after
 // a permanent rotation failure (e.g. bad_refresh_token) so subsequent

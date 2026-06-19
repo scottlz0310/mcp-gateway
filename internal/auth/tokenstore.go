@@ -25,13 +25,19 @@ import (
 // rotation for this token (e.g., bad or revoked refresh token). Once set it
 // survives gateway restarts when using a file-backed store so that
 // ValidateToken never re-seeds the subject index with a dead bearer.
+//
+// Nonce is the OIDC nonce from the original authorization request (OIDC Core
+// §3.1.3.7). It is propagated to id_token on refresh (OIDC Core §12.2) so
+// that the nonce binding survives token rotation. Empty when no nonce was
+// requested.
 type TokenRecord struct {
-	Subject                  string
-	Audiences                []string
-	ExpiresAt                time.Time
-	ProviderRefreshToken     string
-	ProviderAccessExpiry     time.Time
+	Subject                   string
+	Audiences                 []string
+	ExpiresAt                 time.Time
+	ProviderRefreshToken      string
+	ProviderAccessExpiry      time.Time
 	RotationPermanentlyFailed bool
+	Nonce                     string
 }
 
 // HasAudience reports whether the token record is scoped to audience.
@@ -59,6 +65,11 @@ type TokenStore interface {
 	SaveProviderRefresh(token, providerRefreshToken string, providerAccessExpiry time.Time) error
 	// Lookup returns metadata for a non-expired token, or (zero, false).
 	Lookup(token string) (TokenRecord, bool)
+	// SaveNonce attaches the OIDC nonce to an existing entry so it can be
+	// forwarded in id_token on refresh (OIDC Core §12.2). The entry must
+	// already exist; if absent or expired the call is a no-op. An empty
+	// nonce clears any previously stored value.
+	SaveNonce(token, nonce string) error
 	// MarkRotationFailed marks token as having a permanent rotation failure.
 	// The entry must already exist; if it is absent or expired the call is a
 	// no-op. For file-backed stores the flag is flushed to disk immediately so
@@ -79,12 +90,13 @@ func tokenKey(token string) string {
 // ── in-memory implementation ────────────────────────────────────────────────
 
 type memEntry struct {
-	subject                  string
-	audiences                []string
-	expiresAt                time.Time
-	providerRefreshToken     string
-	providerAccessExpiry     time.Time
+	subject                   string
+	audiences                 []string
+	expiresAt                 time.Time
+	providerRefreshToken      string
+	providerAccessExpiry      time.Time
 	rotationPermanentlyFailed bool
+	nonce                     string
 }
 
 type memTokenStore struct {
@@ -146,7 +158,21 @@ func (m *memTokenStore) Lookup(token string) (TokenRecord, bool) {
 		ProviderRefreshToken:      e.providerRefreshToken,
 		ProviderAccessExpiry:      e.providerAccessExpiry,
 		RotationPermanentlyFailed: e.rotationPermanentlyFailed,
+		Nonce:                     e.nonce,
 	}, true
+}
+
+func (m *memTokenStore) SaveNonce(token, nonce string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := tokenKey(token)
+	entry, ok := m.entries[key]
+	if !ok || time.Now().After(entry.expiresAt) {
+		return nil
+	}
+	entry.nonce = nonce
+	m.entries[key] = entry
+	return nil
 }
 
 func (m *memTokenStore) MarkRotationFailed(token string) error {
@@ -194,12 +220,13 @@ func (m *memTokenStore) Sweep() error {
 // window — months). Snapshot, backup, and access-control implications are
 // covered in docs/configuration.md under "Token Persistence".
 type fileEntry struct {
-	Subject               string    `json:"s"`
-	Audiences             []string  `json:"aud,omitempty"`
-	ExpiresAt             time.Time `json:"e"`
-	ProviderRefreshToken  string    `json:"prt,omitempty"`
-	ProviderAccessExpiry  time.Time `json:"pae,omitempty"`
-	RotationFailed        bool      `json:"rf,omitempty"`
+	Subject              string    `json:"s"`
+	Audiences            []string  `json:"aud,omitempty"`
+	ExpiresAt            time.Time `json:"e"`
+	ProviderRefreshToken string    `json:"prt,omitempty"`
+	ProviderAccessExpiry time.Time `json:"pae,omitempty"`
+	RotationFailed       bool      `json:"rf,omitempty"`
+	Nonce                string    `json:"nonce,omitempty"`
 }
 
 type fileTokenStore struct {
@@ -325,7 +352,26 @@ func (f *fileTokenStore) Lookup(token string) (TokenRecord, bool) {
 		ProviderRefreshToken:      e.ProviderRefreshToken,
 		ProviderAccessExpiry:      e.ProviderAccessExpiry,
 		RotationPermanentlyFailed: e.RotationFailed,
+		Nonce:                     e.Nonce,
 	}, true
+}
+
+func (f *fileTokenStore) SaveNonce(token, nonce string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := tokenKey(token)
+	entry, ok := f.entries[key]
+	if !ok || time.Now().After(entry.ExpiresAt) {
+		return nil
+	}
+	previous := entry
+	entry.Nonce = nonce
+	f.entries[key] = entry
+	if err := f.flush(); err != nil {
+		f.entries[key] = previous
+		return err
+	}
+	return nil
 }
 
 func (f *fileTokenStore) MarkRotationFailed(token string) error {

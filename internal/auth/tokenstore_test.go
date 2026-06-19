@@ -73,6 +73,34 @@ func testTokenStoreContract(t *testing.T, ts TokenStore) {
 	if err := ts.Sweep(); err != nil {
 		t.Fatalf("Sweep: %v", err)
 	}
+
+	// SaveNonce attaches nonce to an existing entry; Lookup returns it.
+	if err := ts.Save("tok-nonce", "dave", nil, time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("Save tok-nonce: %v", err)
+	}
+	if err := ts.SaveNonce("tok-nonce", "nonce-abc"); err != nil {
+		t.Fatalf("SaveNonce: %v", err)
+	}
+	recN, okN := ts.Lookup("tok-nonce")
+	if !okN {
+		t.Fatal("Lookup tok-nonce: expected hit after SaveNonce")
+	}
+	if recN.Nonce != "nonce-abc" {
+		t.Errorf("SaveNonce: Nonce got %q, want %q", recN.Nonce, "nonce-abc")
+	}
+
+	// SaveNonce on absent token is a no-op (no error).
+	if err := ts.SaveNonce("no-such-token", "nonce-xyz"); err != nil {
+		t.Fatalf("SaveNonce on absent token returned error: %v", err)
+	}
+
+	// SaveNonce on expired token is a no-op (no error).
+	if err := ts.Save("tok-expired-nonce", "eve", nil, time.Now().Add(-time.Second)); err != nil {
+		t.Fatalf("Save expired nonce token: %v", err)
+	}
+	if err := ts.SaveNonce("tok-expired-nonce", "nonce-xyz"); err != nil {
+		t.Fatalf("SaveNonce on expired token returned error: %v", err)
+	}
 }
 
 // ── memTokenStore ─────────────────────────────────────────────────────────────
