@@ -92,7 +92,7 @@
 
 Cloudflare MCP など、upstream が独自 OAuth サーバーを持つケースに対応する。`upstream_bearer_token_env` による静的 token injection とは別の機能として、ユーザーごとの upstream OAuth フローを gateway が仲介する。
 
-全 issue 完了済み（#113〜#118, #162, #166, #171, #175, #177, #179）。v0.7.0 リリース済み。
+全 issue 完了済み（#113〜#118, #162, #166, #171, #175, #177, #179）。v0.7.0 リリース準備済み（PR #181）。
 
 ### [#113](https://github.com/scottlz0310/mcp-gateway/issues/113) route option parse / validation
 
