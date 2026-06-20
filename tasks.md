@@ -19,29 +19,33 @@
 
 ## 現在の判断基準
 
-- 対象: 2026-06-20 時点の open issue
-- `#126` は設計決定 issue であり、直接の実装単位ではない。
-- `#84` は upstream OAuth delegation の親 issue。実装 chain（#113〜#118, #166, #171）は完了。
-- `#65` は Renovate Dependency Dashboard であり、通常の実装ロードマップには含めない。
+- 対象: 2026-06-21 時点の open issue
+- `#126` は設計決定 issue。Phase 1 (v0.6.0) + Phase 2 (v0.7.0) で実装完了。2026-06-21 にクローズ済み。
+- `#84` は upstream OAuth delegation の親 issue。実装 chain（#113〜#118, #166, #171）+ 関連修正（#162, #175, #177, #179）すべて完了。2026-06-21 にクローズ済み。
+- `#65` は Renovate Dependency Dashboard であり、通常の実装ロードマップには含めない。open 維持。
 
 ---
 
-## 推奨実装順
+## 推奨実装順（v0.7.0 時点でのすべての実装が完了）
 
 | 優先 | Issue | 状態 | 依存 | 次のアクション |
 |---|---|---|---|---|
-| P0 | [#122](https://github.com/scottlz0310/mcp-gateway/issues/122) OIDC Discovery metadata 補完 | [x] | なし | 完了 |
-| P0 | [#123](https://github.com/scottlz0310/mcp-gateway/issues/123) OIDC `nonce` claim 対応 | [x] | なし | 完了 |
-| P1 | [#125](https://github.com/scottlz0310/mcp-gateway/issues/125) RFC 8252 opaque-form redirect URI | [x] | なし | 完了 |
-| P1 | [#6](https://github.com/scottlz0310/mcp-gateway/issues/6) gateway OIDC Provider 完成 / agy 完走 | [x] | `#122` / `#123` / `#125` | 完了 |
-| P2 | [#113](https://github.com/scottlz0310/mcp-gateway/issues/113) upstream OAuth route option | [x] | なし | 完了 |
-| P2 | [#114](https://github.com/scottlz0310/mcp-gateway/issues/114) upstream OAuth discovery + DCR | [x] | `#113` | 完了 |
-| P2 | [#115](https://github.com/scottlz0310/mcp-gateway/issues/115) upstream token store | [x] | `#114` | 完了 |
-| P2 | [#116](https://github.com/scottlz0310/mcp-gateway/issues/116) upstream OAuth authorization flow | [x] | `#114` / `#115` | 完了 |
-| P2 | [#117](https://github.com/scottlz0310/mcp-gateway/issues/117) proxy token injection | [x] | `#113`-`#116` | 完了 |
-| P2 | [#118](https://github.com/scottlz0310/mcp-gateway/issues/118) upstream token refresh | [x] | `#117` | 完了 |
-| P2 | [#166](https://github.com/scottlz0310/mcp-gateway/issues/166) upstream OAuth Manager 統合 + client_credentials フロー | [x] | `#113`-`#118` | 完了 |
-| P2 | [#171](https://github.com/scottlz0310/mcp-gateway/issues/171) LookupForRefresh — 期限切れトークンの refresh 対応 | [x] | `#118` | 完了 |
+| P0 | [#122](https://github.com/scottlz0310/mcp-gateway/issues/122) OIDC Discovery metadata 補完 | [x] | なし | 完了（v0.7.0） |
+| P0 | [#123](https://github.com/scottlz0310/mcp-gateway/issues/123) OIDC `nonce` claim 対応 | [x] | なし | 完了（v0.7.0） |
+| P1 | [#125](https://github.com/scottlz0310/mcp-gateway/issues/125) RFC 8252 opaque-form redirect URI | [x] | なし | 完了（v0.7.0） |
+| P1 | [#6](https://github.com/scottlz0310/mcp-gateway/issues/6) gateway OIDC Provider 完成 / agy 完走 | [x] | `#122` / `#123` / `#125` | 完了（v0.6.0） |
+| P2 | [#113](https://github.com/scottlz0310/mcp-gateway/issues/113) upstream OAuth route option | [x] | なし | 完了（v0.7.0） |
+| P2 | [#114](https://github.com/scottlz0310/mcp-gateway/issues/114) upstream OAuth discovery + DCR | [x] | `#113` | 完了（v0.7.0） |
+| P2 | [#115](https://github.com/scottlz0310/mcp-gateway/issues/115) upstream token store | [x] | `#114` | 完了（v0.7.0） |
+| P2 | [#116](https://github.com/scottlz0310/mcp-gateway/issues/116) upstream OAuth authorization flow | [x] | `#114` / `#115` | 完了（v0.7.0） |
+| P2 | [#117](https://github.com/scottlz0310/mcp-gateway/issues/117) proxy token injection | [x] | `#113`-`#116` | 完了（v0.7.0） |
+| P2 | [#118](https://github.com/scottlz0310/mcp-gateway/issues/118) upstream token refresh | [x] | `#117` | 完了（v0.7.0） |
+| P2 | [#162](https://github.com/scottlz0310/mcp-gateway/issues/162) builtin provider identity resolution 修正 | [x] | なし | 完了（v0.7.0） |
+| P2 | [#166](https://github.com/scottlz0310/mcp-gateway/issues/166) upstream OAuth Manager 統合 + client_credentials フロー | [x] | `#113`-`#118` | 完了（v0.7.0） |
+| P2 | [#171](https://github.com/scottlz0310/mcp-gateway/issues/171) LookupForRefresh — 期限切れトークンの refresh 対応 | [x] | `#118` | 完了（v0.7.0） |
+| P2 | [#175](https://github.com/scottlz0310/mcp-gateway/issues/175) buildResourceAudienceMap URL キー + gateway-wide PRM 修正 | [x] | なし | 完了（v0.7.0） |
+| P2 | [#177](https://github.com/scottlz0310/mcp-gateway/issues/177) DCR 登録ごとに一意の client_id を発行（RFC 7591） | [x] | `#114` | 完了（v0.7.0） |
+| P2 | [#179](https://github.com/scottlz0310/mcp-gateway/issues/179) upstream OAuth 302 → 200 JSON-RPC error | [x] | `#116` | 完了（v0.7.0） |
 
 ---
 
@@ -88,7 +92,7 @@
 
 Cloudflare MCP など、upstream が独自 OAuth サーバーを持つケースに対応する。`upstream_bearer_token_env` による静的 token injection とは別の機能として、ユーザーごとの upstream OAuth フローを gateway が仲介する。
 
-全 issue 完了済み（#113〜#118, #166, #171）。
+全 issue 完了済み（#113〜#118, #162, #166, #171, #175, #177, #179）。v0.7.0 リリース準備済み（PR #181）。
 
 ### [#113](https://github.com/scottlz0310/mcp-gateway/issues/113) route option parse / validation
 

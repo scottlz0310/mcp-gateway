@@ -7,43 +7,60 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-06-21
+
+### Added
+
+- Upstream OAuth delegation: full end-to-end per-user upstream OAuth flow for MCP routes configured with `upstream_oauth` ([#84](https://github.com/scottlz0310/mcp-gateway/issues/84))
+  - **Route option parsing and validation** ([#113](https://github.com/scottlz0310/mcp-gateway/issues/113)): `upstream_oauth=auto|<issuer-url>` and `upstream_oauth_scope` accepted in both `ROUTE_*` env-vars and `config.yaml`; `upstream_oauth` + `upstream_bearer_token_env` combination rejected fail-closed; YAML `null`/blank treated as absent (disabled); `upstream_oauth_scope` without `upstream_oauth` rejected
+  - **Metadata discovery and Dynamic Client Registration** ([#114](https://github.com/scottlz0310/mcp-gateway/issues/114)): RFC 9728 two-step Protected Resource → AS metadata discovery; RFC 8414 one-step from explicit issuer URL; RFC 7591 DCR (`POST registration_endpoint`; 200 and 201 both accepted); per-route lazy discovery with in-memory AS metadata cache; `upstream_clients.json` atomic write (0600)
+  - **Upstream user token store** ([#115](https://github.com/scottlz0310/mcp-gateway/issues/115)): `UpstreamTokenStore` interface (`Save` / `Lookup` / `Delete` / `LookupForRefresh` / `Sweep`); in-memory and `upstream_tokens.json` file-backed implementations; on-disk key = `sha256(subject + "\x00" + routeName)` hex so raw identity is never written to disk; atomic write (0600)
+  - **Authorization flow with PKCE** ([#116](https://github.com/scottlz0310/mcp-gateway/issues/116)): `NewAuthorizeMiddleware` generates PKCE `code_verifier` / `code_challenge` (S256) and persists OAuth state (10-minute TTL) before returning authorization error; `GET /upstream/callback/{route-name}` validates `state`, exchanges `code` + `code_verifier` via PKCE, saves upstream access token; fails closed on expired state
+  - **Proxy token injection and 401 cleanup** ([#117](https://github.com/scottlz0310/mcp-gateway/issues/117)): injects upstream `access_token` as `Authorization: Bearer` into proxied requests; removes stale upstream token on upstream `401` so the next request re-triggers the authorization flow without polluting the gateway OAuth cache
+  - **Proactive refresh and 401 transparent retry** ([#118](https://github.com/scottlz0310/mcp-gateway/issues/118)): refreshes upstream token before expiry; `401`-triggered refresh + retry with `singleflight` exclusion per subject + route; body replay via `GetBody()`; `expires_in ≤ 0` treated as expiry-unknown and not refreshed proactively; permanent refresh failure deletes token and re-triggers authorization
+  - **`client_credentials` grant** via `upstream_oauth_grant` route option ([#166](https://github.com/scottlz0310/mcp-gateway/issues/166)): `upstream_oauth_grant=client_credentials` fetches a server-to-server token immediately with no user interaction; `upstream_oauth_grant=authorization_code` (default) retains the PKCE user flow; grant-aware token cache invalidation; grant change triggers DCR re-registration and re-acquisition
+  - **`LookupForRefresh` on expired upstream tokens** ([#171](https://github.com/scottlz0310/mcp-gateway/issues/171)): `UpstreamTokenStore.LookupForRefresh` returns expired records so `RefreshAfter401` can attempt refresh-token re-acquisition even when the access token has already expired
+
+- RFC 8252 §7.1 opaque-form custom scheme redirect URI support ([#125](https://github.com/scottlz0310/mcp-gateway/issues/125))
+  - Redirect URIs with a custom scheme are now accepted when either `Host` or `Opaque` is non-empty (e.g. `com.example.app:/oauth2redirect/provider`)
+  - URIs with a custom scheme but neither host nor opaque segment continue to be rejected fail-closed
+  - Fragment-bearing URIs are rejected for all schemes
+
+- OIDC `nonce` claim support in the authorization code flow (OIDC Core §3.1.3.7) ([#123](https://github.com/scottlz0310/mcp-gateway/issues/123), [PR #159](https://github.com/scottlz0310/mcp-gateway/pull/159))
+  - `Session.Nonce` persists the nonce through the authorization session; `/authorize` reads the `nonce` query parameter and stores it
+  - `ExchangeCodeResult.Nonce` propagates nonce through `tokenAuthCode` → `writeTokenResponse` → `generateIDToken`
+  - `nonce` claim is included in `id_token` payload only when non-empty (OIDC Core §3.1.3.7); device flow and refresh flow pass `""` per spec
+
 ### Fixed
 
 - Propagate OIDC nonce to `id_token` issued by the `refresh_token` endpoint (OIDC Core §12.2) ([#160](https://github.com/scottlz0310/mcp-gateway/issues/160))
   - Added `Nonce` field to `TokenRecord`, `memEntry`, `fileEntry`, `memRTEntry`, `fileRTEntry`, and `sqliteRefreshTokenStore` so the nonce is persisted in both the access-token store and the refresh-token store
-  - `RefreshTokenStore` gains `SaveNonce` / `LookupNonce` to key nonce on the refresh token, outliving the access-token TTL (Copilot review PRRT_kwDOSNXuJs6KuAH4)
-  - `tokenAuthCode` calls `SaveTokenNonce` and `SaveRefreshTokenNonce` after caching (both builtin and non-builtin paths)
-  - `tokenRefresh` reads the nonce via `LookupRefreshTokenNonce` before `ReserveRefreshToken` so it is available even after soft-revocation, and forwards it to `writeTokenResponse` (both paths)
-  - `tokenRefresh` now calls `SaveRefreshTokenNonce(newRT, nonce)` after issuing the rotated refresh token (both builtin and non-builtin), so nonce survives across consecutive refresh cycles (thread-owl PRRT_kwDOSNXuJs6KuAH4 follow-up)
-  - `SaveTokenNonce` empty-string guard removed so a subsequent grant with no nonce correctly clears a previously stored value (thread-owl review PRRT_kwDOSNXuJs6KuLsC)
-  - `fileEntry` and `fileRTEntry` OIDC nonce JSON key standardised to `"n"` for consistency with existing short field names (Copilot review PRRT_kwDOSNXuJs6KuAIE)
+  - `RefreshTokenStore` gains `SaveNonce` / `LookupNonce` to key nonce on the refresh token, outliving the access-token TTL
+  - `tokenRefresh` calls `SaveRefreshTokenNonce(newRT, nonce)` after issuing the rotated refresh token so nonce survives across consecutive refresh cycles
+  - `SaveTokenNonce` empty-string guard removed so a subsequent grant with no nonce correctly clears a previously stored value
 
-### Added
+- `builtin` provider `ValidateToken` now delegates to the GitHub API to resolve identity during the OAuth callback, fixing identity resolution for `OAUTH_PROVIDER=builtin` ([#162](https://github.com/scottlz0310/mcp-gateway/issues/162))
 
-- Upstream OAuth user token store (`UpstreamTokenStore`) ([#115](https://github.com/scottlz0310/mcp-gateway/issues/115))
-  - `UpstreamTokenRecord`: in-memory型（`Subject`/`RouteName` はメモリ上のみ）
-  - `upstreamTokenFileEntry`: on-disk型（`Subject`/`RouteName` を含まず、identity情報をディスクに書かない）
-  - キーは `sha256(subject + "\x00" + routeName)` の hex 文字列
-  - `UpstreamTokenStore` インターフェース: `Save` / `Lookup` / `Delete` / `Sweep`
-  - `memUpstreamTokenStore`: テスト・デフォルト用 in-memory 実装
-  - `fileUpstreamTokenStore`: JSON file-backed 実装（`upstream_tokens.json`）、atomic write (mode 0600)、起動時 sweep、親ディレクトリ確認 + chmod
-- Upstream OAuth metadata discovery and Dynamic Client Registration (`internal/upstreamoauth` package) ([#114](https://github.com/scottlz0310/mcp-gateway/issues/114))
-  - `DiscoverFromIssuer`: RFC 8414 one-step AS metadata fetch (`/.well-known/oauth-authorization-server{issuerPath}`)
-  - `DiscoverFromResource`: RFC 9728 → RFC 8414 two-step discovery (`/.well-known/oauth-protected-resource{path}` → AS metadata)
-  - `RegisterClient`: RFC 7591 Dynamic Client Registration (`POST registration_endpoint`); accepts 200 OK and 201 Created
-  - `ClientStore` / `fileClientStore`: JSON-backed `upstream_clients.json` with atomic write (temp+rename, mode 0600) and Windows fallback
-  - `Manager.EnsureClient`: lazy discovery + DCR on first access per route; fast-path store hit when `client_id` already registered; in-memory AS metadata cache to avoid repeated network calls per route
-- Upstream OAuth route option parsing and validation ([#113](https://github.com/scottlz0310/mcp-gateway/issues/113))
-  - `Route` struct gains `UpstreamOAuth` ("auto" or absolute issuer URL) and `UpstreamOAuthScope` (space-separated scopes) fields
-  - `ROUTE_*` env-var parser accepts `upstream_oauth=auto|<issuer-url>` and `upstream_oauth_scope=<scopes>`
-  - `config.yaml` `RouteConfig` gains `upstream_oauth` and `upstream_oauth_scope` fields parsed by `ParseFromConfig`
-  - Validation: empty value (`""`), non-http/https scheme, and invalid URL rejected (fail-closed); issuer URL trailing slash is trimmed; comma-separated scopes normalised to space-separated; `upstream_oauth` + `upstream_bearer_token_env` combination rejected; `upstream_oauth_scope` without `upstream_oauth` rejected
-  - YAML `null` and blank (`upstream_oauth:` with no value) both decode to `nil` via `yaml.v3`, which is treated as absent (disabled) — identical to omitting the field. Only an explicit quoted empty string (`upstream_oauth: ""`) triggers the fail-closed rejection.
-  - No runtime behaviour changes; discovery/DCR/token injection handled in subsequent issues
+- Add PKCE, grant type, registration, and device authorization metadata to OIDC Discovery (`/.well-known/openid-configuration`) so OIDC clients can detect supported authorization flows ([#122](https://github.com/scottlz0310/mcp-gateway/issues/122))
 
-### Fixed
+- `buildResourceAudienceMap` now indexes both route-name keys and URL-form keys (`resourceURL` derived from `routeResource`), fixing `invalid_target` errors for RFC 8707 clients that send the resource URL rather than the route name ([#175](https://github.com/scottlz0310/mcp-gateway/issues/175))
+  - Gateway-wide PRM discovery and `"/"` prefix route resource resolution added so root-prefix routes are correctly resolved
 
-- Add PKCE, grant type, registration, and device authorization metadata to OIDC Discovery (`/.well-known/openid-configuration`) so OIDC clients can detect supported authorization flows ([#122](https://github.com/scottlz0310/mcp-gateway/issues/122)).
+- Dynamic Client Registration now generates a unique `client_id` per registration by appending a random 8-byte hex suffix, conforming to RFC 7591 §3.2.1 ([#177](https://github.com/scottlz0310/mcp-gateway/issues/177), [PR #178](https://github.com/scottlz0310/mcp-gateway/pull/178))
+  - Previous behaviour re-used a deterministic `client_id` derived from the route name, causing registration conflicts when a route re-registered after DCR record expiry
+
+- `NewAuthorizeMiddleware` now returns `200 OK` + JSON-RPC error (code `-32001`, `type: "upstream_authorization_required"`) instead of `302 Found`, preventing MCP clients from interpreting the response as a connection failure and restarting the entire auth flow ([#179](https://github.com/scottlz0310/mcp-gateway/issues/179), [PR #180](https://github.com/scottlz0310/mcp-gateway/pull/180))
+  - `error.data.authorization_url` carries the upstream authorization endpoint URL with PKCE parameters embedded; clients open the URL in a browser and retry the MCP request
+  - Response carries `Cache-Control: no-store` and `Pragma: no-cache` to prevent caching of OAuth state parameters
+
+### Documentation
+
+- README, `docs/configuration.md`, and `docs/operations.md` updated to document upstream OAuth delegation features that were implemented but undocumented ([PR #174](https://github.com/scottlz0310/mcp-gateway/pull/174))
+  - Key Features section covers `authorization_code` / `client_credentials` upstream OAuth delegation, proactive refresh, and 401 transparent retry
+  - Endpoint tables include `/upstream/callback/{routeName}` and OIDC endpoints (`/jwks`, `/userinfo`, `/.well-known/openid-configuration`)
+  - State file tables include `upstream_clients.json` and `upstream_tokens.json`
+  - `docs/operations.md` gains an upstream OAuth troubleshooting section (token acquisition failure, refresh failure, `upstream_clients.json` reset)
+- Architecture documentation updated from 5 to 6 components: squirrel-notifier added to component table, data-flow diagram, and design principles ([PR #174](https://github.com/scottlz0310/mcp-gateway/pull/174))
 
 ## [0.6.0] - 2026-06-17
 
@@ -360,7 +377,8 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 - Removed GitHub-specific HTTP calls from `auth.Handler`; delegated to `provider.Provider`.
 - Renamed middleware context key `github_login` → `authenticated_user` (internal only; external compatibility maintained).
 
-[Unreleased]: https://github.com/scottlz0310/mcp-gateway/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/scottlz0310/mcp-gateway/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/scottlz0310/mcp-gateway/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/scottlz0310/mcp-gateway/compare/v0.5.0...v0.5.1
