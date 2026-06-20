@@ -155,6 +155,7 @@ mcp-gateway is the successor to `github-oauth-proxy`
 | [mcp-resource-subscriber](https://github.com/scottlz0310/mcp-resource-subscriber) | Subscription client and agent workflow bridge for MCP resource notifications. |
 | [review-raven](https://github.com/scottlz0310/review-raven) | Reviewed-side MCP: fetch Copilot review threads, reply, resolve, and re-request review. |
 | [mcp-docker](https://github.com/scottlz0310/Mcp-Docker) | Container orchestration, gateway config generation, and CLI agent config automation. |
+| [squirrel-notifier](https://github.com/scottlz0310/squirrel-notifier) | Desktop-resident notification receiver and AI agent launcher: monitors MCP resource updates via mcp-gateway, shows toast notifications, and launches local AI agents with skill directives. |
 
 ## Documentation
 
@@ -214,6 +215,7 @@ Operational details and recovery procedures are in
 - age X25519 encryption for stored GitHub OAuth client secrets.
 - Structured JSON logs with request, auth, setup, and proxy events.
 - Trusted reverse proxy header handling for TLS-terminating proxies.
+- **Upstream OAuth delegation**: per-route upstream OAuth with `authorization_code` (user-interactive) or `client_credentials` (service-to-service) grant, automatic AS discovery (RFC 9728 + RFC 8414), Dynamic Client Registration, per-user token persistence, proactive refresh, and transparent 401 retry.
 
 ## Core Configuration
 
@@ -236,6 +238,8 @@ Important paths:
 | `MCP_GATEWAY_KEY_PATH` | `{state-dir}/gateway.key` | age X25519 identity. Back it up securely. |
 | `MCP_GATEWAY_TOKEN_STORE_PATH` | `{state-dir}/tokens.json` | Persistent token store. Docker deployments pin this via env var. |
 | `MCP_GATEWAY_AUTH_AUDIT_LOG_PATH` | OS user state directory; `/data/mcp-gateway/logs/auth-audit.jsonl` in the official image | Rotating OAuth audit JSON Lines file. Relative paths and Git worktree paths are rejected. |
+| *(auto)* | `{state-dir}/upstream_clients.json` | Upstream AS Dynamic Client Registration records (mode 0600). Created on first upstream OAuth route access. |
+| *(auto)* | `{state-dir}/upstream_tokens.json` | Per-user upstream OAuth access/refresh tokens (mode 0600). Created on first upstream OAuth authorization. |
 
 `{state-dir}` is the OS user state directory resolved at startup (Windows: `%LOCALAPPDATA%\mcp-gateway`, macOS: `~/Library/Application Support/mcp-gateway`, Linux: `$XDG_STATE_HOME/mcp-gateway` → `~/.local/state/mcp-gateway`). Docker deployments always override paths via environment variables. See [docs/configuration.md](docs/configuration.md) for the full reference.
 
@@ -251,6 +255,7 @@ Important paths:
 | `/device_authorization` | POST | Device Authorization Grant endpoint. |
 | `/token` | POST | Authorization code, device code, and refresh token grants. |
 | `/register` | POST | Dynamic client registration. |
+| `/upstream/callback/{routeName}` | GET | Upstream OAuth authorization code callback (authorization_code flow only; registered only when at least one upstream OAuth route is configured). |
 | `/setup` | GET/POST | First-run setup wizard, available in setup mode. |
 | `/health` | GET | Health check in normal mode. |
 | `/<prefix>` | ANY | Reverse proxy to the matched upstream. |

@@ -346,6 +346,43 @@ export MCP_GATEWAY_KEY_PATH=/your/writable/path/gateway.key
 
 - `MCP_GATEWAY_TRUSTED_PROXIES` のすべてのエントリまたは `gateway.trusted_proxies` の各項目が `127.0.0.1/32` や `10.0.0.0/8` などの有効な CIDR 形式であることを確認してください。
 
+### Upstream OAuth トークンが取得できない
+
+症状:
+
+- upstream OAuth ルートへのアクセスで、upstream 認可エンドポイントへのリダイレクトが繰り返される。
+- ログに `upstream OAuth: token not found at proxy injection; request forwarded without Authorization` が出続ける。
+
+原因と対処:
+
+1. **`authorization_code` フロー**: ブラウザが `/upstream/callback/{routeName}` に正常に戻れているか確認する。`MCP_GATEWAY_PUBLIC_URL` が OAuth コールバックとして登録された URL と一致していることを確認すること。
+2. **`client_credentials` フロー**: upstream AS が `client_credentials` グラントをサポートしているか確認する。ログの `upstream OAuth: client_credentials token fetch failed` と upstream AS のエラー詳細を確認する。
+3. **DCR 失敗**: `upstream_clients.json` が存在しないまたは空の場合、ゲートウェイが upstream AS への Dynamic Client Registration に失敗している可能性がある。ログの `dynamic client registration for route` エラーを確認する。
+
+### Upstream OAuth トークンリフレッシュが失敗する
+
+症状:
+
+- upstream ルートへのリクエストが断続的に 401 を返す。
+- ログに `upstream OAuth refresh: permanent failure, deleting token` がある。
+
+原因と対処:
+
+1. **恒久失敗（refresh_token 失効）**: upstream AS が refresh_token を失効させた（ユーザーがアクセスを取り消すなど）。この場合、ゲートウェイが自動的に `upstream_tokens.json` から該当エントリを削除する（`permanent failure, deleting token` ログ）。次回 upstream リソースにアクセスすると自動的に再認可フローが開始される。
+2. **一時的失敗**: ログに `upstream OAuth refresh: transient failure, keeping existing token` がある場合、次回リクエストで自動的に再試行される。
+3. **`expires_in` なしレスポンス**: upstream AS がトークンレスポンスに `expires_in` を返さない場合、proactive refresh が動作しない。ログに `upstream OAuth refresh: response missing expires_in, keeping existing token` が出る場合は upstream AS の設定を確認する。
+
+### `upstream_clients.json` が壊れた / リセットしたい
+
+対処:
+
+```bash
+# gateway を停止してファイルを削除する（upstream OAuth ルートへの次回アクセス時に DCR が再実行される）
+rm {state-dir}/upstream_clients.json
+```
+
+DCR は再実行されるが、既存のユーザートークン（`upstream_tokens.json`）は影響を受けない。新しい `client_id` で取得されたトークンは旧 `client_id` と互換性がない場合があるため、必要に応じて `upstream_tokens.json` も削除して全ユーザーに再認可を促す。
+
 ### トークン audience 不一致
 
 症状:

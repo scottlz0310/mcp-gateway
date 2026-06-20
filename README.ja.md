@@ -146,14 +146,18 @@ mcp-gateway は `github-oauth-proxy` の後継です
 | Repo | 役割 |
 |------|------|
 | **mcp-gateway** | OAuth 2.0 認証、MCP authorization metadata、トークン永続化、ルーティングゲートウェイ。 |
-| [mcp-docker](https://github.com/scottlz0310/Mcp-Docker) | MCP スタック全体の Docker Compose オーケストレーション。 |
-| [copilot-review-mcp](https://github.com/scottlz0310/copilot-review-mcp) | Copilot コードレビュー MCP サーバー。 |
+| [thread-owl](https://github.com/scottlz0310/thread-owl) | レビュアー側 MCP サーバー: webhook 受信・レビュー候補判定・キュー管理。 |
+| [mcp-resource-subscriber](https://github.com/scottlz0310/mcp-resource-subscriber) | MCP resource 通知のサブスクリプションクライアント兼エージェントワークフロー橋渡し。 |
+| [review-raven](https://github.com/scottlz0310/review-raven) | レビューされる側 MCP: Copilot レビュースレッド取得・返信・解決・再レビュー依頼。 |
+| [mcp-docker](https://github.com/scottlz0310/Mcp-Docker) | コンテナオーケストレーション、ゲートウェイルート生成、CLI エージェント設定自動化。 |
+| [squirrel-notifier](https://github.com/scottlz0310/squirrel-notifier) | デスクトップ常駐の通知受信 / AI エージェントランチャー: mcp-gateway 経由で MCP resource 更新を監視し、トースト通知とローカル AI エージェントの起動を担当。 |
 
 ## ドキュメント
 
 | Document | 用途 |
 |----------|------|
 | [docs/README.md](docs/README.md) | ドキュメント index。 |
+| [docs/architecture.md](docs/architecture.md) | レビュープラットフォーム概要、責務境界、設計原則。 |
 | [docs/configuration.md](docs/configuration.md) | 環境変数、`config.yaml`、ルート、トークンストア、リバースプロキシ、エンドポイントの詳細リファレンス。 |
 | [docs/operations.md](docs/operations.md) | 起動停止、ヘルスチェック、構造化ログ、トラブルシュート、移行手順。 |
 | [docs/runbook-e2e-v0.1.0.md](docs/runbook-e2e-v0.1.0.md) | E2E 受け入れランブック。 |
@@ -204,6 +208,7 @@ setup token を消費して終了コード 0 で終了します。その後 supe
 - GitHub OAuth client secret の age X25519 暗号化保存。
 - request、auth、setup、proxy event の構造化 JSON log。
 - TLS 終端 proxy 向け trusted reverse proxy header 処理。
+- **upstream OAuth 委任**: ルート単位で upstream OAuth を設定。`authorization_code`（ユーザー認可フロー）または `client_credentials`（サービス間通信）を選択可能。AS の自動検出（RFC 9728 + RFC 8414）・Dynamic Client Registration・ユーザーごとのトークン永続化・proactive refresh・透過的 401 retry に対応。
 
 ## 主要設定
 
@@ -226,6 +231,8 @@ environment:
 | `MCP_GATEWAY_KEY_PATH` | `{state-dir}/gateway.key` | age X25519 identity。安全にバックアップしてください。 |
 | `MCP_GATEWAY_TOKEN_STORE_PATH` | `{state-dir}/tokens.json` | token 永続化 path。Docker 環境では環境変数で上書きすること。 |
 | `MCP_GATEWAY_AUTH_AUDIT_LOG_PATH` | OS のユーザー state 領域。公式 image では `/data/mcp-gateway/logs/auth-audit.jsonl` | OAuth 監査 JSON Lines。相対 path と Git worktree 配下は拒否されます。 |
+| *(自動生成)* | `{state-dir}/upstream_clients.json` | upstream AS の Dynamic Client Registration 記録（mode 0600）。upstream OAuth ルートへの初回アクセス時に作成。 |
+| *(自動生成)* | `{state-dir}/upstream_tokens.json` | ユーザーごとの upstream OAuth access/refresh token（mode 0600）。初回 upstream OAuth 認可完了時に作成。 |
 
 `{state-dir}` は起動時に解決される OS ユーザー状態ディレクトリです（Windows: `%LOCALAPPDATA%\mcp-gateway`、macOS: `~/Library/Application Support/mcp-gateway`、Linux: `$XDG_STATE_HOME/mcp-gateway` → `~/.local/state/mcp-gateway`）。Docker 環境では必ず環境変数でパスを上書きしてください。詳細は [docs/configuration.md](docs/configuration.md) を参照してください。
 
@@ -241,6 +248,7 @@ environment:
 | `/device_authorization` | POST | Device Authorization Grant endpoint。 |
 | `/token` | POST | authorization code、device code、refresh token grant。 |
 | `/register` | POST | Dynamic client registration。 |
+| `/upstream/callback/{routeName}` | GET | upstream OAuth authorization code callback（`authorization_code` フロー専用）。upstream OAuth 有効ルートが 1 つ以上ある場合のみ登録。 |
 | `/setup` | GET/POST | setup mode 中の初回起動 wizard。 |
 | `/health` | GET | 通常モードの health check。 |
 | `/<prefix>` | ANY | マッチした upstream への reverse proxy。 |
