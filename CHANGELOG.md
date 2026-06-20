@@ -26,6 +26,11 @@ and versioning follows [Semantic Versioning](https://semver.org/).
   - URIs with a custom scheme but neither host nor opaque segment continue to be rejected fail-closed
   - Fragment-bearing URIs are rejected for all schemes
 
+- OIDC `nonce` claim support in the authorization code flow (OIDC Core §3.1.3.7) ([#123](https://github.com/scottlz0310/mcp-gateway/issues/123), [PR #159](https://github.com/scottlz0310/mcp-gateway/pull/159))
+  - `Session.Nonce` persists the nonce through the authorization session; `/authorize` reads the `nonce` query parameter and stores it
+  - `ExchangeCodeResult.Nonce` propagates nonce through `tokenAuthCode` → `writeTokenResponse` → `generateIDToken`
+  - `nonce` claim is included in `id_token` payload only when non-empty (OIDC Core §3.1.3.7); device flow and refresh flow pass `""` per spec
+
 ### Fixed
 
 - Propagate OIDC nonce to `id_token` issued by the `refresh_token` endpoint (OIDC Core §12.2) ([#160](https://github.com/scottlz0310/mcp-gateway/issues/160))
@@ -47,6 +52,15 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 - `NewAuthorizeMiddleware` now returns `200 OK` + JSON-RPC error (code `-32001`, `type: "upstream_authorization_required"`) instead of `302 Found`, preventing MCP clients from interpreting the response as a connection failure and restarting the entire auth flow ([#179](https://github.com/scottlz0310/mcp-gateway/issues/179), [PR #180](https://github.com/scottlz0310/mcp-gateway/pull/180))
   - `error.data.authorization_url` carries the upstream authorization endpoint URL with PKCE parameters embedded; clients open the URL in a browser and retry the MCP request
   - Response carries `Cache-Control: no-store` and `Pragma: no-cache` to prevent caching of OAuth state parameters
+
+### Documentation
+
+- README, `docs/configuration.md`, and `docs/operations.md` updated to document upstream OAuth delegation features that were implemented but undocumented ([PR #174](https://github.com/scottlz0310/mcp-gateway/pull/174))
+  - Key Features section covers `authorization_code` / `client_credentials` upstream OAuth delegation, proactive refresh, and 401 transparent retry
+  - Endpoint tables include `/upstream/callback/{routeName}` and OIDC endpoints (`/jwks`, `/userinfo`, `/.well-known/openid-configuration`)
+  - State file tables include `upstream_clients.json` and `upstream_tokens.json`
+  - `docs/operations.md` gains an upstream OAuth troubleshooting section (token acquisition failure, refresh failure, `upstream_clients.json` reset)
+- Architecture documentation updated from 5 to 6 components: squirrel-notifier added to component table, data-flow diagram, and design principles ([PR #174](https://github.com/scottlz0310/mcp-gateway/pull/174))
 
 ## [0.6.0] - 2026-06-17
 

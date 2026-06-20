@@ -24,6 +24,11 @@
   - host も opaque も持たないカスタムスキーム URI は引き続き fail-closed で拒否
   - fragment 付き URI はすべてのスキームで拒否
 
+- Authorization Code フローにおける OIDC `nonce` claim 対応（OIDC Core §3.1.3.7）（[#123](https://github.com/scottlz0310/mcp-gateway/issues/123)、[PR #159](https://github.com/scottlz0310/mcp-gateway/pull/159)）
+  - `Session.Nonce` が認可セッションを通じて nonce を保持。`/authorize` が `nonce` クエリパラメータを読み取りセッションに保存
+  - `ExchangeCodeResult.Nonce` が `tokenAuthCode` → `writeTokenResponse` → `generateIDToken` の呼び出し連鎖を通じて nonce を伝播
+  - nonce が空でない場合のみ `id_token` payload に `nonce` claim を含める（OIDC Core §3.1.3.7 準拠）。device flow / refresh flow は仕様通り `""` で呼び出す
+
 ### 修正
 
 - `refresh_token` フローの `id_token` に OIDC nonce を伝播するよう修正（OIDC Core §12.2）（[#160](https://github.com/scottlz0310/mcp-gateway/issues/160)）
@@ -45,6 +50,15 @@
 - `NewAuthorizeMiddleware` が `302 Found` の代わりに `200 OK` + JSON-RPC エラー（code `-32001`、`type: "upstream_authorization_required"`）を返すよう変更し、MCP クライアントがレスポンスを接続失敗と誤解して認証フローを最初からやり直す再認証ループを防止（[#179](https://github.com/scottlz0310/mcp-gateway/issues/179)、[PR #180](https://github.com/scottlz0310/mcp-gateway/pull/180)）
   - `error.data.authorization_url` に PKCE パラメーター付きの upstream 認可エンドポイント URL を埋め込む。クライアントはこの URL をブラウザで開いてから MCP リクエストをリトライする
   - `Cache-Control: no-store` / `Pragma: no-cache` ヘッダーを付与し、OAuth state パラメーターがキャッシュされないよう対応
+
+### ドキュメント
+
+- README・`docs/configuration.md`・`docs/operations.md` に、実装済みだが未記載だった upstream OAuth 委任の内容を追記（[PR #174](https://github.com/scottlz0310/mcp-gateway/pull/174)）
+  - Key Features に `authorization_code` / `client_credentials` upstream OAuth 委任・proactive refresh・401 透過リトライを追加
+  - エンドポイント表に `/upstream/callback/{routeName}` と OIDC 系エンドポイント（`/jwks`・`/userinfo`・`/.well-known/openid-configuration`）を追加
+  - 重要パスファイル表に `upstream_clients.json` / `upstream_tokens.json` を追加
+  - `docs/operations.md` に upstream OAuth トラブルシュートセクションを新設（トークン取得失敗・リフレッシュ失敗・`upstream_clients.json` リセット）
+- アーキテクチャドキュメントを 5 本立て → 6 本立てに更新: コンポーネント表・データフロー図・設計原則に squirrel-notifier を追加（[PR #174](https://github.com/scottlz0310/mcp-gateway/pull/174)）
 
 ## [0.6.0] - 2026-06-17
 
