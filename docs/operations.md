@@ -351,7 +351,7 @@ export MCP_GATEWAY_KEY_PATH=/your/writable/path/gateway.key
 症状:
 
 - upstream OAuth ルートへのアクセスで、upstream 認可エンドポイントへのリダイレクトが繰り返される。
-- ログに `upstream OAuth: no token for user, redirecting to authorize` が出続ける。
+- ログに `upstream OAuth: token not found at proxy injection; request forwarded without Authorization` が出続ける。
 
 原因と対処:
 
@@ -368,16 +368,16 @@ export MCP_GATEWAY_KEY_PATH=/your/writable/path/gateway.key
 
 原因と対処:
 
-1. **恒久失敗（refresh_token 失効）**: upstream AS が refresh_token を失効させた（ユーザーがアクセスを取り消すなど）。該当ユーザーは upstream OAuth を再認可する必要がある（`upstream_tokens.json` から該当エントリを削除し、再アクセスで再フローを開始）。
+1. **恒久失敗（refresh_token 失効）**: upstream AS が refresh_token を失効させた（ユーザーがアクセスを取り消すなど）。この場合、ゲートウェイが自動的に `upstream_tokens.json` から該当エントリを削除する（`permanent failure, deleting token` ログ）。次回 upstream リソースにアクセスすると自動的に再認可フローが開始される。
 2. **一時的失敗**: ログに `upstream OAuth refresh: transient failure, keeping existing token` がある場合、次回リクエストで自動的に再試行される。
-3. **`expires_in` なしレスポンス**: upstream AS がトークンレスポンスに `expires_in` を返さない場合、proactive refresh が動作しない。ログに `upstream OAuth refresh: response missing expires_in` が出る場合は upstream AS の設定を確認する。
+3. **`expires_in` なしレスポンス**: upstream AS がトークンレスポンスに `expires_in` を返さない場合、proactive refresh が動作しない。ログに `upstream OAuth refresh: response missing expires_in, keeping existing token` が出る場合は upstream AS の設定を確認する。
 
 ### `upstream_clients.json` が壊れた / リセットしたい
 
 対処:
 
 ```bash
-# gateway を停止してファイルを削除する（次回起動時に DCR が再実行される）
+# gateway を停止してファイルを削除する（upstream OAuth ルートへの次回アクセス時に DCR が再実行される）
 rm {state-dir}/upstream_clients.json
 ```
 

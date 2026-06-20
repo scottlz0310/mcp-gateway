@@ -255,7 +255,7 @@ Important paths:
 | `/device_authorization` | POST | Device Authorization Grant endpoint. |
 | `/token` | POST | Authorization code, device code, and refresh token grants. |
 | `/register` | POST | Dynamic client registration. |
-| `/upstream/callback/{routeName}` | GET | Upstream OAuth authorization code callback (authorization_code flow only). |
+| `/upstream/callback/{routeName}` | GET | Upstream OAuth authorization code callback (authorization_code flow only; registered only when at least one upstream OAuth route is configured). |
 | `/setup` | GET/POST | First-run setup wizard, available in setup mode. |
 | `/health` | GET | Health check in normal mode. |
 | `/<prefix>` | ANY | Reverse proxy to the matched upstream. |

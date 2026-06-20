@@ -248,7 +248,7 @@ environment:
 | `/device_authorization` | POST | Device Authorization Grant endpoint。 |
 | `/token` | POST | authorization code、device code、refresh token grant。 |
 | `/register` | POST | Dynamic client registration。 |
-| `/upstream/callback/{routeName}` | GET | upstream OAuth authorization code callback（`authorization_code` フロー専用）。 |
+| `/upstream/callback/{routeName}` | GET | upstream OAuth authorization code callback（`authorization_code` フロー専用）。upstream OAuth 有効ルートが 1 つ以上ある場合のみ登録。 |
 | `/setup` | GET/POST | setup mode 中の初回起動 wizard。 |
 | `/health` | GET | 通常モードの health check。 |
 | `/<prefix>` | ANY | マッチした upstream への reverse proxy。 |
