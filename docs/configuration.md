@@ -334,6 +334,7 @@ MCP_GATEWAY_TRUSTED_PROXIES=127.0.0.1/32,10.0.0.0/8
 | パス | メソッド | 説明 |
 |------|---------|------|
 | `/.well-known/oauth-authorization-server` | GET | RFC 8414 authorization server メタデータ。 |
+| `/.well-known/openid-configuration` | GET | OIDC Discovery ドキュメント（gateway が OIDC Provider として動作する場合）。 |
 | `/.well-known/oauth-protected-resource` | GET | ゲートウェイ全体の RFC 9728 Protected Resource Metadata。ルートプレフィックスルートもカバー。 |
 | `/.well-known/oauth-protected-resource/<prefix>` | GET | 認証済み非ルートルートのルート単位 Protected Resource Metadata。例: `/.well-known/oauth-protected-resource/mcp/github`。 |
 | `/authorize` | GET | OAuth 2.0 authorization エンドポイント。 |
@@ -341,6 +342,9 @@ MCP_GATEWAY_TRUSTED_PROXIES=127.0.0.1/32,10.0.0.0/8
 | `/device_authorization` | POST | Device Authorization Grant エンドポイント（RFC 8628）。 |
 | `/token` | POST | authorization code + PKCE・device code・refresh token grant 用トークンエンドポイント。 |
 | `/register` | POST | RFC 7591 形式の動的クライアント登録。 |
+| `/jwks` | GET | JSON Web Key Set（gateway が OIDC Provider として動作する場合）。 |
+| `/userinfo` | GET | OIDC UserInfo エンドポイント。 |
+| `/upstream/callback/{routeName}` | GET | upstream OAuth の authorization code コールバック。`authorization_code` フロー有効ルートに自動登録。`client_credentials` フローでは未使用。 |
 | `/setup` | GET/POST | 初回起動セットアップウィザードエンドポイント（セットアップモード時のみ利用可能）。 |
 | `/health` | GET | 通常モードのヘルスチェック。 |
 | `/<prefix>` | ANY | マッチした upstream へのリバースプロキシ。`auth=none` が設定されていない限り Bearer 検証が行われます。 |
