@@ -252,7 +252,7 @@ func main() {
 		CacheTTL:             time.Duration(cfg.tokenCacheTTLMin) * time.Minute,
 		ExpiresIn:            time.Duration(cfg.tokenExpiresInSec) * time.Second,
 		TokenStorePath:       cfg.tokenStorePath,
-		ResourceAudienceMap:  buildResourceAudienceMap(routes),
+		ResourceAudienceMap:  buildResourceAudienceMap(routes, cfg.publicURL),
 		TokenAudienceStrict:  cfg.tokenAudienceStrict,
 		GitHubRefreshEnabled: cfg.githubRefreshEnabled,
 		OIDCPrivateKey:       oidcPrivateKey,
@@ -352,8 +352,8 @@ func main() {
 		if route.NoAuth {
 			wrapped = h
 		} else {
-			// routeResource is the RFC 9728 PRM identifier (URL form) — used
-			// only for discovery metadata, not for JWT aud validation.
+			// routeResource is the RFC 9728 PRM identifier (URL form) used both for
+			// discovery metadata and (via buildResourceAudienceMap) for JWT aud resolution.
 			routeResource := publicURL
 			if route.Prefix != "/" {
 				routeResource = publicURL + route.Prefix
@@ -576,17 +576,29 @@ func splitCSV(value string) []string {
 	return out
 }
 
-// buildResourceAudienceMap builds the map from route name → required_audience
+// buildResourceAudienceMap builds the map from resource identifier → required_audience
 // used by auth.Handler to resolve the resource parameter in /token requests.
+// Each authenticated route is registered under two keys:
+//   - route name (e.g. "cloudflare") for backward compatibility
+//   - full URL form (e.g. "http://127.0.0.1:8080/mcp/cloudflare") matching
+//     the resource value advertised by the per-route PRM endpoint, so that
+//     RFC 8707 compliant clients can pass the PRM resource directly (#175)
+//
 // The "mcp-gateway" default is always reachable via resource=mcp-gateway (or
 // by omitting the resource parameter entirely).
-func buildResourceAudienceMap(routes []router.Route) map[string]string {
-	m := make(map[string]string, len(routes))
+func buildResourceAudienceMap(routes []router.Route, publicURL string) map[string]string {
+	m := make(map[string]string, len(routes)*2)
 	for _, route := range routes {
 		if route.NoAuth {
 			continue
 		}
 		m[route.Name] = route.RequiredAudience
+		// Also register the full URL form advertised by the per-route PRM
+		// (/.well-known/oauth-protected-resource{prefix}) so that RFC 8707
+		// compliant clients can use the PRM resource value as the resource= parameter.
+		if route.Prefix != "/" {
+			m[strings.TrimRight(publicURL, "/")+route.Prefix] = route.RequiredAudience
+		}
 	}
 	return m
 }
