@@ -446,7 +446,8 @@ func (h *Handler) Authorize(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	h.store.SaveSession(state, redirectURI, codeChallenge, audience, nonce)
+	clientID := q.Get("client_id")
+	h.store.SaveSession(state, redirectURI, codeChallenge, audience, nonce, clientID)
 	h.auditSuccess("authorize", "authorization redirect created", http.StatusFound)
 
 	http.Redirect(w, r, h.provider.AuthorizeURL(state, codeChallenge), http.StatusFound)
@@ -611,7 +612,7 @@ func (h *Handler) tokenAuthCode(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("failed to create refresh token", "err", rtErr)
 		}
 		h.store.SaveRefreshTokenNonce(refreshToken, result.Nonce)
-		h.writeTokenResponse(w, gatewayToken, result.Scope, refreshToken, result.Subject, result.Nonce)
+		h.writeTokenResponse(w, gatewayToken, result.Scope, refreshToken, result.Subject, result.Nonce, result.ClientID)
 		h.auditSuccess("token_exchange", "authorization code exchange completed (builtin)", http.StatusOK)
 		return
 	}
@@ -629,7 +630,7 @@ func (h *Handler) tokenAuthCode(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("failed to create refresh token", "err", rtErr)
 	}
 	h.store.SaveRefreshTokenNonce(refreshToken, result.Nonce)
-	h.writeTokenResponse(w, result.AccessToken, result.Scope, refreshToken, result.Subject, result.Nonce)
+	h.writeTokenResponse(w, result.AccessToken, result.Scope, refreshToken, result.Subject, result.Nonce, result.ClientID)
 	h.auditSuccess("token_exchange", "authorization code exchange completed", http.StatusOK)
 }
 
@@ -701,7 +702,7 @@ func (h *Handler) tokenDeviceGrant(w http.ResponseWriter, r *http.Request) {
 		if rtErr != nil {
 			slog.Warn("failed to create refresh token (device)", "err", rtErr)
 		}
-		h.writeTokenResponse(w, token, completed.Scope, refreshToken, completed.Subject, "")
+		h.writeTokenResponse(w, token, completed.Scope, refreshToken, completed.Subject, "", completed.ClientID)
 		h.auditSuccess("token_exchange", "device token exchange completed", http.StatusOK)
 	default: // devicePending
 		// Enforce minimum polling interval (RFC 8628 §3.5).
@@ -719,7 +720,7 @@ func (h *Handler) tokenDeviceGrant(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *Handler) writeTokenResponse(w http.ResponseWriter, token, scope, refreshToken, subject, nonce string) {
+func (h *Handler) writeTokenResponse(w http.ResponseWriter, token, scope, refreshToken, subject, nonce, clientID string) {
 	expiresIn := max(int64(h.cfg.ExpiresIn/time.Second), 1)
 	resp := map[string]any{
 		"access_token": token,
@@ -733,7 +734,11 @@ func (h *Handler) writeTokenResponse(w http.ResponseWriter, token, scope, refres
 		resp["refresh_token"] = refreshToken
 	}
 	if subject != "" && (strings.Contains(scope, "openid") || h.provider.Name() == "oidc" || h.isBuiltinMode()) {
-		idToken, err := h.generateIDToken(h.cfg.BaseURL, subject, h.provider.ClientID(), nonce)
+		audClaim := clientID
+		if audClaim == "" {
+			audClaim = h.provider.ClientID()
+		}
+		idToken, err := h.generateIDToken(h.cfg.BaseURL, subject, audClaim, nonce)
 		if err == nil {
 			resp["id_token"] = idToken
 		} else {
@@ -841,7 +846,7 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.store.SaveRefreshTokenNonce(newRT, nonce)
-		h.writeTokenResponse(w, newGatewayToken, "", newRT, sub, nonce)
+		h.writeTokenResponse(w, newGatewayToken, "", newRT, sub, nonce, r.FormValue("client_id"))
 		h.auditSuccess("refresh", "refresh token exchange completed (builtin)", http.StatusOK)
 		return
 	}
@@ -882,7 +887,7 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	h.store.SaveRefreshTokenNonce(newRT, nonce)
 
-	h.writeTokenResponse(w, accessToken, "", newRT, id.Subject, nonce)
+	h.writeTokenResponse(w, accessToken, "", newRT, id.Subject, nonce, r.FormValue("client_id"))
 	h.auditSuccess("refresh", "refresh token exchange completed", http.StatusOK)
 }
 
@@ -914,7 +919,8 @@ func (h *Handler) DeviceAuthorize(w http.ResponseWriter, r *http.Request) {
 
 	const deviceCodeTTL = 15 * time.Minute
 	expiresAt := time.Now().Add(deviceCodeTTL)
-	internalCode, err := h.store.CreateDevice(userCode, expiresAt, audience)
+	deviceClientID := r.FormValue("client_id")
+	internalCode, err := h.store.CreateDevice(userCode, expiresAt, audience, deviceClientID)
 	if err != nil {
 		h.auditFailure("authorize", "store_error", "device authorization session creation failed", err, http.StatusInternalServerError, "")
 		slog.Error("device session creation failed", "err", err)
@@ -987,7 +993,7 @@ func (h *Handler) ActivateSubmit(w http.ResponseWriter, r *http.Request) {
 
 	state := generateDeviceState(sess.InternalCode)
 	deviceCallbackURI := h.cfg.BaseURL + "/device_callback"
-	h.store.SaveSession(state, deviceCallbackURI, "", sess.Audience, "")
+	h.store.SaveSession(state, deviceCallbackURI, "", sess.Audience, "", sess.ClientID)
 
 	authorizeURL := h.cfg.BaseURL + "/authorize?response_type=code" +
 		"&client_id=" + url.QueryEscape(h.provider.ClientID()) +

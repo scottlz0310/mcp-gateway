@@ -10,7 +10,7 @@ import (
 func TestStoreSessionLifecycle(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 
-	s.SaveSession("state1", "http://localhost/cb", "", "https://gw.example/mcp", "")
+	s.SaveSession("state1", "http://localhost/cb", "", "https://gw.example/mcp", "", "")
 	if !s.HasSession("state1") {
 		t.Fatal("expected session to exist")
 	}
@@ -21,7 +21,7 @@ func TestStoreSessionLifecycle(t *testing.T) {
 
 func TestStoreCompleteCallback(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
-	s.SaveSession("state2", "http://localhost/cb", "", "https://gw.example/mcp", "")
+	s.SaveSession("state2", "http://localhost/cb", "", "https://gw.example/mcp", "", "")
 
 	code, err := s.CompleteCallback("state2", "token123", "repo,user", "", time.Time{}, "user123")
 	if err != nil {
@@ -64,7 +64,7 @@ func TestStoreCompleteCallbackUnknownState(t *testing.T) {
 
 func TestStoreExchangeCodeOneTimeUse(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
-	s.SaveSession("state3", "http://localhost/cb", "", "https://gw.example/mcp", "")
+	s.SaveSession("state3", "http://localhost/cb", "", "https://gw.example/mcp", "", "")
 
 	code, _ := s.CompleteCallback("state3", "tok", "", "", time.Time{}, "user123")
 	result, err := s.ExchangeCode(code, "http://localhost/cb", "")
@@ -88,7 +88,7 @@ func TestStoreExchangeCodeOneTimeUse(t *testing.T) {
 
 func TestStoreExchangeCodeRedirectURIMismatch(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
-	s.SaveSession("state4", "http://localhost/cb", "", "https://gw.example/mcp", "")
+	s.SaveSession("state4", "http://localhost/cb", "", "https://gw.example/mcp", "", "")
 
 	code, _ := s.CompleteCallback("state4", "tok", "", "", time.Time{}, "user123")
 	if _, err := s.ExchangeCode(code, "http://localhost/other", ""); err == nil {
@@ -102,7 +102,7 @@ func TestStorePKCE(t *testing.T) {
 	challenge := "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
 
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
-	s.SaveSession("state5", "http://localhost/cb", challenge, "https://gw.example/mcp", "")
+	s.SaveSession("state5", "http://localhost/cb", challenge, "https://gw.example/mcp", "", "")
 	code, _ := s.CompleteCallback("state5", "tok", "", "", time.Time{}, "user123")
 
 	// Wrong verifier: code is NOT consumed on PKCE failure so we can retry.
@@ -121,7 +121,7 @@ func TestStorePKCEInvalidVerifierLength(t *testing.T) {
 	challenge := "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
 
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
-	s.SaveSession("state6", "http://localhost/cb", challenge, "https://gw.example/mcp", "")
+	s.SaveSession("state6", "http://localhost/cb", challenge, "https://gw.example/mcp", "", "")
 	code, _ := s.CompleteCallback("state6", "tok", "", "", time.Time{}, "user123")
 
 	if _, err := s.ExchangeCode(code, "http://localhost/cb", "tooshort"); err == nil {
@@ -133,7 +133,7 @@ func TestStoreDeviceLifecycle(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	expiresAt := time.Now().Add(15 * time.Minute)
 
-	code, err := s.CreateDevice("ABCD-1234", expiresAt, "mcp-server")
+	code, err := s.CreateDevice("ABCD-1234", expiresAt, "mcp-server", "")
 	if err != nil {
 		t.Fatalf("CreateDevice: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestStoreDeviceDeny(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	expiresAt := time.Now().Add(15 * time.Minute)
 
-	code, err := s.CreateDevice("WXYZ-5678", expiresAt, "mcp-gateway")
+	code, err := s.CreateDevice("WXYZ-5678", expiresAt, "mcp-gateway", "")
 	if err != nil {
 		t.Fatalf("CreateDevice: %v", err)
 	}
@@ -506,7 +506,7 @@ func TestCheckAndAdvancePollIntervalEnforcesInterval(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	expiresAt := time.Now().Add(15 * time.Minute)
 
-	code, err := s.CreateDevice("IJKL-0002", expiresAt, "mcp-gateway")
+	code, err := s.CreateDevice("IJKL-0002", expiresAt, "mcp-gateway", "")
 	if err != nil {
 		t.Fatalf("CreateDevice: %v", err)
 	}
@@ -542,7 +542,7 @@ func TestIncreaseDeviceInterval(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	expiresAt := time.Now().Add(15 * time.Minute)
 
-	code, err := s.CreateDevice("MNOP-3333", expiresAt, "mcp-gateway")
+	code, err := s.CreateDevice("MNOP-3333", expiresAt, "mcp-gateway", "")
 	if err != nil {
 		t.Fatalf("CreateDevice: %v", err)
 	}
@@ -560,7 +560,7 @@ func TestFindDeviceByUserCode(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	expiresAt := time.Now().Add(15 * time.Minute)
 
-	_, err := s.CreateDevice("ABCD-5678", expiresAt, "mcp-gateway")
+	_, err := s.CreateDevice("ABCD-5678", expiresAt, "mcp-gateway", "")
 	if err != nil {
 		t.Fatalf("CreateDevice: %v", err)
 	}
@@ -590,7 +590,7 @@ func TestConsumeApprovedDevicePreventsDoubleIssuance(t *testing.T) {
 	s := NewStore(10*time.Minute, 5*time.Minute, NewMemTokenStore())
 	expiresAt := time.Now().Add(15 * time.Minute)
 
-	code, err := s.CreateDevice("QRST-1111", expiresAt, "mcp-gateway")
+	code, err := s.CreateDevice("QRST-1111", expiresAt, "mcp-gateway", "")
 	if err != nil {
 		t.Fatalf("CreateDevice: %v", err)
 	}
