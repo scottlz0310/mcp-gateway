@@ -339,8 +339,8 @@ func (h *Handler) Discovery(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(doc)
 }
 
-// Register implements RFC 7591 Dynamic Client Registration (pseudo).
-// Always returns the configured upstream GitHub App client_id.
+// Register implements RFC 7591 Dynamic Client Registration.
+// Issues a unique client_id per registration.
 func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 
@@ -356,8 +356,14 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	clientID, err := generateCode()
+	if err != nil {
+		jsonError(w, "server_error", "failed to generate client_id", http.StatusInternalServerError)
+		return
+	}
+
 	resp := map[string]any{
-		"client_id":                  h.provider.ClientID(),
+		"client_id":                  clientID,
 		"client_id_issued_at":        time.Now().Unix(),
 		"client_secret_expires_at":   0,
 		"token_endpoint_auth_method": "none",

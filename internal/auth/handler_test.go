@@ -163,24 +163,36 @@ func TestRouteProtectedResourceMetadata(t *testing.T) {
 func TestRegisterReturnsClientID(t *testing.T) {
 	h := newTestHandler(t)
 	body := `{"redirect_uris":["http://localhost/cb"],"client_name":"test"}`
-	r := httptest.NewRequest(http.MethodPost, "/register", strings.NewReader(body))
-	r.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
 
-	h.Register(w, r)
+	register := func() map[string]any {
+		r := httptest.NewRequest(http.MethodPost, "/register", strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		h.Register(w, r)
+		if w.Code != http.StatusCreated {
+			t.Fatalf("status: got %d, want %d", w.Code, http.StatusCreated)
+		}
+		var resp map[string]any
+		if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+			t.Fatalf("decoding response: %v", err)
+		}
+		return resp
+	}
 
-	if w.Code != http.StatusCreated {
-		t.Errorf("status: got %d, want %d", w.Code, http.StatusCreated)
+	resp1 := register()
+	resp2 := register()
+
+	id1, _ := resp1["client_id"].(string)
+	id2, _ := resp2["client_id"].(string)
+
+	if id1 == "" {
+		t.Error("client_id must not be empty")
 	}
-	var resp map[string]any
-	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decoding response: %v", err)
+	if id1 == id2 {
+		t.Errorf("client_id must be unique per registration, got same value %q twice", id1)
 	}
-	if resp["client_id"] != "test-client-id" {
-		t.Errorf("client_id: got %v", resp["client_id"])
-	}
-	if resp["token_endpoint_auth_method"] != "none" {
-		t.Errorf("token_endpoint_auth_method: got %v", resp["token_endpoint_auth_method"])
+	if resp1["token_endpoint_auth_method"] != "none" {
+		t.Errorf("token_endpoint_auth_method: got %v", resp1["token_endpoint_auth_method"])
 	}
 }
 
