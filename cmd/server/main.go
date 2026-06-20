@@ -252,7 +252,7 @@ func main() {
 		CacheTTL:             time.Duration(cfg.tokenCacheTTLMin) * time.Minute,
 		ExpiresIn:            time.Duration(cfg.tokenExpiresInSec) * time.Second,
 		TokenStorePath:       cfg.tokenStorePath,
-		ResourceAudienceMap:  buildResourceAudienceMap(routes),
+		ResourceAudienceMap:  buildResourceAudienceMap(routes, cfg.publicURL),
 		TokenAudienceStrict:  cfg.tokenAudienceStrict,
 		GitHubRefreshEnabled: cfg.githubRefreshEnabled,
 		OIDCPrivateKey:       oidcPrivateKey,
@@ -352,8 +352,8 @@ func main() {
 		if route.NoAuth {
 			wrapped = h
 		} else {
-			// routeResource is the RFC 9728 PRM identifier (URL form) — used
-			// only for discovery metadata, not for JWT aud validation.
+			// routeResource is the RFC 9728 PRM identifier (URL form) used both for
+			// discovery metadata and (via buildResourceAudienceMap) for JWT aud resolution.
 			routeResource := publicURL
 			if route.Prefix != "/" {
 				routeResource = publicURL + route.Prefix
@@ -576,17 +576,40 @@ func splitCSV(value string) []string {
 	return out
 }
 
-// buildResourceAudienceMap builds the map from route name → required_audience
+// buildResourceAudienceMap builds the map from resource identifier → required_audience
 // used by auth.Handler to resolve the resource parameter in /token requests.
-// The "mcp-gateway" default is always reachable via resource=mcp-gateway (or
-// by omitting the resource parameter entirely).
-func buildResourceAudienceMap(routes []router.Route) map[string]string {
-	m := make(map[string]string, len(routes))
+//
+// Three families of keys are registered:
+//   - publicURL (base, no path) → "mcp-gateway" always; overridden by a "/" prefix
+//     route's RequiredAudience when one is present. Covers the gateway-wide PRM
+//     (/.well-known/oauth-protected-resource, no path suffix) that RFC 8707 clients
+//     use to discover resource=<publicURL>.
+//   - route name (e.g. "cloudflare") → route.RequiredAudience, for backward
+//     compatibility with clients that send the short name as the resource.
+//   - publicURL+prefix (e.g. "http://127.0.0.1:8080/mcp/cloudflare") →
+//     route.RequiredAudience, for RFC 8707 clients that use the per-route PRM
+//     resource value directly (#175).
+func buildResourceAudienceMap(routes []router.Route, publicURL string) map[string]string {
+	base := strings.TrimRight(publicURL, "/")
+	m := make(map[string]string, len(routes)*2+1)
+	// Pre-register the gateway-wide resource so resource=<publicURL> always resolves,
+	// even when no "/" prefix route is explicitly configured.
+	m[base] = "mcp-gateway"
 	for _, route := range routes {
 		if route.NoAuth {
 			continue
 		}
 		m[route.Name] = route.RequiredAudience
+		if route.Prefix == "/" {
+			// "/" prefix: PRM resource is publicURL; override the default entry
+			// with the route's actual required audience.
+			m[base] = route.RequiredAudience
+		} else {
+			// Non-root prefix: also register the full URL form (publicURL+prefix)
+			// as advertised by the per-route PRM, so RFC 8707 clients can pass
+			// the PRM resource value directly as resource= (#175).
+			m[base+route.Prefix] = route.RequiredAudience
+		}
 	}
 	return m
 }
