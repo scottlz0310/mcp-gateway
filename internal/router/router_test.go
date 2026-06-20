@@ -801,3 +801,152 @@ func TestParseFromConfig_UpstreamOAuthWithAuthRequiredIsValid(t *testing.T) {
 		t.Errorf("expected valid route with upstream_oauth=auto")
 	}
 }
+
+// upstream_oauth_grant テスト群
+
+func TestParseRoutesUpstreamOAuthGrantDefault(t *testing.T) {
+	// upstream_oauth_grant を省略した場合のデフォルトは "authorization_code"
+	env := []string{"ROUTE_CF=/mcp/cf|https://mcp.cloudflare.com/mcp|upstream_oauth=auto"}
+	routes, err := parseRoutes(env)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if routes[0].UpstreamOAuthGrant != "authorization_code" {
+		t.Errorf("UpstreamOAuthGrant: got %q, want %q", routes[0].UpstreamOAuthGrant, "authorization_code")
+	}
+}
+
+func TestParseRoutesUpstreamOAuthGrantAuthCode(t *testing.T) {
+	env := []string{"ROUTE_CF=/mcp/cf|https://mcp.cloudflare.com/mcp|upstream_oauth=auto|upstream_oauth_grant=authorization_code"}
+	routes, err := parseRoutes(env)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if routes[0].UpstreamOAuthGrant != "authorization_code" {
+		t.Errorf("UpstreamOAuthGrant: got %q, want %q", routes[0].UpstreamOAuthGrant, "authorization_code")
+	}
+}
+
+func TestParseRoutesUpstreamOAuthGrantClientCredentials(t *testing.T) {
+	env := []string{"ROUTE_CF=/mcp/cf|https://mcp.cloudflare.com/mcp|upstream_oauth=auto|upstream_oauth_grant=client_credentials"}
+	routes, err := parseRoutes(env)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if routes[0].UpstreamOAuthGrant != "client_credentials" {
+		t.Errorf("UpstreamOAuthGrant: got %q, want %q", routes[0].UpstreamOAuthGrant, "client_credentials")
+	}
+}
+
+func TestParseRoutesUpstreamOAuthGrantInvalidRejected(t *testing.T) {
+	env := []string{"ROUTE_CF=/mcp/cf|https://mcp.cloudflare.com/mcp|upstream_oauth=auto|upstream_oauth_grant=implicit"}
+	_, err := parseRoutes(env)
+	if err == nil {
+		t.Fatal("expected error for invalid upstream_oauth_grant value")
+	}
+}
+
+func TestParseRoutesUpstreamOAuthGrantEmptyRejected(t *testing.T) {
+	env := []string{"ROUTE_CF=/mcp/cf|https://mcp.cloudflare.com/mcp|upstream_oauth=auto|upstream_oauth_grant="}
+	_, err := parseRoutes(env)
+	if err == nil {
+		t.Fatal("expected error for empty upstream_oauth_grant value")
+	}
+}
+
+func TestParseRoutesUpstreamOAuthGrantWithoutOAuthRejected(t *testing.T) {
+	env := []string{"ROUTE_CF=/mcp/cf|https://mcp.cloudflare.com/mcp|upstream_oauth_grant=client_credentials"}
+	_, err := parseRoutes(env)
+	if err == nil {
+		t.Fatal("expected error for upstream_oauth_grant without upstream_oauth")
+	}
+}
+
+func TestParseRoutesUpstreamOAuthGrantNoOAuthRouteIsEmpty(t *testing.T) {
+	// upstream_oauth が設定されていないルートは UpstreamOAuthGrant が空文字列
+	env := []string{"ROUTE_CF=/mcp/cf|https://mcp.cloudflare.com/mcp"}
+	routes, err := parseRoutes(env)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if routes[0].UpstreamOAuthGrant != "" {
+		t.Errorf("UpstreamOAuthGrant should be empty when upstream_oauth is not set, got %q", routes[0].UpstreamOAuthGrant)
+	}
+}
+
+// ParseFromConfig upstream_oauth_grant テスト群
+
+func TestParseFromConfig_UpstreamOAuthGrantDefault(t *testing.T) {
+	cfgRoutes := []appconfig.RouteConfig{
+		{Name: "cf", Prefix: "/mcp/cf", Upstream: "https://mcp.cloudflare.com/mcp", UpstreamOAuth: strPtr("auto")},
+	}
+	routes, err := ParseFromConfig(cfgRoutes)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if routes[0].UpstreamOAuthGrant != "authorization_code" {
+		t.Errorf("UpstreamOAuthGrant default: got %q, want %q", routes[0].UpstreamOAuthGrant, "authorization_code")
+	}
+}
+
+func TestParseFromConfig_UpstreamOAuthGrantClientCredentials(t *testing.T) {
+	cfgRoutes := []appconfig.RouteConfig{
+		{Name: "cf", Prefix: "/mcp/cf", Upstream: "https://mcp.cloudflare.com/mcp",
+			UpstreamOAuth: strPtr("auto"), UpstreamOAuthGrant: strPtr("client_credentials")},
+	}
+	routes, err := ParseFromConfig(cfgRoutes)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if routes[0].UpstreamOAuthGrant != "client_credentials" {
+		t.Errorf("UpstreamOAuthGrant: got %q, want %q", routes[0].UpstreamOAuthGrant, "client_credentials")
+	}
+}
+
+func TestParseFromConfig_UpstreamOAuthGrantInvalidRejected(t *testing.T) {
+	cfgRoutes := []appconfig.RouteConfig{
+		{Name: "cf", Prefix: "/mcp/cf", Upstream: "https://mcp.cloudflare.com/mcp",
+			UpstreamOAuth: strPtr("auto"), UpstreamOAuthGrant: strPtr("implicit")},
+	}
+	_, err := ParseFromConfig(cfgRoutes)
+	if err == nil {
+		t.Fatal("expected error for invalid upstream_oauth_grant value")
+	}
+}
+
+func TestParseFromConfig_UpstreamOAuthGrantEmptyStringRejected(t *testing.T) {
+	cfgRoutes := []appconfig.RouteConfig{
+		{Name: "cf", Prefix: "/mcp/cf", Upstream: "https://mcp.cloudflare.com/mcp",
+			UpstreamOAuth: strPtr("auto"), UpstreamOAuthGrant: strPtr("")},
+	}
+	_, err := ParseFromConfig(cfgRoutes)
+	if err == nil {
+		t.Fatal("expected error for explicit empty upstream_oauth_grant value")
+	}
+}
+
+func TestParseFromConfig_UpstreamOAuthGrantWithoutOAuthRejected(t *testing.T) {
+	cfgRoutes := []appconfig.RouteConfig{
+		{Name: "cf", Prefix: "/mcp/cf", Upstream: "https://mcp.cloudflare.com/mcp",
+			UpstreamOAuthGrant: strPtr("client_credentials")},
+	}
+	_, err := ParseFromConfig(cfgRoutes)
+	if err == nil {
+		t.Fatal("expected error for upstream_oauth_grant without upstream_oauth")
+	}
+}
+
+func TestParseFromConfig_UpstreamOAuthGrantNilTreatedAsAbsent(t *testing.T) {
+	cfgRoutes := []appconfig.RouteConfig{
+		{Name: "cf", Prefix: "/mcp/cf", Upstream: "https://mcp.cloudflare.com/mcp",
+			UpstreamOAuth: strPtr("auto"), UpstreamOAuthGrant: nil},
+	}
+	routes, err := ParseFromConfig(cfgRoutes)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// nil → absent → default "authorization_code"
+	if routes[0].UpstreamOAuthGrant != "authorization_code" {
+		t.Errorf("UpstreamOAuthGrant for nil input: got %q, want %q", routes[0].UpstreamOAuthGrant, "authorization_code")
+	}
+}

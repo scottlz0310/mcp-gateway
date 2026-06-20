@@ -42,6 +42,10 @@ type Route struct {
 	// UpstreamOAuthScope is the space-separated OAuth scope string requested from
 	// the upstream authorization server.
 	UpstreamOAuthScope string
+	// UpstreamOAuthGrant is the OAuth 2.0 grant type for upstream token acquisition.
+	// "authorization_code" (interactive, default) or "client_credentials" (non-interactive).
+	// Only meaningful when UpstreamOAuth is non-empty.
+	UpstreamOAuthGrant string
 }
 
 // ParseEnv reads ROUTE_<NAME>=<prefix>|<upstream_url>[|opt=val...] environment
@@ -183,6 +187,29 @@ func parseRoutes(env []string) ([]Route, error) {
 			delete(options, "upstream_oauth_scope")
 		}
 
+		// upstream_oauth_grant: OAuth 2.0 grant type for upstream token acquisition.
+		// Valid values: "authorization_code" (default) or "client_credentials".
+		// Requires upstream_oauth to be set.
+		var upstreamOAuthGrant string
+		if grantVal, ok := options["upstream_oauth_grant"]; ok {
+			if upstreamOAuth == "" {
+				return nil, fmt.Errorf("%s: upstream_oauth_grant requires upstream_oauth to be set", key)
+			}
+			grantVal = strings.TrimSpace(grantVal)
+			switch grantVal {
+			case "authorization_code", "client_credentials":
+				upstreamOAuthGrant = grantVal
+			case "":
+				return nil, fmt.Errorf("%s: upstream_oauth_grant value must not be empty", key)
+			default:
+				return nil, fmt.Errorf("%s: upstream_oauth_grant must be \"authorization_code\" or \"client_credentials\" (got %q)", key, grantVal)
+			}
+			delete(options, "upstream_oauth_grant")
+		}
+		if upstreamOAuth != "" && upstreamOAuthGrant == "" {
+			upstreamOAuthGrant = "authorization_code"
+		}
+
 		// Reject any unrecognised option keys.
 		if len(options) > 0 {
 			unknown := make([]string, 0, len(options))
@@ -229,6 +256,7 @@ func parseRoutes(env []string) ([]Route, error) {
 			RequiredAudience:       requiredAudience,
 			UpstreamOAuth:          upstreamOAuth,
 			UpstreamOAuthScope:     upstreamOAuthScope,
+			UpstreamOAuthGrant:     upstreamOAuthGrant,
 		})
 	}
 	// Longest prefix first for correct matching order.
@@ -337,6 +365,26 @@ func ParseFromConfig(cfgRoutes []appconfig.RouteConfig) ([]Route, error) {
 			upstreamOAuthScope = strings.ReplaceAll(upstreamOAuthScope, ",", " ")
 			upstreamOAuthScope = strings.Join(strings.Fields(upstreamOAuthScope), " ")
 		}
+		// upstream_oauth_grant: OAuth 2.0 grant type for upstream token acquisition.
+		// RouteConfig.UpstreamOAuthGrant is *string for the same presence-vs-empty reason.
+		var upstreamOAuthGrant string
+		if r.UpstreamOAuthGrant != nil {
+			if upstreamOAuth == "" {
+				return nil, fmt.Errorf("route %q: upstream_oauth_grant requires upstream_oauth to be set", name)
+			}
+			upstreamOAuthGrant = strings.TrimSpace(*r.UpstreamOAuthGrant)
+			switch upstreamOAuthGrant {
+			case "authorization_code", "client_credentials":
+				// valid
+			case "":
+				return nil, fmt.Errorf("route %q: upstream_oauth_grant value must not be empty", name)
+			default:
+				return nil, fmt.Errorf("route %q: upstream_oauth_grant must be \"authorization_code\" or \"client_credentials\" (got %q)", name, upstreamOAuthGrant)
+			}
+		}
+		if upstreamOAuth != "" && upstreamOAuthGrant == "" {
+			upstreamOAuthGrant = "authorization_code"
+		}
 		seen[prefix] = struct{}{}
 		routes = append(routes, Route{
 			Name:                   name,
@@ -347,6 +395,7 @@ func ParseFromConfig(cfgRoutes []appconfig.RouteConfig) ([]Route, error) {
 			RequiredAudience:       requiredAudience,
 			UpstreamOAuth:          upstreamOAuth,
 			UpstreamOAuthScope:     upstreamOAuthScope,
+			UpstreamOAuthGrant:     upstreamOAuthGrant,
 		})
 	}
 	sort.Slice(routes, func(i, j int) bool {

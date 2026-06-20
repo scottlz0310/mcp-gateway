@@ -124,6 +124,7 @@ func (h *CallbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	expiresAt := time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
 
 	if err := h.tokenStore.Save(state.Subject, routeName, auth.UpstreamTokenRecord{
+		Grant:        "authorization_code",
 		Issuer:       rec.Issuer,
 		AccessToken:  tokenResp.AccessToken,
 		RefreshToken: tokenResp.RefreshToken,

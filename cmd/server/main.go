@@ -385,6 +385,7 @@ func main() {
 					route.Name,
 					route.UpstreamOAuth,
 					route.UpstreamOAuthScope,
+					route.UpstreamOAuthGrant,
 					route.Upstream.String(),
 					upstreamManager,
 					upstreamStateStore,
