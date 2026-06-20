@@ -125,7 +125,10 @@ func (m *memUpstreamTokenStore) Sweep() error {
 	defer m.mu.Unlock()
 	now := time.Now()
 	for k, v := range m.entries {
-		if !v.ExpiresAt.IsZero() && now.After(v.ExpiresAt) {
+		// Keep records that have a refresh_token: the access token may be expired
+		// but RefreshAfter401 still needs the refresh_token to obtain a new one.
+		// Records without a refresh_token are swept when the access token expires.
+		if !v.ExpiresAt.IsZero() && now.After(v.ExpiresAt) && v.RefreshToken == "" {
 			delete(m.entries, k)
 		}
 	}
@@ -296,7 +299,9 @@ func (s *fileUpstreamTokenStore) Sweep() error {
 func (s *fileUpstreamTokenStore) sweepLocked() bool {
 	changed := false
 	for k, v := range s.entries {
-		if v.expired() {
+		// Keep records that have a refresh_token even after the access token expires.
+		// RefreshAfter401 needs the refresh_token to renew the access token.
+		if v.expired() && v.RefreshToken == "" {
 			delete(s.entries, k)
 			changed = true
 		}
