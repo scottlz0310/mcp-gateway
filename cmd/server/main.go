@@ -578,26 +578,37 @@ func splitCSV(value string) []string {
 
 // buildResourceAudienceMap builds the map from resource identifier → required_audience
 // used by auth.Handler to resolve the resource parameter in /token requests.
-// Each authenticated route is registered under two keys:
-//   - route name (e.g. "cloudflare") for backward compatibility
-//   - full URL form (e.g. "http://127.0.0.1:8080/mcp/cloudflare") matching
-//     the resource value advertised by the per-route PRM endpoint, so that
-//     RFC 8707 compliant clients can pass the PRM resource directly (#175)
 //
-// The "mcp-gateway" default is always reachable via resource=mcp-gateway (or
-// by omitting the resource parameter entirely).
+// Three families of keys are registered:
+//   - publicURL (base, no path) → "mcp-gateway" always; overridden by a "/" prefix
+//     route's RequiredAudience when one is present. Covers the gateway-wide PRM
+//     (/.well-known/oauth-protected-resource, no path suffix) that RFC 8707 clients
+//     use to discover resource=<publicURL>.
+//   - route name (e.g. "cloudflare") → route.RequiredAudience, for backward
+//     compatibility with clients that send the short name as the resource.
+//   - publicURL+prefix (e.g. "http://127.0.0.1:8080/mcp/cloudflare") →
+//     route.RequiredAudience, for RFC 8707 clients that use the per-route PRM
+//     resource value directly (#175).
 func buildResourceAudienceMap(routes []router.Route, publicURL string) map[string]string {
-	m := make(map[string]string, len(routes)*2)
+	base := strings.TrimRight(publicURL, "/")
+	m := make(map[string]string, len(routes)*2+1)
+	// Pre-register the gateway-wide resource so resource=<publicURL> always resolves,
+	// even when no "/" prefix route is explicitly configured.
+	m[base] = "mcp-gateway"
 	for _, route := range routes {
 		if route.NoAuth {
 			continue
 		}
 		m[route.Name] = route.RequiredAudience
-		// Also register the full URL form advertised by the per-route PRM
-		// (/.well-known/oauth-protected-resource{prefix}) so that RFC 8707
-		// compliant clients can use the PRM resource value as the resource= parameter.
-		if route.Prefix != "/" {
-			m[strings.TrimRight(publicURL, "/")+route.Prefix] = route.RequiredAudience
+		if route.Prefix == "/" {
+			// "/" prefix: PRM resource is publicURL; override the default entry
+			// with the route's actual required audience.
+			m[base] = route.RequiredAudience
+		} else {
+			// Non-root prefix: also register the full URL form (publicURL+prefix)
+			// as advertised by the per-route PRM, so RFC 8707 clients can pass
+			// the PRM resource value directly as resource= (#175).
+			m[base+route.Prefix] = route.RequiredAudience
 		}
 	}
 	return m
