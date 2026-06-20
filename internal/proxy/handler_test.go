@@ -575,6 +575,9 @@ func (s *deleteErrStore) Save(subject, routeName string, rec auth.UpstreamTokenR
 func (s *deleteErrStore) Lookup(subject, routeName string) (auth.UpstreamTokenRecord, bool) {
 	return s.inner.Lookup(subject, routeName)
 }
+func (s *deleteErrStore) LookupForRefresh(subject, routeName string) (auth.UpstreamTokenRecord, bool) {
+	return s.inner.LookupForRefresh(subject, routeName)
+}
 func (s *deleteErrStore) Delete(_, _ string) error { return s.deleteErr }
 func (s *deleteErrStore) Sweep() error             { return s.inner.Sweep() }
 

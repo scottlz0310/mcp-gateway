@@ -114,6 +114,63 @@ func upstreamTokenStoreContract(t *testing.T, newStore func(t *testing.T) Upstre
 		}
 	})
 
+	t.Run("LookupForRefresh returns expired record", func(t *testing.T) {
+		s := newStore(t)
+		rec := UpstreamTokenRecord{
+			Issuer:       "https://as.example.com",
+			AccessToken:  "at-expired-lfr",
+			RefreshToken: "rt-valid",
+			ExpiresAt:    time.Now().Add(-time.Minute),
+		}
+		if err := s.Save("user-lfr", "route-lfr", rec); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		if _, ok := s.Lookup("user-lfr", "route-lfr"); ok {
+			t.Fatal("Lookup: expired record must return false")
+		}
+		got, ok := s.LookupForRefresh("user-lfr", "route-lfr")
+		if !ok {
+			t.Fatal("LookupForRefresh: expired record must return true")
+		}
+		if got.RefreshToken != rec.RefreshToken {
+			t.Errorf("RefreshToken: got %q, want %q", got.RefreshToken, rec.RefreshToken)
+		}
+		if got.AccessToken != rec.AccessToken {
+			t.Errorf("AccessToken: got %q, want %q", got.AccessToken, rec.AccessToken)
+		}
+	})
+
+	t.Run("LookupForRefresh absent returns false", func(t *testing.T) {
+		s := newStore(t)
+		_, ok := s.LookupForRefresh("nobody", "no-route")
+		if ok {
+			t.Fatal("LookupForRefresh: expected not-found for absent key, got found")
+		}
+	})
+
+	t.Run("Sweep retains expired record with refresh_token", func(t *testing.T) {
+		s := newStore(t)
+		rec := UpstreamTokenRecord{
+			Issuer:       "https://as.example.com",
+			AccessToken:  "at-expired-sweep",
+			RefreshToken: "rt-keep",
+			ExpiresAt:    time.Now().Add(-time.Minute),
+		}
+		if err := s.Save("user-swp", "route-swp", rec); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		if err := s.Sweep(); err != nil {
+			t.Fatalf("Sweep: %v", err)
+		}
+		got, ok := s.LookupForRefresh("user-swp", "route-swp")
+		if !ok {
+			t.Fatal("LookupForRefresh: expired record with refresh_token must survive Sweep")
+		}
+		if got.RefreshToken != rec.RefreshToken {
+			t.Errorf("RefreshToken after Sweep: got %q, want %q", got.RefreshToken, rec.RefreshToken)
+		}
+	})
+
 	t.Run("Delete removes entry", func(t *testing.T) {
 		s := newStore(t)
 		rec := UpstreamTokenRecord{
@@ -248,6 +305,55 @@ func TestFileUpstreamTokenStore_StartupSweep(t *testing.T) {
 	}
 	if _, ok := s2.Lookup("user-s2", "route-s"); !ok {
 		t.Error("live entry must survive startup sweep")
+	}
+}
+
+func TestFileUpstreamTokenStore_StartupSweepRetainsRecordWithRefreshToken(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "upstream_tokens.json")
+
+	s1, err := NewFileUpstreamTokenStore(path)
+	if err != nil {
+		t.Fatalf("NewFileUpstreamTokenStore (first): %v", err)
+	}
+	// Expired access token but valid refresh_token — must survive startup sweep.
+	withRefresh := UpstreamTokenRecord{
+		Issuer:       "https://as.example.com",
+		AccessToken:  "at-expired-with-rt",
+		RefreshToken: "rt-keep",
+		ExpiresAt:    time.Now().Add(-time.Minute),
+	}
+	// Expired access token with no refresh_token — must be swept.
+	withoutRefresh := UpstreamTokenRecord{
+		Issuer:      "https://as.example.com",
+		AccessToken: "at-expired-no-rt",
+		ExpiresAt:   time.Now().Add(-time.Minute),
+	}
+	if err := s1.Save("user-rt", "route-rt", withRefresh); err != nil {
+		t.Fatalf("Save withRefresh: %v", err)
+	}
+	if err := s1.Save("user-nort", "route-rt", withoutRefresh); err != nil {
+		t.Fatalf("Save withoutRefresh: %v", err)
+	}
+
+	// Simulate restart: startup sweep runs in NewFileUpstreamTokenStore.
+	s2, err := NewFileUpstreamTokenStore(path)
+	if err != nil {
+		t.Fatalf("NewFileUpstreamTokenStore (second): %v", err)
+	}
+
+	// Record with refresh_token must survive and be accessible via LookupForRefresh.
+	got, ok := s2.LookupForRefresh("user-rt", "route-rt")
+	if !ok {
+		t.Fatal("LookupForRefresh: expired record with refresh_token must survive startup sweep")
+	}
+	if got.RefreshToken != withRefresh.RefreshToken {
+		t.Errorf("RefreshToken: got %q, want %q", got.RefreshToken, withRefresh.RefreshToken)
+	}
+
+	// Record without refresh_token must be swept.
+	if _, ok := s2.LookupForRefresh("user-nort", "route-rt"); ok {
+		t.Error("LookupForRefresh: expired record without refresh_token must be removed by startup sweep")
 	}
 }
 

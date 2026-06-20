@@ -35,6 +35,10 @@ type UpstreamTokenStore interface {
 	// Lookup returns the token record for (subject, routeName).
 	// Returns false when no record exists or the record has expired.
 	Lookup(subject, routeName string) (UpstreamTokenRecord, bool)
+	// LookupForRefresh returns the stored record regardless of access token expiry,
+	// so that a valid refresh_token can be retrieved even when the access token is
+	// already expired. Returns false only when no record exists at all.
+	LookupForRefresh(subject, routeName string) (UpstreamTokenRecord, bool)
 	// Delete removes the token record for (subject, routeName).
 	Delete(subject, routeName string) error
 	// Sweep removes all expired entries.
@@ -99,6 +103,16 @@ func (m *memUpstreamTokenStore) Lookup(subject, routeName string) (UpstreamToken
 	return rec, true
 }
 
+func (m *memUpstreamTokenStore) LookupForRefresh(subject, routeName string) (UpstreamTokenRecord, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	rec, ok := m.entries[upstreamTokenKey(subject, routeName)]
+	if !ok {
+		return UpstreamTokenRecord{}, false
+	}
+	return rec, true
+}
+
 func (m *memUpstreamTokenStore) Delete(subject, routeName string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -111,7 +125,10 @@ func (m *memUpstreamTokenStore) Sweep() error {
 	defer m.mu.Unlock()
 	now := time.Now()
 	for k, v := range m.entries {
-		if !v.ExpiresAt.IsZero() && now.After(v.ExpiresAt) {
+		// Keep records that have a refresh_token: the access token may be expired
+		// but RefreshAfter401 still needs the refresh_token to obtain a new one.
+		// Records without a refresh_token are swept when the access token expires.
+		if !v.ExpiresAt.IsZero() && now.After(v.ExpiresAt) && v.RefreshToken == "" {
 			delete(m.entries, k)
 		}
 	}
@@ -232,6 +249,29 @@ func (s *fileUpstreamTokenStore) Lookup(subject, routeName string) (UpstreamToke
 	}, true
 }
 
+func (s *fileUpstreamTokenStore) LookupForRefresh(subject, routeName string) (UpstreamTokenRecord, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	entry, ok := s.entries[upstreamTokenKey(subject, routeName)]
+	if !ok {
+		return UpstreamTokenRecord{}, false
+	}
+	var expiresAt time.Time
+	if entry.ExpiresAt != nil {
+		expiresAt = *entry.ExpiresAt
+	}
+	return UpstreamTokenRecord{
+		Subject:      subject,
+		RouteName:    routeName,
+		Grant:        entry.Grant,
+		Issuer:       entry.Issuer,
+		AccessToken:  entry.AccessToken,
+		RefreshToken: entry.RefreshToken,
+		ExpiresAt:    expiresAt,
+		Scope:        entry.Scope,
+	}, true
+}
+
 func (s *fileUpstreamTokenStore) Delete(subject, routeName string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -259,7 +299,9 @@ func (s *fileUpstreamTokenStore) Sweep() error {
 func (s *fileUpstreamTokenStore) sweepLocked() bool {
 	changed := false
 	for k, v := range s.entries {
-		if v.expired() {
+		// Keep records that have a refresh_token even after the access token expires.
+		// RefreshAfter401 needs the refresh_token to renew the access token.
+		if v.expired() && v.RefreshToken == "" {
 			delete(s.entries, k)
 			changed = true
 		}

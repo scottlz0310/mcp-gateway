@@ -575,3 +575,45 @@ func TestRefreshAfter401_ConcurrentCallsCoalesceToOneEndpointRequest(t *testing.
 		}
 	}
 }
+
+func TestRefreshAfter401_ExpiredAccessTokenUsesRefreshToken(t *testing.T) {
+	// access token が期限切れでも refresh_token があれば更新できることを確認する。
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		if r.FormValue("grant_type") != "refresh_token" || r.FormValue("refresh_token") != "valid-ref" {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "new-tok",
+			"token_type":   "Bearer",
+			"expires_in":   3600,
+		})
+	}))
+	defer ts.Close()
+
+	store := auth.NewMemUpstreamTokenStore()
+	// access token は既に期限切れ、refresh_token は有効
+	_ = store.Save("user", "myroute", auth.UpstreamTokenRecord{
+		AccessToken:  "expired-tok",
+		RefreshToken: "valid-ref",
+		ExpiresAt:    time.Now().Add(-time.Minute), // 1 分前に期限切れ
+	})
+
+	refresher := makeRefresher(t, map[string]upstreamoauth.ClientRecord{
+		"myroute": {
+			RouteName:     "myroute",
+			TokenEndpoint: ts.URL + "/token",
+			ClientID:      "cid",
+		},
+	}, store, ts.Client())
+
+	rec, ok := refresher.RefreshAfter401(context.Background(), "user", "myroute")
+	if !ok {
+		t.Fatal("expected ok=true: expired access token should not prevent refresh via LookupForRefresh")
+	}
+	if rec.AccessToken != "new-tok" {
+		t.Errorf("AccessToken = %q, want %q", rec.AccessToken, "new-tok")
+	}
+}
