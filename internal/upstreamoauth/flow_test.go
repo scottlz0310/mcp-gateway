@@ -96,7 +96,7 @@ func TestAuthorizeMiddleware_RedirectWithPKCE(t *testing.T) {
 		routeName, "https://as.example.com", "read write", "authorization_code", "", mgr, stateStore, tokenStore, publicURL,
 	)
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Error("next handler must not be called when redirect is expected")
+		t.Error("next handler must not be called when upstream auth is required")
 	}))
 
 	req := httptest.NewRequest("GET", "/mcp/myroute/sse", nil)
@@ -104,17 +104,43 @@ func TestAuthorizeMiddleware_RedirectWithPKCE(t *testing.T) {
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 
-	if rr.Code != http.StatusFound {
-		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusFound, rr.Body.String())
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if ct := rr.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want %q", ct, "application/json")
 	}
 
-	loc := rr.Header().Get("Location")
-	if loc == "" {
-		t.Fatal("expected Location header in redirect response")
+	var resp struct {
+		JSONRPC string `json:"jsonrpc"`
+		Error   struct {
+			Code int    `json:"code"`
+			Data struct {
+				Type             string `json:"type"`
+				AuthorizationURL string `json:"authorization_url"`
+			} `json:"data"`
+		} `json:"error"`
 	}
-	u, err := url.Parse(loc)
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode JSON-RPC response: %v", err)
+	}
+	if resp.JSONRPC != "2.0" {
+		t.Errorf("jsonrpc = %q, want %q", resp.JSONRPC, "2.0")
+	}
+	if resp.Error.Code != -32001 {
+		t.Errorf("error.code = %d, want %d", resp.Error.Code, -32001)
+	}
+	if resp.Error.Data.Type != "upstream_authorization_required" {
+		t.Errorf("error.data.type = %q, want %q", resp.Error.Data.Type, "upstream_authorization_required")
+	}
+
+	authURLStr := resp.Error.Data.AuthorizationURL
+	if authURLStr == "" {
+		t.Fatal("error.data.authorization_url must not be empty")
+	}
+	u, err := url.Parse(authURLStr)
 	if err != nil {
-		t.Fatalf("invalid Location URL: %v", err)
+		t.Fatalf("invalid authorization_url: %v", err)
 	}
 	q := u.Query()
 
@@ -179,11 +205,20 @@ func TestAuthorizeMiddleware_ScopeOmitted(t *testing.T) {
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 
-	if rr.Code != http.StatusFound {
-		t.Fatalf("status = %d, want %d", rr.Code, http.StatusFound)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
 	}
-	loc := rr.Header().Get("Location")
-	u, _ := url.Parse(loc)
+	var resp struct {
+		Error struct {
+			Data struct {
+				AuthorizationURL string `json:"authorization_url"`
+			} `json:"data"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode JSON-RPC response: %v", err)
+	}
+	u, _ := url.Parse(resp.Error.Data.AuthorizationURL)
 	if u.Query().Get("scope") != "" {
 		t.Errorf("scope must be omitted when upstreamOAuthScope is empty, got %q", u.Query().Get("scope"))
 	}
@@ -447,7 +482,7 @@ func TestAuthorizeMiddleware_GrantMismatch_StaleTokenDeleted(t *testing.T) {
 }
 
 func TestAuthorizeMiddleware_DefaultGrant_IsAuthCode(t *testing.T) {
-	// grant="" should default to authorization_code (redirect, not client_credentials fetch).
+	// grant="" should default to authorization_code (JSON-RPC error, not client_credentials fetch).
 	const routeName = "default-grant"
 	cs := &testClientStore{records: map[string]upstreamoauth.ClientRecord{
 		routeName: {
@@ -462,7 +497,7 @@ func TestAuthorizeMiddleware_DefaultGrant_IsAuthCode(t *testing.T) {
 		upstreamoauth.NewStateStore(), auth.NewMemUpstreamTokenStore(), "http://localhost:8080",
 	)
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Error("next handler must not be called: should redirect")
+		t.Error("next handler must not be called: should return JSON-RPC error")
 	}))
 
 	req := httptest.NewRequest("GET", "/mcp/default-grant/sse", nil)
@@ -470,7 +505,10 @@ func TestAuthorizeMiddleware_DefaultGrant_IsAuthCode(t *testing.T) {
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 
-	if rr.Code != http.StatusFound {
-		t.Errorf("status = %d, want %d (empty grant should default to authorization_code)", rr.Code, http.StatusFound)
+	if rr.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d (empty grant should default to authorization_code)", rr.Code, http.StatusOK)
+	}
+	if ct := rr.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want %q", ct, "application/json")
 	}
 }

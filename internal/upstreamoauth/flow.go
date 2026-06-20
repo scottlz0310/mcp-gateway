@@ -151,9 +151,30 @@ func NewAuthorizeMiddleware(
 			q.Set("state", stateKey)
 			authURL.RawQuery = q.Encode()
 
-			http.Redirect(w, r, authURL.String(), http.StatusFound)
+			// Return 200 + JSON-RPC error instead of 302 so MCP clients don't
+			// treat the response as a connection failure and restart the auth flow,
+			// which would overwrite the pending state and cause an infinite loop.
+			writeUpstreamAuthRequired(w, routeName, authURL.String())
 		})
 	}
+}
+
+func writeUpstreamAuthRequired(w http.ResponseWriter, routeName, authorizationURL string) {
+	body, _ := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      nil,
+		"error": map[string]any{
+			"code":    -32001,
+			"message": fmt.Sprintf("%s authorization required. Open the URL in 'data.authorization_url' in your browser, then retry.", routeName),
+			"data": map[string]any{
+				"type":              "upstream_authorization_required",
+				"authorization_url": authorizationURL,
+			},
+		},
+	})
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
 }
 
 // fetchClientCredentialsToken obtains an access token from rec.TokenEndpoint
