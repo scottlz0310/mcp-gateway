@@ -5,6 +5,49 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-06-21
+
+### 追加
+
+- upstream OAuth 委任: `upstream_oauth` を設定した MCP ルートに対して、ユーザーごとの upstream OAuth フローを gateway が仲介するエンドツーエンド実装（[#84](https://github.com/scottlz0310/mcp-gateway/issues/84)）
+  - **ルートオプション解析・バリデーション**（[#113](https://github.com/scottlz0310/mcp-gateway/issues/113)）: `ROUTE_*` 環境変数および `config.yaml` で `upstream_oauth=auto|<issuer-url>` / `upstream_oauth_scope` を受け付ける。`upstream_oauth` と `upstream_bearer_token_env` の同時指定は fail-closed で拒否。YAML `null` / blank は「不在（無効）」として扱う
+  - **メタデータ検索と Dynamic Client Registration**（[#114](https://github.com/scottlz0310/mcp-gateway/issues/114)）: RFC 9728 の Protected Resource → AS メタデータ 2 段検索、明示 issuer URL からの RFC 8414 1 段検索、RFC 7591 DCR（200 / 201 両対応）。per-route 遅延検索 + in-memory AS メタデータキャッシュ。`upstream_clients.json` を atomic write（0600）で永続化
+  - **upstream ユーザートークンストア**（[#115](https://github.com/scottlz0310/mcp-gateway/issues/115)）: `UpstreamTokenStore` インターフェース（`Save` / `Lookup` / `Delete` / `LookupForRefresh` / `Sweep`）。in-memory 実装と `upstream_tokens.json` file-backed 実装。ディスク上のキーは `sha256(subject + "\x00" + routeName)` の hex 文字列（identity をディスクに書かない）。atomic write（0600）
+  - **PKCE 付き認可フロー**（[#116](https://github.com/scottlz0310/mcp-gateway/issues/116)）: `NewAuthorizeMiddleware` が PKCE `code_verifier` / `code_challenge`（S256）を生成し、OAuth state を 10 分 TTL で保存してから認可エラーを返す。`GET /upstream/callback/{route-name}` が `state` 検証・`code` + `code_verifier` PKCE 交換・upstream アクセストークン保存を行う。state 期限切れは fail-closed
+  - **proxy トークン注入と 401 クリーンアップ**（[#117](https://github.com/scottlz0310/mcp-gateway/issues/117)）: upstream の `access_token` を `Authorization: Bearer` ヘッダーとしてプロキシリクエストに注入。upstream `401` 発生時に古い upstream トークンを削除し、次のリクエストで認可フローを再開させる
+  - **事前リフレッシュと 401 透過リトライ**（[#118](https://github.com/scottlz0310/mcp-gateway/issues/118)）: 有効期限前に upstream トークンをリフレッシュ。`401` 発生時は `singleflight` で subject + route ごとに排他しながら refresh + retry。`GetBody()` によるリクエストボディの再送。`expires_in ≤ 0` は有効期限不明として事前リフレッシュしない。永続的なリフレッシュ失敗ではトークン削除後に認可フローへ誘導
+  - **`client_credentials` グラント** と `upstream_oauth_grant` ルートオプション（[#166](https://github.com/scottlz0310/mcp-gateway/issues/166)）: `upstream_oauth_grant=client_credentials` でサーバー間トークン取得（ユーザー操作不要）。`upstream_oauth_grant=authorization_code`（デフォルト）は PKCE ユーザーフローを維持。グラント変更時に DCR 再登録・トークン再取得
+  - **期限切れ upstream トークンへの `LookupForRefresh` 対応**（[#171](https://github.com/scottlz0310/mcp-gateway/issues/171)）: `UpstreamTokenStore.LookupForRefresh` が期限切れレコードも返すため、`RefreshAfter401` がアクセストークン期限切れ後も refresh_token で再取得可能になる
+
+- RFC 8252 §7.1 opaque-form カスタムスキーム redirect URI のサポート（[#125](https://github.com/scottlz0310/mcp-gateway/issues/125)）
+  - `Host` または `Opaque` が空でないカスタムスキーム URI を許可（例: `com.example.app:/oauth2redirect/provider`）
+  - host も opaque も持たないカスタムスキーム URI は引き続き fail-closed で拒否
+  - fragment 付き URI はすべてのスキームで拒否
+
+### 修正
+
+- `refresh_token` フローの `id_token` に OIDC nonce を伝播するよう修正（OIDC Core §12.2）（[#160](https://github.com/scottlz0310/mcp-gateway/issues/160)）
+  - `TokenRecord`・`memEntry`・`fileEntry`・`memRTEntry`・`fileRTEntry`・`sqliteRefreshTokenStore` に `Nonce` フィールドを追加し、アクセストークンストアとリフレッシュトークンストア両方で永続化
+  - `RefreshTokenStore` に `SaveNonce` / `LookupNonce` を追加し、アクセストークン TTL を超えても nonce を保持
+  - `tokenRefresh` がローテーション後の RT 発行後に `SaveRefreshTokenNonce(newRT, nonce)` を呼ぶことで、連続 refresh でも nonce が引き継がれる
+  - `SaveTokenNonce` の空文字列ガードを削除し、nonce なしの後続グラントで既存 nonce を正しくクリアできるよう修正
+
+- `builtin` プロバイダーの `ValidateToken` が OAuth callback 時の identity resolution で GitHub API に委譲するよう修正（[#162](https://github.com/scottlz0310/mcp-gateway/issues/162)）
+
+- OIDC Discovery（`/.well-known/openid-configuration`）に PKCE・grant type・registration・device authorization の metadata を追加し、OIDC クライアントが対応フローを検出できるよう修正（[#122](https://github.com/scottlz0310/mcp-gateway/issues/122)）
+
+- `buildResourceAudienceMap` がルート名キーと URL 形式キー（`routeResource` 由来の `resourceURL`）の両方をインデックスするよう修正。RFC 8707 クライアントがリソース URL を送った場合の `invalid_target` エラーを解消（[#175](https://github.com/scottlz0310/mcp-gateway/issues/175)）
+  - gateway-wide PRM 検索と `"/"` prefix ルートの resource 解決も追加し、ルートプレフィックスルートが正しく解決されるよう対応
+
+- Dynamic Client Registration が登録ごとに一意の `client_id` を生成するよう修正（RFC 7591 §3.2.1 準拠）（[#177](https://github.com/scottlz0310/mcp-gateway/issues/177)、[PR #178](https://github.com/scottlz0310/mcp-gateway/pull/178)）
+  - 従来はルート名から決定論的に生成した `client_id` を再利用していたため、DCR レコード失効後の再登録で競合が発生していた
+
+- `NewAuthorizeMiddleware` が `302 Found` の代わりに `200 OK` + JSON-RPC エラー（code `-32001`、`type: "upstream_authorization_required"`）を返すよう変更し、MCP クライアントがレスポンスを接続失敗と誤解して認証フローを最初からやり直す再認証ループを防止（[#179](https://github.com/scottlz0310/mcp-gateway/issues/179)、[PR #180](https://github.com/scottlz0310/mcp-gateway/pull/180)）
+  - `error.data.authorization_url` に PKCE パラメーター付きの upstream 認可エンドポイント URL を埋め込む。クライアントはこの URL をブラウザで開いてから MCP リクエストをリトライする
+  - `Cache-Control: no-store` / `Pragma: no-cache` ヘッダーを付与し、OAuth state パラメーターがキャッシュされないよう対応
+
+## [0.6.0] - 2026-06-17
+
 ### 追加
 
 - 実行時状態ファイルのデフォルトパスを OS のユーザー状態ディレクトリに変更（[#144](https://github.com/scottlz0310/mcp-gateway/issues/144)）
@@ -274,7 +317,9 @@
 - `auth.Handler` から GitHub 固有の HTTP 通信を排除し、`provider.Provider` への委譲に変更。
 - `middleware` のコンテキストキーを `github_login` → `authenticated_user` に rename（内部実装のみ、外部互換維持）。
 
-[Unreleased]: https://github.com/scottlz0310/mcp-gateway/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/scottlz0310/mcp-gateway/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/scottlz0310/mcp-gateway/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/scottlz0310/mcp-gateway/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.4.0...v0.5.0
