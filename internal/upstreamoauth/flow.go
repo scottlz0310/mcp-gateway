@@ -160,7 +160,7 @@ func NewAuthorizeMiddleware(
 }
 
 func writeUpstreamAuthRequired(w http.ResponseWriter, routeName, authorizationURL string) {
-	body, _ := json.Marshal(map[string]any{
+	body, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",
 		"id":      nil,
 		"error": map[string]any{
@@ -172,6 +172,13 @@ func writeUpstreamAuthRequired(w http.ResponseWriter, routeName, authorizationUR
 			},
 		},
 	})
+	if err != nil {
+		slog.Error("upstream OAuth: failed to marshal upstream_auth_required response", "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)

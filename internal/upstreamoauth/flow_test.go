@@ -218,7 +218,13 @@ func TestAuthorizeMiddleware_ScopeOmitted(t *testing.T) {
 	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
 		t.Fatalf("failed to decode JSON-RPC response: %v", err)
 	}
-	u, _ := url.Parse(resp.Error.Data.AuthorizationURL)
+	if resp.Error.Data.AuthorizationURL == "" {
+		t.Fatal("error.data.authorization_url must not be empty")
+	}
+	u, err := url.Parse(resp.Error.Data.AuthorizationURL)
+	if err != nil {
+		t.Fatalf("invalid authorization_url: %v", err)
+	}
 	if u.Query().Get("scope") != "" {
 		t.Errorf("scope must be omitted when upstreamOAuthScope is empty, got %q", u.Query().Get("scope"))
 	}
