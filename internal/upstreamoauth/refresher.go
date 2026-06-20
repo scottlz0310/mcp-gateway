@@ -70,7 +70,9 @@ func (r *Refresher) EnsureFreshToken(ctx context.Context, subject, routeName str
 // and true so the caller can return the 401 to the client rather than deleting
 // a token that might recover later.
 func (r *Refresher) RefreshAfter401(ctx context.Context, subject, routeName string) (auth.UpstreamTokenRecord, bool) {
-	existing, ok := r.tokenStore.Lookup(subject, routeName)
+	// Use LookupForRefresh so that an expired access token does not prevent
+	// retrieval of a still-valid refresh_token.
+	existing, ok := r.tokenStore.LookupForRefresh(subject, routeName)
 	if !ok || existing.RefreshToken == "" {
 		_ = r.tokenStore.Delete(subject, routeName)
 		return auth.UpstreamTokenRecord{}, false

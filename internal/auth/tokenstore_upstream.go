@@ -35,6 +35,10 @@ type UpstreamTokenStore interface {
 	// Lookup returns the token record for (subject, routeName).
 	// Returns false when no record exists or the record has expired.
 	Lookup(subject, routeName string) (UpstreamTokenRecord, bool)
+	// LookupForRefresh returns the stored record regardless of access token expiry,
+	// so that a valid refresh_token can be retrieved even when the access token is
+	// already expired. Returns false only when no record exists at all.
+	LookupForRefresh(subject, routeName string) (UpstreamTokenRecord, bool)
 	// Delete removes the token record for (subject, routeName).
 	Delete(subject, routeName string) error
 	// Sweep removes all expired entries.
@@ -94,6 +98,16 @@ func (m *memUpstreamTokenStore) Lookup(subject, routeName string) (UpstreamToken
 		return UpstreamTokenRecord{}, false
 	}
 	if !rec.ExpiresAt.IsZero() && time.Now().After(rec.ExpiresAt) {
+		return UpstreamTokenRecord{}, false
+	}
+	return rec, true
+}
+
+func (m *memUpstreamTokenStore) LookupForRefresh(subject, routeName string) (UpstreamTokenRecord, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	rec, ok := m.entries[upstreamTokenKey(subject, routeName)]
+	if !ok {
 		return UpstreamTokenRecord{}, false
 	}
 	return rec, true
@@ -214,6 +228,29 @@ func (s *fileUpstreamTokenStore) Lookup(subject, routeName string) (UpstreamToke
 	defer s.mu.RUnlock()
 	entry, ok := s.entries[upstreamTokenKey(subject, routeName)]
 	if !ok || entry.expired() {
+		return UpstreamTokenRecord{}, false
+	}
+	var expiresAt time.Time
+	if entry.ExpiresAt != nil {
+		expiresAt = *entry.ExpiresAt
+	}
+	return UpstreamTokenRecord{
+		Subject:      subject,
+		RouteName:    routeName,
+		Grant:        entry.Grant,
+		Issuer:       entry.Issuer,
+		AccessToken:  entry.AccessToken,
+		RefreshToken: entry.RefreshToken,
+		ExpiresAt:    expiresAt,
+		Scope:        entry.Scope,
+	}, true
+}
+
+func (s *fileUpstreamTokenStore) LookupForRefresh(subject, routeName string) (UpstreamTokenRecord, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	entry, ok := s.entries[upstreamTokenKey(subject, routeName)]
+	if !ok {
 		return UpstreamTokenRecord{}, false
 	}
 	var expiresAt time.Time
