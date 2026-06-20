@@ -163,24 +163,113 @@ func TestRouteProtectedResourceMetadata(t *testing.T) {
 func TestRegisterReturnsClientID(t *testing.T) {
 	h := newTestHandler(t)
 	body := `{"redirect_uris":["http://localhost/cb"],"client_name":"test"}`
-	r := httptest.NewRequest(http.MethodPost, "/register", strings.NewReader(body))
-	r.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
 
-	h.Register(w, r)
-
-	if w.Code != http.StatusCreated {
-		t.Errorf("status: got %d, want %d", w.Code, http.StatusCreated)
+	register := func() map[string]any {
+		r := httptest.NewRequest(http.MethodPost, "/register", strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		h.Register(w, r)
+		if w.Code != http.StatusCreated {
+			t.Fatalf("status: got %d, want %d", w.Code, http.StatusCreated)
+		}
+		var resp map[string]any
+		if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+			t.Fatalf("decoding response: %v", err)
+		}
+		return resp
 	}
+
+	resp1 := register()
+	resp2 := register()
+
+	id1, _ := resp1["client_id"].(string)
+	id2, _ := resp2["client_id"].(string)
+
+	if id1 == "" {
+		t.Error("client_id must not be empty")
+	}
+	if id1 == id2 {
+		t.Errorf("client_id must be unique per registration, got same value %q twice", id1)
+	}
+	if resp1["token_endpoint_auth_method"] != "none" {
+		t.Errorf("token_endpoint_auth_method: got %v", resp1["token_endpoint_auth_method"])
+	}
+}
+
+// TestDCRClientIDPropagatesToIDTokenAud verifies that the client_id issued via
+// DCR (/register) is forwarded as the aud claim in the id_token issued at
+// /token.  Before this fix, aud was always h.provider.ClientID() regardless of
+// the registering client's identity.
+func TestDCRClientIDPropagatesToIDTokenAud(t *testing.T) {
+	h := newTestHandler(t)
+
+	// Simulate a DCR client registering and then going through /authorize.
+	// SaveSession is called by Authorize() with client_id from the query param;
+	// here we bypass the HTTP layer to control inputs directly.
+	const dcrClientID = "dcr-client-unique-abc123"
+	h.store.SaveSession("dcr-state", "http://localhost/cb", "", "http://localhost:8080", "", dcrClientID)
+	code, err := h.store.CompleteCallback("dcr-state", "provider-tok", "openid", "", time.Time{}, "alice")
+	if err != nil {
+		t.Fatalf("CompleteCallback: %v", err)
+	}
+
+	body := fmt.Sprintf("grant_type=authorization_code&code=%s&redirect_uri=http://localhost/cb", code)
+	r := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	h.Token(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("token: got %d; body: %s", w.Code, w.Body.String())
+	}
+
 	var resp map[string]any
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
-		t.Fatalf("decoding response: %v", err)
+		t.Fatalf("decoding token response: %v", err)
 	}
-	if resp["client_id"] != "test-client-id" {
-		t.Errorf("client_id: got %v", resp["client_id"])
+	idToken, ok := resp["id_token"].(string)
+	if !ok || idToken == "" {
+		t.Fatal("expected id_token in response when openid scope requested")
 	}
-	if resp["token_endpoint_auth_method"] != "none" {
-		t.Errorf("token_endpoint_auth_method: got %v", resp["token_endpoint_auth_method"])
+
+	claims := parseJWTPayload(t, idToken)
+	if got := claims["aud"]; got != dcrClientID {
+		t.Errorf("id_token.aud: got %v, want %q (DCR-issued client_id)", got, dcrClientID)
+	}
+}
+
+// TestIDTokenAudFallsBackToProviderClientID verifies that when no client_id is
+// stored in the session (legacy or non-DCR flow), id_token.aud falls back to
+// h.provider.ClientID().
+func TestIDTokenAudFallsBackToProviderClientID(t *testing.T) {
+	h := newTestHandler(t)
+
+	h.store.SaveSession("legacy-state", "http://localhost/cb", "", "http://localhost:8080", "", "")
+	code, err := h.store.CompleteCallback("legacy-state", "provider-tok", "openid", "", time.Time{}, "bob")
+	if err != nil {
+		t.Fatalf("CompleteCallback: %v", err)
+	}
+
+	body := fmt.Sprintf("grant_type=authorization_code&code=%s&redirect_uri=http://localhost/cb", code)
+	r := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	h.Token(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("token: got %d; body: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decoding token response: %v", err)
+	}
+	idToken, ok := resp["id_token"].(string)
+	if !ok || idToken == "" {
+		t.Fatal("expected id_token in response when openid scope requested")
+	}
+
+	claims := parseJWTPayload(t, idToken)
+	if got := claims["aud"]; got != "test-client-id" {
+		t.Errorf("id_token.aud: got %v, want %q (provider ClientID fallback)", got, "test-client-id")
 	}
 }
 
@@ -906,7 +995,7 @@ func TestActivateSubmitValidCode(t *testing.T) {
 	h := newTestHandler(t)
 
 	expiresAt := time.Now().Add(15 * time.Minute)
-	internalCode, err := h.store.CreateDevice("ABCD-5678", expiresAt, "mcp-gateway")
+	internalCode, err := h.store.CreateDevice("ABCD-5678", expiresAt, "mcp-gateway", "")
 	if err != nil {
 		t.Fatalf("CreateDevice: %v", err)
 	}
@@ -958,7 +1047,7 @@ func TestTokenDeviceGrantPending(t *testing.T) {
 	h := newTestHandler(t)
 
 	expiresAt := time.Now().Add(15 * time.Minute)
-	internalCode, err := h.store.CreateDevice("WDJB-MJHT", expiresAt, "mcp-gateway")
+	internalCode, err := h.store.CreateDevice("WDJB-MJHT", expiresAt, "mcp-gateway", "")
 	if err != nil {
 		t.Fatalf("creating device session: %v", err)
 	}
@@ -986,7 +1075,7 @@ func TestTokenDeviceGrantSlowDown(t *testing.T) {
 	h := newTestHandler(t)
 
 	expiresAt := time.Now().Add(15 * time.Minute)
-	internalCode, err := h.store.CreateDevice("ABCD-1234", expiresAt, "mcp-gateway")
+	internalCode, err := h.store.CreateDevice("ABCD-1234", expiresAt, "mcp-gateway", "")
 	if err != nil {
 		t.Fatalf("creating device session: %v", err)
 	}
@@ -1042,7 +1131,7 @@ func TestTokenDeviceGrantSuccess(t *testing.T) {
 	}
 
 	expiresAt := time.Now().Add(15 * time.Minute)
-	internalCode, err := h.store.CreateDevice("WDJB-MJHT", expiresAt, "mcp-gateway")
+	internalCode, err := h.store.CreateDevice("WDJB-MJHT", expiresAt, "mcp-gateway", "")
 	if err != nil {
 		t.Fatalf("creating device session: %v", err)
 	}
@@ -2398,7 +2487,7 @@ func TestOIDCProviderEndpoints(t *testing.T) {
 	}
 
 	// 5. Test ID Token generation during code exchange
-	h.store.SaveSession("state-oidc", "http://localhost/cb", "", "http://localhost:8080", "")
+	h.store.SaveSession("state-oidc", "http://localhost/cb", "", "http://localhost:8080", "", "")
 	code, err := h.store.CompleteCallback("state-oidc", "provider-tok", "openid", "", time.Time{}, "alice")
 	if err != nil {
 		t.Fatalf("CompleteCallback: %v", err)
@@ -2472,7 +2561,7 @@ func TestIDTokenNonceClaim(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newTestHandler(t)
-			h.store.SaveSession("state-nonce", "http://localhost/cb", "", "http://localhost:8080", tc.nonce)
+			h.store.SaveSession("state-nonce", "http://localhost/cb", "", "http://localhost:8080", tc.nonce, "")
 			code, err := h.store.CompleteCallback("state-nonce", "provider-tok", "openid", "", time.Time{}, "alice")
 			if err != nil {
 				t.Fatalf("CompleteCallback: %v", err)
@@ -3588,7 +3677,7 @@ func TestTokenDeviceGrantExpired(t *testing.T) {
 	h := newTestHandler(t)
 
 	expiresAt := time.Now().Add(-time.Second) // already expired
-	internalCode, err := h.store.CreateDevice("ABCD-EXPI", expiresAt, "mcp-gateway")
+	internalCode, err := h.store.CreateDevice("ABCD-EXPI", expiresAt, "mcp-gateway", "")
 	if err != nil {
 		t.Fatalf("CreateDevice: %v", err)
 	}
@@ -3614,7 +3703,7 @@ func TestTokenDeviceGrantDenied(t *testing.T) {
 	h := newTestHandler(t)
 
 	expiresAt := time.Now().Add(15 * time.Minute)
-	internalCode, err := h.store.CreateDevice("DENY-ABCD", expiresAt, "mcp-gateway")
+	internalCode, err := h.store.CreateDevice("DENY-ABCD", expiresAt, "mcp-gateway", "")
 	if err != nil {
 		t.Fatalf("CreateDevice: %v", err)
 	}
@@ -3641,7 +3730,7 @@ func TestTokenDeviceGrantAlreadyConsumed(t *testing.T) {
 	h := newTestHandler(t)
 
 	expiresAt := time.Now().Add(15 * time.Minute)
-	internalCode, err := h.store.CreateDevice("CONS-ABCD", expiresAt, "mcp-gateway")
+	internalCode, err := h.store.CreateDevice("CONS-ABCD", expiresAt, "mcp-gateway", "")
 	if err != nil {
 		t.Fatalf("CreateDevice: %v", err)
 	}
@@ -3685,7 +3774,7 @@ func TestDeviceCallbackBadStateFormat(t *testing.T) {
 	h := newTestHandler(t)
 
 	// A state that passes HasSession but has no "device:" prefix.
-	h.store.SaveSession("plain-state-no-prefix", "http://localhost:8080/device_callback", "", "mcp", "")
+	h.store.SaveSession("plain-state-no-prefix", "http://localhost:8080/device_callback", "", "mcp", "", "")
 
 	r := httptest.NewRequest(http.MethodGet, "/device_callback?code=abc&state=plain-state-no-prefix", nil)
 	w := httptest.NewRecorder()
@@ -3717,9 +3806,9 @@ func TestDeviceCallbackExchangeCodeError(t *testing.T) {
 	}
 
 	expiresAt := time.Now().Add(15 * time.Minute)
-	internalCode, _ := h.store.CreateDevice("XCBG-1234", expiresAt, "mcp")
+	internalCode, _ := h.store.CreateDevice("XCBG-1234", expiresAt, "mcp", "")
 	state := generateDeviceState(internalCode)
-	h.store.SaveSession(state, "http://localhost:8080/device_callback", "", "mcp", "")
+	h.store.SaveSession(state, "http://localhost:8080/device_callback", "", "mcp", "", "")
 
 	r := httptest.NewRequest(http.MethodGet, "/device_callback?code=abc&state="+url.QueryEscape(state), nil)
 	w := httptest.NewRecorder()
@@ -3751,9 +3840,9 @@ func TestDeviceCallbackValidateTokenError(t *testing.T) {
 	}
 
 	expiresAt := time.Now().Add(15 * time.Minute)
-	internalCode, _ := h.store.CreateDevice("XCBG-5678", expiresAt, "mcp")
+	internalCode, _ := h.store.CreateDevice("XCBG-5678", expiresAt, "mcp", "")
 	state := generateDeviceState(internalCode)
-	h.store.SaveSession(state, "http://localhost:8080/device_callback", "", "mcp", "")
+	h.store.SaveSession(state, "http://localhost:8080/device_callback", "", "mcp", "", "")
 
 	r := httptest.NewRequest(http.MethodGet, "/device_callback?code=abc&state="+url.QueryEscape(state), nil)
 	w := httptest.NewRecorder()
@@ -3792,12 +3881,12 @@ func TestCallbackDeviceFlowFallback(t *testing.T) {
 	}
 
 	// Set up a device session as /activate would.
-	deviceCode, err := h.store.CreateDevice("ABCD-1234", time.Now().Add(10*time.Minute), "mcp")
+	deviceCode, err := h.store.CreateDevice("ABCD-1234", time.Now().Add(10*time.Minute), "mcp", "")
 	if err != nil {
 		t.Fatalf("CreateDevice: %v", err)
 	}
 	state := generateDeviceState(deviceCode)
-	h.store.SaveSession(state, "http://localhost:8080/device_callback", "", "mcp", "")
+	h.store.SaveSession(state, "http://localhost:8080/device_callback", "", "mcp", "", "")
 
 	// Simulate GitHub redirecting to /callback with a device state (not /device_callback).
 	r := httptest.NewRequest(http.MethodGet, "/callback?code=github-code-abc&state="+url.QueryEscape(state), nil)
@@ -3852,7 +3941,7 @@ func TestCallbackDeviceStateNoMatchFallsToNormalFlow(t *testing.T) {
 
 	// State looks like a device state but has no matching device session in the store.
 	state := "device:no-such-device-code"
-	h.store.SaveSession(state, "http://localhost:8080/callback", "", "mcp", "")
+	h.store.SaveSession(state, "http://localhost:8080/callback", "", "mcp", "", "")
 
 	r := httptest.NewRequest(http.MethodGet, "/callback?code=gh-code&state="+url.QueryEscape(state), nil)
 	w := httptest.NewRecorder()
@@ -3896,12 +3985,12 @@ func TestCallbackDeviceFlowFallbackPersistsProviderRefresh(t *testing.T) {
 		t.Fatalf("NewHandler: %v", err)
 	}
 
-	deviceCode, err := h.store.CreateDevice("EFGH-5678", time.Now().Add(10*time.Minute), "mcp")
+	deviceCode, err := h.store.CreateDevice("EFGH-5678", time.Now().Add(10*time.Minute), "mcp", "")
 	if err != nil {
 		t.Fatalf("CreateDevice: %v", err)
 	}
 	state := generateDeviceState(deviceCode)
-	h.store.SaveSession(state, "http://localhost:8080/device_callback", "", "mcp", "")
+	h.store.SaveSession(state, "http://localhost:8080/device_callback", "", "mcp", "", "")
 
 	r := httptest.NewRequest(http.MethodGet, "/callback?code=gh-code&state="+url.QueryEscape(state), nil)
 	w := httptest.NewRecorder()
@@ -3947,7 +4036,7 @@ func TestTokenDeviceGrantPersistsProviderRefresh(t *testing.T) {
 	}
 
 	expiry := time.Now().Add(8 * time.Hour).Truncate(time.Second)
-	deviceCode, err := h.store.CreateDevice("IJKL-9999", time.Now().Add(10*time.Minute), "mcp")
+	deviceCode, err := h.store.CreateDevice("IJKL-9999", time.Now().Add(10*time.Minute), "mcp", "")
 	if err != nil {
 		t.Fatalf("CreateDevice: %v", err)
 	}
@@ -3998,7 +4087,7 @@ func TestDeviceCallbackApproveDeviceFails(t *testing.T) {
 
 	// State encodes a device internalCode that does not exist in the store.
 	state := generateDeviceState("nonexistent-device-code")
-	h.store.SaveSession(state, "http://localhost:8080/device_callback", "", "mcp", "")
+	h.store.SaveSession(state, "http://localhost:8080/device_callback", "", "mcp", "", "")
 
 	r := httptest.NewRequest(http.MethodGet, "/device_callback?code=abc&state="+url.QueryEscape(state), nil)
 	w := httptest.NewRecorder()
