@@ -151,6 +151,7 @@ func NewHandler(upstream *url.URL, inv TokenInvalidator, upstreamBearerTokenEnv 
 				"method", pr.Out.Method,
 				"path", pr.Out.URL.Path,
 				"token_hash", tokenHash(middleware.TokenFromContext(pr.In.Context())),
+				"mcp_session_id_present", pr.In.Header.Get("Mcp-Session-Id") != "",
 			)
 		},
 
@@ -208,6 +209,7 @@ func NewHandler(upstream *url.URL, inv TokenInvalidator, upstreamBearerTokenEnv 
 			slog.Info("proxy response",
 				"upstream_status", resp.StatusCode,
 				"path", resp.Request.URL.Path,
+				"mcp_session_id_present", resp.Header.Get("Mcp-Session-Id") != "",
 			)
 			return nil
 		},

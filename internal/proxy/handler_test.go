@@ -482,6 +482,52 @@ func TestProxyStripsRoutingPrefixRawPath(t *testing.T) {
 	}
 }
 
+// TestProxyTransparentsMcpSessionIdRequest verifies that Mcp-Session-Id sent
+// by the client is forwarded to the upstream unchanged. Go's HTTP stack
+// canonicalizes header names (textproto.CanonicalMIMEHeaderKey), so casing
+// variants are covered by standard net/http handling.
+func TestProxyTransparentsMcpSessionIdRequest(t *testing.T) {
+	var gotSessionID string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotSessionID = r.Header.Get("Mcp-Session-Id")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	u, _ := url.Parse(upstream.URL)
+	h := NewHandler(u, &mockInvalidator{}, "", "", nil)
+
+	r := requestWithContext("alice", "tok")
+	r.Header.Set("Mcp-Session-Id", "test-session-abc123")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if gotSessionID != "test-session-abc123" {
+		t.Errorf("Mcp-Session-Id: got %q, want %q", gotSessionID, "test-session-abc123")
+	}
+}
+
+// TestProxyTransparentsMcpSessionIdResponse verifies that Mcp-Session-Id
+// returned by the upstream (e.g. in response to initialize) is forwarded to
+// the client unchanged.
+func TestProxyTransparentsMcpSessionIdResponse(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Mcp-Session-Id", "upstream-session-xyz789")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	u, _ := url.Parse(upstream.URL)
+	h := NewHandler(u, &mockInvalidator{}, "", "", nil)
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, requestWithContext("alice", "tok"))
+
+	if got := w.Header().Get("Mcp-Session-Id"); got != "upstream-session-xyz789" {
+		t.Errorf("Mcp-Session-Id: got %q, want %q", got, "upstream-session-xyz789")
+	}
+}
+
 func TestProxyUpstreamOAuthInjectsToken(t *testing.T) {
 	var gotAuth string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

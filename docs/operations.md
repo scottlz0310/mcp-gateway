@@ -129,11 +129,15 @@ mcp-gateway は Go の `log/slog` を使用して JSON ログを stdout に出�
 
 | メッセージ | 重要フィールド |
 |-----------|-------------|
-| `proxy request` | `user`、`method`、`path`、`token_hash` |
-| `proxy response` | `upstream_status`、`path` |
+| `proxy request` | `user`、`method`、`path`、`token_hash`、`mcp_session_id_present` |
+| `proxy response` | `upstream_status`、`path`、`mcp_session_id_present` |
 | `upstream rejected token; cache invalidated` | `path`、`token_hash` |
 
 `token_hash` は `SHA-256(token)` の先頭 8 桁の 16 進数です。相関用であり、生トークン値はログに出力されません。
+
+`mcp_session_id_present` は `Mcp-Session-Id` ヘッダーの有無を真偽値で示します。セッション ID の実値はログに出力されません。
+
+`proxy response` ログは upstream から返ったレスポンスに対してのみ出力されます。`proxy response` エントリが存在するエラーは upstream 由来であり、このエントリが存在しないエラー（認証・ルーティング失敗など）は gateway 由来です。
 
 ### 認証とセットアップログ
 
@@ -198,6 +202,76 @@ curl -fsS \
 レスポンスは最新順で最大 100 件です。永続的な事後解析の正本は JSON Lines ファイルであり、internal API の履歴はプロセス再起動時に消失します。
 
 ## よくある問題
+
+### `Mcp-Session-Id is required`
+
+症状:
+
+- gateway 経由の MCP ツール呼び出しが次のエラーを返す:
+
+  ```json
+  {"jsonrpc":"2.0","error":{"code":-32000,"message":"Mcp-Session-Id is required"},"id":null}
+  ```
+
+原因:
+
+MCP Streamable HTTP プロトコルでは、client は最初に `initialize` を実行し、upstream が返す `Mcp-Session-Id` レスポンスヘッダーを後続リクエストすべてに付与する必要があります。初期化を省略した直接呼び出しや、client がセッションヘッダーを保持・再送できていない場合に同じエラーが発生します。
+
+gateway は `Mcp-Session-Id` を明示的に削除せず `httputil.ReverseProxy` が透過転送しますが、client が初期化シーケンスを完了していることが前提です。
+
+#### 正しい MCP 初期化シーケンス（gateway 経由）
+
+```bash
+GATEWAY=http://127.0.0.1:8080
+TOKEN=<your-gateway-access-token>
+ROUTE=/mcp/<route-name>
+
+# 1. initialize を実行してセッション ID を取得する
+SESSION_ID=$(curl -fsS -D - \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -X POST "$GATEWAY$ROUTE" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"0.0.1"}}}' \
+  | grep -i '^mcp-session-id:' | awk '{print $2}' | tr -d '\r')
+
+echo "Session ID: $SESSION_ID"
+
+# 2. notifications/initialized を送信する
+curl -fsS \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Mcp-Session-Id: $SESSION_ID" \
+  -X POST "$GATEWAY$ROUTE" \
+  -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+
+# 3. tools/list など後続リクエストで同じ ID を付与する
+curl -fsS \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Mcp-Session-Id: $SESSION_ID" \
+  -X POST "$GATEWAY$ROUTE" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+```
+
+#### 切り分け手順
+
+`Mcp-Session-Id is required` が返る場合、次の順序で確認します:
+
+1. **client が `initialize` を完了しているか** — `initialize` レスポンスの `Mcp-Session-Id` ヘッダーを受信してから後続リクエストを送信していることを確認する。
+2. **client が後続リクエストにヘッダーを付与しているか** — 上記シェルスクリプトで `initialize` を手動実行し、`SESSION_ID` が空でないことを確認する。
+3. **gateway がリクエストヘッダーを透過しているか** — ログの `proxy request` エントリで `mcp_session_id_present: true` を確認する（`LOG_LEVEL=debug` 不要、`info` レベルで出力）。
+4. **gateway がレスポンスヘッダーを透過しているか** — ログの `proxy response` エントリで `mcp_session_id_present` を確認する。`initialize` レスポンスで `true` であれば gateway は転送している。
+5. **upstream がセッションを認識・維持しているか** — `proxy response` エントリに `upstream_status: 200` が記録されているがエラーが返る場合、upstream 側のセッション管理を確認する。
+
+#### エラーが gateway 由来か upstream 由来かを判別する
+
+```bash
+# proxy response ログで upstream_status を確認する
+docker compose logs mcp-gateway | jq 'select(.msg=="proxy response")'
+```
+
+- `proxy response` ログが存在するエラー → upstream が返したレスポンスを透過転送している
+- `proxy response` ログが存在しないエラー → gateway が生成したエラー（認証失敗・ルート未設定など）
 
 ### `setup_required`
 
