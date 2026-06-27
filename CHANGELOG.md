@@ -7,6 +7,13 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `Mcp-Session-Id` 双方向透過の回帰テストと診断ログ・トラブルシュート手順を追加 ([#182](https://github.com/scottlz0310/mcp-gateway/issues/182))
+  - `proxy request` / `proxy response` ログに `mcp_session_id_present` フィールドを追加（セッション ID の実値はログに出力しない）
+  - `handler_test.go` に request・response 双方向透過の回帰テスト追加
+  - `docs/operations.md` に正しい MCP 初期化シーケンス・切り分け手順・gateway/upstream エラー判別方法を追加
+
 ## [0.7.0] - 2026-06-21
 
 ### Added
