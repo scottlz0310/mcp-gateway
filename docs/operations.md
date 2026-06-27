@@ -230,6 +230,7 @@ ROUTE=/mcp/<route-name>
 SESSION_ID=$(curl -fsS -D - \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
   -X POST "$GATEWAY$ROUTE" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"0.0.1"}}}' \
   | grep -i '^mcp-session-id:' | awk '{print $2}' | tr -d '\r')
@@ -240,6 +241,7 @@ echo "Session ID: $SESSION_ID"
 curl -fsS \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
   -H "Mcp-Session-Id: $SESSION_ID" \
   -X POST "$GATEWAY$ROUTE" \
   -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
@@ -248,6 +250,7 @@ curl -fsS \
 curl -fsS \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
   -H "Mcp-Session-Id: $SESSION_ID" \
   -X POST "$GATEWAY$ROUTE" \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
