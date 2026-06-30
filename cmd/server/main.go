@@ -393,6 +393,20 @@ func main() {
 					publicURL,
 				)(h)
 			}
+			// For routes with upstream_provider_token=true, resolve the subject's
+			// gateway provider access token and inject it as the upstream Bearer token.
+			// Placed between auth middleware and the proxy so that the subject identity
+			// is available in context before the provider token lookup runs.
+			if route.UpstreamProviderToken {
+				// Always include the resource_metadata URL so MCP clients can discover
+				// the gateway OAuth flow on 401. For "/" prefix routes, use the
+				// gateway-wide PRM URL; for sub-path routes, use the per-route PRM URL.
+				providerTokenResourceMetadataURL := publicURL + "/.well-known/oauth-protected-resource"
+				if route.Prefix != "/" {
+					providerTokenResourceMetadataURL += route.Prefix
+				}
+				proxyHandler = proxy.NewProviderTokenMiddleware(oauthHandler, providerTokenResourceMetadataURL, proxyHandler)
+			}
 			wrapped = routeAuth(proxyHandler)
 		}
 		mux.Handle(route.Prefix, wrapped)
@@ -404,6 +418,7 @@ func main() {
 			"auth_required", !route.NoAuth,
 			"upstream_bearer_token_env", route.UpstreamBearerTokenEnv != "",
 			"upstream_oauth", route.UpstreamOAuth != "",
+			"upstream_provider_token", route.UpstreamProviderToken,
 		)
 	}
 
