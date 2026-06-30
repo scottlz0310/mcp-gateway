@@ -398,9 +398,12 @@ func main() {
 			// Placed between auth middleware and the proxy so that the subject identity
 			// is available in context before the provider token lookup runs.
 			if route.UpstreamProviderToken {
-				providerTokenResourceMetadataURL := ""
+				// Always include the resource_metadata URL so MCP clients can discover
+				// the gateway OAuth flow on 401. For "/" prefix routes, use the
+				// gateway-wide PRM URL; for sub-path routes, use the per-route PRM URL.
+				providerTokenResourceMetadataURL := publicURL + "/.well-known/oauth-protected-resource"
 				if route.Prefix != "/" {
-					providerTokenResourceMetadataURL = publicURL + "/.well-known/oauth-protected-resource" + route.Prefix
+					providerTokenResourceMetadataURL += route.Prefix
 				}
 				proxyHandler = proxy.NewProviderTokenMiddleware(oauthHandler, providerTokenResourceMetadataURL, proxyHandler)
 			}

@@ -62,6 +62,12 @@ func NewProviderTokenMiddleware(src ProviderTokenSource, resourceMetadataURL str
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		subject := middleware.IdentityFromContext(r.Context())
 		if subject == "" {
+			// This should not happen when the middleware chain is correctly ordered.
+			// An empty subject indicates a misconfigured handler chain (e.g. provider
+			// token middleware placed before gateway Auth middleware).
+			slog.Error("provider token: authenticated subject missing from context; check middleware ordering",
+				"path", r.URL.Path,
+			)
 			writeProviderTokenUnauthorized(w, "authenticated subject not found in request context", resourceMetadataURL)
 			return
 		}
