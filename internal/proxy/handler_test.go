@@ -678,3 +678,143 @@ func TestProxyUpstreamOAuthDeleteErrorOn401(t *testing.T) {
 		t.Error("token should remain when Delete fails")
 	}
 }
+
+// --- NewProviderTokenMiddleware tests ---
+
+type mockProviderTokenSource struct {
+	token string
+	err   error
+}
+
+func (m *mockProviderTokenSource) EnsureFreshAccessTokenForSubject(_ context.Context, _ string) (auth.DelegatedAccessResult, error) {
+	if m.err != nil {
+		return auth.DelegatedAccessResult{}, m.err
+	}
+	return auth.DelegatedAccessResult{AccessToken: m.token}, nil
+}
+
+func TestProviderTokenMiddlewareInjectsToken(t *testing.T) {
+	var gotAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	u, _ := url.Parse(upstream.URL)
+	proxyH := NewHandler(u, &mockInvalidator{}, "", "", nil)
+	src := &mockProviderTokenSource{token: "github-provider-token"}
+	h := NewProviderTokenMiddleware(src, "", proxyH)
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, requestWithContext("alice", "gateway-jwt"))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	// Provider token must win over gateway JWT.
+	if gotAuth != "Bearer github-provider-token" {
+		t.Errorf("Authorization: got %q, want %q", gotAuth, "Bearer github-provider-token")
+	}
+}
+
+func TestProviderTokenMiddlewareFailsCloseOnSubjectNotFound(t *testing.T) {
+	upstream := upstreamWithStatus(http.StatusOK)
+	defer upstream.Close()
+
+	u, _ := url.Parse(upstream.URL)
+	proxyH := NewHandler(u, &mockInvalidator{}, "", "", nil)
+	src := &mockProviderTokenSource{err: auth.ErrSubjectNotFound}
+	h := NewProviderTokenMiddleware(src, "https://gw/.well-known/oauth-protected-resource/mcp/rr", proxyH)
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, requestWithContext("alice", "gateway-jwt"))
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", w.Code)
+	}
+	if !strings.Contains(w.Header().Get("WWW-Authenticate"), "invalid_token") {
+		t.Errorf("WWW-Authenticate should contain invalid_token: %q", w.Header().Get("WWW-Authenticate"))
+	}
+	if !strings.Contains(w.Header().Get("WWW-Authenticate"), "resource_metadata") {
+		t.Errorf("WWW-Authenticate should contain resource_metadata: %q", w.Header().Get("WWW-Authenticate"))
+	}
+}
+
+func TestProviderTokenMiddlewareFailsCloseOnRotationFailed(t *testing.T) {
+	upstream := upstreamWithStatus(http.StatusOK)
+	defer upstream.Close()
+
+	u, _ := url.Parse(upstream.URL)
+	proxyH := NewHandler(u, &mockInvalidator{}, "", "", nil)
+	src := &mockProviderTokenSource{err: auth.ErrRotationFailed}
+	h := NewProviderTokenMiddleware(src, "", proxyH)
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, requestWithContext("alice", "gateway-jwt"))
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", w.Code)
+	}
+}
+
+func TestProviderTokenMiddlewareFailsCloseOnEmptySubject(t *testing.T) {
+	upstream := upstreamWithStatus(http.StatusOK)
+	defer upstream.Close()
+
+	u, _ := url.Parse(upstream.URL)
+	proxyH := NewHandler(u, &mockInvalidator{}, "", "", nil)
+	src := &mockProviderTokenSource{token: "tok"}
+	h := NewProviderTokenMiddleware(src, "", proxyH)
+
+	// Request without identity in context.
+	r := httptest.NewRequest(http.MethodGet, "/mcp/test", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", w.Code)
+	}
+}
+
+func TestProxyDoesNotInvalidateGatewayJWTOnProviderToken401(t *testing.T) {
+	upstream := upstreamWithStatus(http.StatusUnauthorized)
+	defer upstream.Close()
+
+	u, _ := url.Parse(upstream.URL)
+	inv := &mockInvalidator{}
+	proxyH := NewHandler(u, inv, "", "", nil)
+	src := &mockProviderTokenSource{token: "github-provider-token"}
+	h := NewProviderTokenMiddleware(src, "", proxyH)
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, requestWithContext("alice", "gateway-jwt"))
+
+	// Upstream returned 401 while using provider token.
+	// The gateway JWT cache must NOT be invalidated.
+	if len(inv.tokens) != 0 {
+		t.Errorf("gateway JWT must not be invalidated when provider token is used; invalidated: %v", inv.tokens)
+	}
+}
+
+func TestProxyProviderTokenTakesPriorityOverGatewayJWT(t *testing.T) {
+	var gotAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	u, _ := url.Parse(upstream.URL)
+	proxyH := NewHandler(u, &mockInvalidator{}, "", "", nil)
+	src := &mockProviderTokenSource{token: "provider-tok"}
+	h := NewProviderTokenMiddleware(src, "", proxyH)
+
+	w := httptest.NewRecorder()
+	// The gateway JWT in context must be replaced by the provider token.
+	h.ServeHTTP(w, requestWithContext("bob", "should-not-be-forwarded"))
+
+	if gotAuth != "Bearer provider-tok" {
+		t.Errorf("Authorization: got %q, want %q", gotAuth, "Bearer provider-tok")
+	}
+}

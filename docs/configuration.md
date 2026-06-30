@@ -160,6 +160,7 @@ setup:
 | `routes[].upstream_oauth` | Upstream OAuth 委任。`auto`（RFC 9728 + RFC 8414 で AS を自動検出）または絶対 issuer URL（`https://...`）。`upstream_bearer_token_env` および `no_auth` と排他。[Upstream OAuth 委任](#upstream-oauth-委任) を参照。 |
 | `routes[].upstream_oauth_scope` | Upstream AS へのトークンリクエストで要求するスコープ（スペース区切り。カンマ区切りは自動正規化）。`upstream_oauth` が必要。 |
 | `routes[].upstream_oauth_grant` | Upstream トークン取得に使用する OAuth 2.0 グラントタイプ（`authorization_code` または `client_credentials`、デフォルト: `authorization_code`）。`upstream_oauth` が必要。[Upstream OAuth 委任](#upstream-oauth-委任) を参照。 |
+| `routes[].upstream_provider_token` | `true` の場合、ゲートウェイの provider アクセストークン（builtin モードでは GitHub ユーザートークン）を upstream Bearer トークンとして注入する。ゲートウェイ認証が必要（`no_auth` と排他）。`upstream_bearer_token_env` および `upstream_oauth` と排他。[プロバイダートークン委任](#プロバイダートークン委任) を参照。 |
 | `setup.completed` | ゲートウェイが書き込むセットアップウィザード状態。オペレーターが直接編集することは通常ありません。 |
 
 ゲートウェイがシークレット移行またはセットアップ完了時に `config.yaml` を書き直す際、未知の YAML フィールドとコメントは保持されません。
@@ -200,6 +201,7 @@ ROUTE_REVIEW_RAVEN=/mcp/review-raven|http://review-raven:8083
 | `upstream_oauth` | なし | Upstream OAuth 委任を有効化。`auto`（RFC 9728 + RFC 8414 で AS を自動検出）または絶対 issuer URL（`https://...`）。`upstream_bearer_token_env` と排他。[Upstream OAuth 委任](#upstream-oauth-委任) を参照。 |
 | `upstream_oauth_scope` | なし | Upstream AS へのトークンリクエストで要求するスコープ（スペース区切り。カンマ区切りは自動正規化）。`upstream_oauth` が必要。 |
 | `upstream_oauth_grant` | `authorization_code` | Upstream トークン取得に使用する OAuth 2.0 グラントタイプ。`authorization_code`（ユーザーを認可エンドポイントへリダイレクト）または `client_credentials`（バックグラウンドでトークンを取得、ユーザー操作不要）。`upstream_oauth` が必要。 |
+| `upstream_provider_token` | `false` | `true` の場合、ゲートウェイの provider アクセストークン（builtin モードでは GitHub ユーザートークン）を upstream Bearer トークンとして注入する。ゲートウェイ認証必須（`auth=none` と排他）。`upstream_bearer_token_env` および `upstream_oauth` と排他。[プロバイダートークン委任](#プロバイダートークン委任) を参照。 |
 
 ### Upstream OAuth 委任
 
@@ -251,6 +253,39 @@ routes:
 ```
 
 > **Note**: コールバックエンドポイント `GET /upstream/callback/{routeName}` は `authorization_code` フローの redirect_uri として自動登録されます。`client_credentials` フローでは使用されません。
+
+### プロバイダートークン委任
+
+`upstream_provider_token=true` を設定したルートでは、ゲートウェイが以下を自動実行します。
+
+1. **トークン解決**: `EnsureFreshAccessTokenForSubject` を使って認証済み subject の provider アクセストークンを取得（`builtin` モードでは GitHub ユーザートークン）。
+2. **注入**: 解決したトークンを upstream への `Authorization: Bearer` ヘッダーとして設定。gateway-signed JWT は upstream に転送されない。
+3. **フェールクローズ**: subject が未キャッシュ・トークン失効・rotation 失敗のいずれかで解決不可の場合は 401 を返し、`WWW-Authenticate` ヘッダーで再認証を案内する。
+
+**セキュリティ境界**:
+- opt-in したルート（`upstream_provider_token=true`）のみに provider トークンが転送される。
+- opt-in していないルート（thread-owl、playwright 等）には provider トークンが漏洩しない。
+- `upstream_oauth`（upstream MCP サーバー固有の OAuth フロー）とは独立した概念である。
+
+**設定例**（環境変数）:
+
+```bash
+ROUTE_REVIEW_RAVEN=/mcp/review-raven|http://review-raven:8083|upstream_provider_token=true
+```
+
+**設定例**（config.yaml）:
+
+```yaml
+routes:
+  - name: review-raven
+    prefix: /mcp/review-raven
+    upstream: http://review-raven:8083
+    upstream_provider_token: true
+```
+
+> **Note**: `upstream_provider_token=true` は `OAUTH_PROVIDER=builtin` の場合に最も効果を発揮します。
+> `github` provider モードでは context トークン自体が GitHub トークンですが、
+> `upstream_provider_token` を使うことで明示的なトークン解決・rotation・フェールクローズが有効になります。
 
 ## シークレット暗号化
 

@@ -950,3 +950,151 @@ func TestParseFromConfig_UpstreamOAuthGrantNilTreatedAsAbsent(t *testing.T) {
 		t.Errorf("UpstreamOAuthGrant for nil input: got %q, want %q", routes[0].UpstreamOAuthGrant, "authorization_code")
 	}
 }
+
+// --- upstream_provider_token tests ---
+
+func TestParseRoutesUpstreamProviderTokenTrue(t *testing.T) {
+	env := []string{"ROUTE_RR=/mcp/review-raven|http://rr:8083|upstream_provider_token=true"}
+	routes, err := parseRoutes(env)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !routes[0].UpstreamProviderToken {
+		t.Error("UpstreamProviderToken: expected true")
+	}
+}
+
+func TestParseRoutesUpstreamProviderTokenFalse(t *testing.T) {
+	env := []string{"ROUTE_RR=/mcp/review-raven|http://rr:8083|upstream_provider_token=false"}
+	routes, err := parseRoutes(env)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if routes[0].UpstreamProviderToken {
+		t.Error("UpstreamProviderToken: expected false")
+	}
+}
+
+func TestParseRoutesUpstreamProviderTokenDefaultFalse(t *testing.T) {
+	env := []string{"ROUTE_RR=/mcp/review-raven|http://rr:8083"}
+	routes, err := parseRoutes(env)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if routes[0].UpstreamProviderToken {
+		t.Error("UpstreamProviderToken: expected false by default")
+	}
+}
+
+func TestParseRoutesUpstreamProviderTokenInvalidValue(t *testing.T) {
+	env := []string{"ROUTE_RR=/mcp/review-raven|http://rr:8083|upstream_provider_token=yes"}
+	_, err := parseRoutes(env)
+	if err == nil {
+		t.Fatal("expected error for invalid upstream_provider_token value")
+	}
+	if !strings.Contains(err.Error(), "upstream_provider_token") {
+		t.Errorf("error message should mention upstream_provider_token: %v", err)
+	}
+}
+
+func TestParseRoutesUpstreamProviderTokenIncompatibleWithAuthNone(t *testing.T) {
+	env := []string{"ROUTE_RR=/mcp/review-raven|http://rr:8083|auth=none|upstream_provider_token=true"}
+	_, err := parseRoutes(env)
+	if err == nil {
+		t.Fatal("expected error: upstream_provider_token + auth=none")
+	}
+	if !strings.Contains(err.Error(), "upstream_provider_token") {
+		t.Errorf("error message should mention upstream_provider_token: %v", err)
+	}
+}
+
+func TestParseRoutesUpstreamProviderTokenIncompatibleWithBearerTokenEnv(t *testing.T) {
+	t.Setenv("SOME_TOKEN", "tok")
+	env := []string{"ROUTE_RR=/mcp/review-raven|http://rr:8083|upstream_bearer_token_env=SOME_TOKEN|upstream_provider_token=true"}
+	_, err := parseRoutes(env)
+	if err == nil {
+		t.Fatal("expected error: upstream_provider_token + upstream_bearer_token_env")
+	}
+	if !strings.Contains(err.Error(), "upstream_provider_token") {
+		t.Errorf("error message should mention upstream_provider_token: %v", err)
+	}
+}
+
+func TestParseRoutesUpstreamProviderTokenIncompatibleWithUpstreamOAuth(t *testing.T) {
+	env := []string{"ROUTE_RR=/mcp/review-raven|http://rr:8083|upstream_oauth=auto|upstream_provider_token=true"}
+	_, err := parseRoutes(env)
+	if err == nil {
+		t.Fatal("expected error: upstream_provider_token + upstream_oauth")
+	}
+	if !strings.Contains(err.Error(), "upstream_provider_token") {
+		t.Errorf("error message should mention upstream_provider_token: %v", err)
+	}
+}
+
+func TestParseFromConfigUpstreamProviderToken(t *testing.T) {
+	cfgRoutes := []appconfig.RouteConfig{
+		{
+			Name:                  "review-raven",
+			Prefix:                "/mcp/review-raven",
+			Upstream:              "http://rr:8083",
+			UpstreamProviderToken: true,
+		},
+	}
+	routes, err := ParseFromConfig(cfgRoutes)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !routes[0].UpstreamProviderToken {
+		t.Error("UpstreamProviderToken: expected true from config")
+	}
+}
+
+func TestParseFromConfigUpstreamProviderTokenIncompatibleWithNoAuth(t *testing.T) {
+	cfgRoutes := []appconfig.RouteConfig{
+		{
+			Name:                  "review-raven",
+			Prefix:                "/mcp/review-raven",
+			Upstream:              "http://rr:8083",
+			NoAuth:                true,
+			UpstreamProviderToken: true,
+		},
+	}
+	_, err := ParseFromConfig(cfgRoutes)
+	if err == nil {
+		t.Fatal("expected error: upstream_provider_token + no_auth in config")
+	}
+}
+
+func TestParseFromConfigUpstreamProviderTokenIncompatibleWithBearerTokenEnv(t *testing.T) {
+	t.Setenv("SOME_TOKEN", "tok")
+	cfgRoutes := []appconfig.RouteConfig{
+		{
+			Name:                   "review-raven",
+			Prefix:                 "/mcp/review-raven",
+			Upstream:               "http://rr:8083",
+			UpstreamBearerTokenEnv: "SOME_TOKEN",
+			UpstreamProviderToken:  true,
+		},
+	}
+	_, err := ParseFromConfig(cfgRoutes)
+	if err == nil {
+		t.Fatal("expected error: upstream_provider_token + upstream_bearer_token_env in config")
+	}
+}
+
+func TestParseFromConfigUpstreamProviderTokenIncompatibleWithUpstreamOAuth(t *testing.T) {
+	oauthVal := "auto"
+	cfgRoutes := []appconfig.RouteConfig{
+		{
+			Name:                  "review-raven",
+			Prefix:                "/mcp/review-raven",
+			Upstream:              "http://rr:8083",
+			UpstreamOAuth:         &oauthVal,
+			UpstreamProviderToken: true,
+		},
+	}
+	_, err := ParseFromConfig(cfgRoutes)
+	if err == nil {
+		t.Fatal("expected error: upstream_provider_token + upstream_oauth in config")
+	}
+}

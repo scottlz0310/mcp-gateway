@@ -44,6 +44,12 @@ type RouteConfig struct {
 	// "client_credentials" (service-to-service, no user interaction required).
 	// Use *string for the same presence-vs-empty reason as UpstreamOAuth.
 	UpstreamOAuthGrant *string `yaml:"upstream_oauth_grant,omitempty" json:"upstream_oauth_grant,omitempty"`
+	// UpstreamProviderToken enables provider access token delegation for this route.
+	// When true, the proxy resolves the authenticated subject's gateway provider token
+	// (e.g. the GitHub user token in builtin mode) via EnsureFreshAccessTokenForSubject
+	// and injects it as the upstream Authorization Bearer header instead of the gateway JWT.
+	// Requires gateway authentication. Incompatible with upstream_bearer_token_env and upstream_oauth.
+	UpstreamProviderToken bool `yaml:"upstream_provider_token,omitempty" json:"upstream_provider_token,omitempty"`
 }
 
 // SetupConfig holds first-run wizard state.

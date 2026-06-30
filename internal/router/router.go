@@ -46,6 +46,11 @@ type Route struct {
 	// "authorization_code" (interactive, default) or "client_credentials" (non-interactive).
 	// Only meaningful when UpstreamOAuth is non-empty.
 	UpstreamOAuthGrant string
+	// UpstreamProviderToken enables provider access token delegation. When true, the proxy
+	// resolves the subject's gateway provider token (e.g. the GitHub user token in builtin
+	// mode) via EnsureFreshAccessTokenForSubject and injects it as the upstream Bearer token.
+	// Requires gateway authentication. Incompatible with UpstreamBearerTokenEnv and UpstreamOAuth.
+	UpstreamProviderToken bool
 }
 
 // ParseEnv reads ROUTE_<NAME>=<prefix>|<upstream_url>[|opt=val...] environment
@@ -210,6 +215,30 @@ func parseRoutes(env []string) ([]Route, error) {
 			upstreamOAuthGrant = "authorization_code"
 		}
 
+		// upstream_provider_token: inject the subject's gateway provider access token as upstream Bearer.
+		// Requires gateway authentication; incompatible with upstream_bearer_token_env and upstream_oauth.
+		var upstreamProviderToken bool
+		if ptVal, ok := options["upstream_provider_token"]; ok {
+			switch strings.TrimSpace(ptVal) {
+			case "true":
+				upstreamProviderToken = true
+			case "false":
+				// explicit false is valid; feature stays disabled
+			default:
+				return nil, fmt.Errorf("%s: upstream_provider_token must be \"true\" or \"false\" (got %q)", key, ptVal)
+			}
+			delete(options, "upstream_provider_token")
+		}
+		if upstreamProviderToken && noAuth {
+			return nil, fmt.Errorf("%s: upstream_provider_token is incompatible with auth=none; provider token injection requires gateway authentication", key)
+		}
+		if upstreamProviderToken && upstreamBearerTokenEnv != "" {
+			return nil, fmt.Errorf("%s: upstream_provider_token and upstream_bearer_token_env are mutually exclusive", key)
+		}
+		if upstreamProviderToken && upstreamOAuth != "" {
+			return nil, fmt.Errorf("%s: upstream_provider_token and upstream_oauth are mutually exclusive", key)
+		}
+
 		// Reject any unrecognised option keys.
 		if len(options) > 0 {
 			unknown := make([]string, 0, len(options))
@@ -257,6 +286,7 @@ func parseRoutes(env []string) ([]Route, error) {
 			UpstreamOAuth:          upstreamOAuth,
 			UpstreamOAuthScope:     upstreamOAuthScope,
 			UpstreamOAuthGrant:     upstreamOAuthGrant,
+			UpstreamProviderToken:  upstreamProviderToken,
 		})
 	}
 	// Longest prefix first for correct matching order.
@@ -385,6 +415,18 @@ func ParseFromConfig(cfgRoutes []appconfig.RouteConfig) ([]Route, error) {
 		if upstreamOAuth != "" && upstreamOAuthGrant == "" {
 			upstreamOAuthGrant = "authorization_code"
 		}
+		// upstream_provider_token: inject the subject's gateway provider access token as upstream Bearer.
+		// Requires gateway authentication; incompatible with upstream_bearer_token_env and upstream_oauth.
+		upstreamProviderToken := r.UpstreamProviderToken
+		if upstreamProviderToken && r.NoAuth {
+			return nil, fmt.Errorf("route %q: upstream_provider_token is incompatible with no_auth; provider token injection requires gateway authentication", name)
+		}
+		if upstreamProviderToken && upstreamBearerTokenEnv != "" {
+			return nil, fmt.Errorf("route %q: upstream_provider_token and upstream_bearer_token_env are mutually exclusive", name)
+		}
+		if upstreamProviderToken && upstreamOAuth != "" {
+			return nil, fmt.Errorf("route %q: upstream_provider_token and upstream_oauth are mutually exclusive", name)
+		}
 		seen[prefix] = struct{}{}
 		routes = append(routes, Route{
 			Name:                   name,
@@ -396,6 +438,7 @@ func ParseFromConfig(cfgRoutes []appconfig.RouteConfig) ([]Route, error) {
 			UpstreamOAuth:          upstreamOAuth,
 			UpstreamOAuthScope:     upstreamOAuthScope,
 			UpstreamOAuthGrant:     upstreamOAuthGrant,
+			UpstreamProviderToken:  upstreamProviderToken,
 		})
 	}
 	sort.Slice(routes, func(i, j int) bool {

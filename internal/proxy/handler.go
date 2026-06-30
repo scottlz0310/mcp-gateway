@@ -3,6 +3,8 @@ package proxy
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -20,6 +22,16 @@ type TokenInvalidator interface {
 	InvalidateCachedToken(token string)
 }
 
+// ProviderTokenSource resolves the current provider access token for an authenticated subject.
+// Implemented by auth.Handler via EnsureFreshAccessTokenForSubject.
+type ProviderTokenSource interface {
+	EnsureFreshAccessTokenForSubject(ctx context.Context, subject string) (auth.DelegatedAccessResult, error)
+}
+
+// providerTokenContextKey is the context key used to pass a resolved provider access token
+// from NewProviderTokenMiddleware into the proxy Rewrite function and ModifyResponse handler.
+type providerTokenContextKey struct{}
+
 // UpstreamTokenRefresher handles proactive and 401-triggered upstream OAuth
 // token refresh. Implemented by upstreamoauth.Refresher.
 type UpstreamTokenRefresher interface {
@@ -36,6 +48,61 @@ type UpstreamOAuthOptions struct {
 	TokenStore auth.UpstreamTokenStore
 	RouteName  string
 	Refresher  UpstreamTokenRefresher // nil = no proactive/auto refresh
+}
+
+// NewProviderTokenMiddleware returns a handler that resolves the authenticated subject's
+// provider access token (e.g. the GitHub user token in builtin mode) via src, stores it in
+// the request context, and delegates to next. If resolution fails for any reason the request
+// is rejected with a 401 that includes a WWW-Authenticate header pointing to resourceMetadataURL
+// (when non-empty) so that MCP clients can re-authenticate. next is never called on failure.
+//
+// This middleware must be placed after the gateway Auth middleware (which sets the identity in
+// context) and before the proxy handler (which reads the token from context).
+func NewProviderTokenMiddleware(src ProviderTokenSource, resourceMetadataURL string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		subject := middleware.IdentityFromContext(r.Context())
+		if subject == "" {
+			writeProviderTokenUnauthorized(w, "authenticated subject not found in request context", resourceMetadataURL)
+			return
+		}
+		result, err := src.EnsureFreshAccessTokenForSubject(r.Context(), subject)
+		if err != nil {
+			var logMsg string
+			switch {
+			case errors.Is(err, auth.ErrSubjectNotFound):
+				logMsg = "provider token: subject not found; re-authentication required"
+			case errors.Is(err, auth.ErrRotationFailed):
+				logMsg = "provider token: token rotation failed; re-authentication required"
+			default:
+				logMsg = "provider token: resolution failed; re-authentication required"
+			}
+			slog.Warn(logMsg, "path", r.URL.Path)
+			writeProviderTokenUnauthorized(w, "provider access token unavailable; re-authenticate via the gateway OAuth flow", resourceMetadataURL)
+			return
+		}
+		ctx := context.WithValue(r.Context(), providerTokenContextKey{}, result.AccessToken)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// writeProviderTokenUnauthorized writes a 401 response with WWW-Authenticate (RFC 6750 §3.1).
+func writeProviderTokenUnauthorized(w http.ResponseWriter, errDesc, resourceMetadataURL string) {
+	parts := []string{
+		`Bearer realm="mcp-gateway"`,
+		fmt.Sprintf(`error=%q, error_description=%q`, "invalid_token", errDesc),
+	}
+	if resourceMetadataURL != "" {
+		parts = append(parts, fmt.Sprintf(`resource_metadata=%q`, resourceMetadataURL))
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("WWW-Authenticate", strings.Join(parts, ", "))
+	w.WriteHeader(http.StatusUnauthorized)
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"error":             "invalid_token",
+		"error_description": errDesc,
+	})
 }
 
 // NewHandler returns an HTTP handler that reverse-proxies authenticated
@@ -134,6 +201,11 @@ func NewHandler(upstream *url.URL, inv TokenInvalidator, upstreamBearerTokenEnv 
 						"path", pr.Out.URL.Path,
 					)
 				}
+			} else if pt, ok := pr.In.Context().Value(providerTokenContextKey{}).(string); ok && pt != "" {
+				// Provider token delegation: NewProviderTokenMiddleware resolved the subject's
+				// provider access token and stored it in context. Inject it as the upstream Bearer.
+				// This path is only reached when upstream_provider_token=true on the route.
+				pr.Out.Header.Set("Authorization", "Bearer "+pt)
 			} else if token := middleware.TokenFromContext(pr.In.Context()); token != "" {
 				pr.Out.Header.Set("Authorization", "Bearer "+token)
 			}
@@ -195,6 +267,15 @@ func NewHandler(upstream *url.URL, inv TokenInvalidator, upstreamBearerTokenEnv 
 					slog.Warn("upstream rejected upstream credential; check env var token",
 						"path", resp.Request.URL.Path,
 						"env_var", upstreamBearerTokenEnv,
+					)
+				} else if _, usedProviderToken := resp.Request.Context().Value(providerTokenContextKey{}).(string); usedProviderToken {
+					// The 401 came from a provider-token-delegated route.
+					// The provider token may have expired between middleware resolution and
+					// the upstream call. Do NOT invalidate the gateway JWT cache — it is
+					// independent of the provider token lifecycle. The client can retry;
+					// the middleware will attempt a fresh EnsureFreshAccessTokenForSubject.
+					slog.Warn("upstream rejected provider token; provider access token may be stale",
+						"path", resp.Request.URL.Path,
 					)
 				} else if inv != nil {
 					if token := extractBearer(resp.Request); token != "" {
