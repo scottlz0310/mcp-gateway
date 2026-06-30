@@ -758,6 +758,24 @@ func TestProviderTokenMiddlewareFailsCloseOnRotationFailed(t *testing.T) {
 	}
 }
 
+func TestProviderTokenMiddlewareFailsCloseOnGenericError(t *testing.T) {
+	upstream := upstreamWithStatus(http.StatusOK)
+	defer upstream.Close()
+
+	u, _ := url.Parse(upstream.URL)
+	proxyH := NewHandler(u, &mockInvalidator{}, "", "", nil)
+	// Non-sentinel error exercises the default branch in the switch.
+	src := &mockProviderTokenSource{err: fmt.Errorf("unexpected provider store error")}
+	h := NewProviderTokenMiddleware(src, "", proxyH)
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, requestWithContext("alice", "gateway-jwt"))
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", w.Code)
+	}
+}
+
 func TestProviderTokenMiddlewareFailsCloseOnEmptySubject(t *testing.T) {
 	upstream := upstreamWithStatus(http.StatusOK)
 	defer upstream.Close()
