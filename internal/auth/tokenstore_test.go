@@ -101,6 +101,30 @@ func testTokenStoreContract(t *testing.T, ts TokenStore) {
 	if err := ts.SaveNonce("tok-expired-nonce", "nonce-xyz"); err != nil {
 		t.Fatalf("SaveNonce on expired token returned error: %v", err)
 	}
+
+	// SaveProviderAccessToken attaches the provider token to an existing entry;
+	// Lookup returns it.
+	if err := ts.Save("tok-pat", "frank", nil, time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("Save tok-pat: %v", err)
+	}
+	if err := ts.SaveProviderAccessToken("tok-pat", "gho_abc123"); err != nil {
+		t.Fatalf("SaveProviderAccessToken: %v", err)
+	}
+	recPAT, okPAT := ts.Lookup("tok-pat")
+	if !okPAT {
+		t.Fatal("Lookup tok-pat: expected hit after SaveProviderAccessToken")
+	}
+	if recPAT.ProviderAccessToken != "gho_abc123" {
+		t.Errorf("SaveProviderAccessToken: ProviderAccessToken got %q, want %q", recPAT.ProviderAccessToken, "gho_abc123")
+	}
+
+	// SaveProviderAccessToken on absent token is a no-op (no error, no entry created).
+	if err := ts.SaveProviderAccessToken("no-such-token", "gho_ghost"); err != nil {
+		t.Fatalf("SaveProviderAccessToken on absent token returned error: %v", err)
+	}
+	if _, ok := ts.Lookup("no-such-token"); ok {
+		t.Error("SaveProviderAccessToken must not create an entry for an unknown token")
+	}
 }
 
 // ── memTokenStore ─────────────────────────────────────────────────────────────
@@ -366,6 +390,36 @@ func TestFileTokenStoreSaveProviderRefreshFlushFailureRollsBack(t *testing.T) {
 	}
 }
 
+// TestFileTokenStoreProviderAccessTokenRoundTrip verifies that the provider
+// access token persisted via SaveProviderAccessToken survives a reload of the
+// FileTokenStore. This is the on-disk contract EnsureFreshAccessTokenForSubject
+// relies on to recover a builtin-mode GitHub token after a gateway restart.
+func TestFileTokenStoreProviderAccessTokenRoundTrip(t *testing.T) {
+	path := tempStorePath(t)
+	ts1, err := NewFileTokenStore(path)
+	if err != nil {
+		t.Fatalf("initial NewFileTokenStore: %v", err)
+	}
+	if err := ts1.Save("jwt-host", "alice", []string{"https://gw.example/mcp"}, time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := ts1.SaveProviderAccessToken("jwt-host", "gho_alice1"); err != nil {
+		t.Fatalf("SaveProviderAccessToken: %v", err)
+	}
+
+	ts2, err := NewFileTokenStore(path)
+	if err != nil {
+		t.Fatalf("reloaded NewFileTokenStore: %v", err)
+	}
+	rec, ok := ts2.Lookup("jwt-host")
+	if !ok {
+		t.Fatal("after reload: expected cache hit for jwt-host")
+	}
+	if rec.ProviderAccessToken != "gho_alice1" {
+		t.Errorf("provider access token after reload: got %q, want %q", rec.ProviderAccessToken, "gho_alice1")
+	}
+}
+
 // TestFileTokenStoreExpiredNotLoaded verifies that expired entries written before
 // a reload do not surface after the reload's startup sweep.
 func TestFileTokenStoreExpiredNotLoaded(t *testing.T) {
@@ -567,6 +621,41 @@ func testRefreshTokenStoreContract(t *testing.T, rts RefreshTokenStore) {
 	}
 	if got := rts.LookupNonce("rt-nonce-exp"); got != "" {
 		t.Errorf("LookupNonce on expired: got %q, want empty", got)
+	}
+
+	// SaveProviderAccessToken attaches a provider token to an existing RT
+	// entry; LookupProviderAccessToken returns it.
+	if err := rts.Save("rt-pat", "access-tok-pat", "", "fid-pat", time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("Save rt-pat: %v", err)
+	}
+	if err := rts.SaveProviderAccessToken("rt-pat", "gho_pat1"); err != nil {
+		t.Fatalf("SaveProviderAccessToken: %v", err)
+	}
+	if got := rts.LookupProviderAccessToken("rt-pat"); got != "gho_pat1" {
+		t.Errorf("LookupProviderAccessToken: got %q, want %q", got, "gho_pat1")
+	}
+	// LookupProviderAccessToken returns "" for unknown token.
+	if got := rts.LookupProviderAccessToken("no-such-rt"); got != "" {
+		t.Errorf("LookupProviderAccessToken on absent: got %q, want empty", got)
+	}
+	// SaveProviderAccessToken on absent token is a no-op (no error).
+	if err := rts.SaveProviderAccessToken("no-such-rt", "gho_ghost"); err != nil {
+		t.Fatalf("SaveProviderAccessToken on absent returned error: %v", err)
+	}
+	// LookupProviderAccessToken remains readable after soft-revocation (Revoke),
+	// mirroring LookupNonce: tokenRefresh reads it via ReserveRefreshToken,
+	// which soft-revokes rather than deletes.
+	if err := rts.Save("rt-pat-revoked", "access-tok-rev", "", "fid-rev", time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("Save rt-pat-revoked: %v", err)
+	}
+	if err := rts.SaveProviderAccessToken("rt-pat-revoked", "gho_rev1"); err != nil {
+		t.Fatalf("SaveProviderAccessToken rt-pat-revoked: %v", err)
+	}
+	if err := rts.Revoke("rt-pat-revoked"); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	if got := rts.LookupProviderAccessToken("rt-pat-revoked"); got != "gho_rev1" {
+		t.Errorf("LookupProviderAccessToken after Revoke: got %q, want %q (soft-revoked entries must remain readable)", got, "gho_rev1")
 	}
 }
 
@@ -779,12 +868,14 @@ func (f *alwaysFailRefreshStore) Lookup(_ string) (string, string, string, time.
 func (f *alwaysFailRefreshStore) LookupAny(_ string) (string, string, string, time.Time, bool, bool) {
 	return "", "", "", time.Time{}, false, false
 }
-func (f *alwaysFailRefreshStore) Revoke(_ string) error          { return nil }
-func (f *alwaysFailRefreshStore) RevokeFamily(_ string) error    { return nil }
-func (f *alwaysFailRefreshStore) SaveNonce(_, _ string) error    { return nil }
-func (f *alwaysFailRefreshStore) LookupNonce(_ string) string    { return "" }
-func (f *alwaysFailRefreshStore) Delete(_ string) error          { return errInjectedStoreFailure }
-func (f *alwaysFailRefreshStore) Sweep() error                   { return nil }
+func (f *alwaysFailRefreshStore) Revoke(_ string) error                     { return nil }
+func (f *alwaysFailRefreshStore) RevokeFamily(_ string) error               { return nil }
+func (f *alwaysFailRefreshStore) SaveNonce(_, _ string) error               { return nil }
+func (f *alwaysFailRefreshStore) LookupNonce(_ string) string               { return "" }
+func (f *alwaysFailRefreshStore) SaveProviderAccessToken(_, _ string) error { return nil }
+func (f *alwaysFailRefreshStore) LookupProviderAccessToken(_ string) string { return "" }
+func (f *alwaysFailRefreshStore) Delete(_ string) error                     { return errInjectedStoreFailure }
+func (f *alwaysFailRefreshStore) Sweep() error                              { return nil }
 
 // testRefreshTokenStoreReuseDetection exercises LookupAny and RevokeFamily on
 // the given RefreshTokenStore.  It is shared across in-memory and file-backed

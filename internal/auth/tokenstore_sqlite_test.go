@@ -1,11 +1,14 @@
 package auth
 
 import (
+	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
 func tempSQLitePath(t *testing.T) string {
@@ -64,6 +67,89 @@ func TestSQLiteRefreshTokenStorePersistence(t *testing.T) {
 	}
 	if at != "at-persist" || aud != "aud" || fid != "fid-p" {
 		t.Errorf("Lookup after reopen: got at=%q aud=%q fid=%q", at, aud, fid)
+	}
+}
+
+// TestSQLiteRefreshTokenStoreProviderAccessTokenPersists verifies that the
+// provider access token (builtin mode's GitHub token, recovered via
+// SaveProviderAccessToken/LookupProviderAccessToken) survives a store reopen.
+func TestSQLiteRefreshTokenStoreProviderAccessTokenPersists(t *testing.T) {
+	path := tempSQLitePath(t)
+	exp := time.Now().Add(time.Hour)
+
+	rts1, err := NewSQLiteRefreshTokenStore(path)
+	if err != nil {
+		t.Fatalf("open 1: %v", err)
+	}
+	if err := rts1.Save("rt-pat-persist", "jwt-persist", "aud", "fid-pat", exp); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := rts1.SaveProviderAccessToken("rt-pat-persist", "gho_persist1"); err != nil {
+		t.Fatalf("SaveProviderAccessToken: %v", err)
+	}
+	rts1.(*sqliteRefreshTokenStore).Close() //nolint — close before reopening
+
+	rts2, err := NewSQLiteRefreshTokenStore(path)
+	if err != nil {
+		t.Fatalf("open 2: %v", err)
+	}
+	closeSQLiteStore(t, rts2)
+	if got := rts2.LookupProviderAccessToken("rt-pat-persist"); got != "gho_persist1" {
+		t.Errorf("LookupProviderAccessToken after reopen: got %q, want %q", got, "gho_persist1")
+	}
+}
+
+// TestSQLiteRefreshTokenStoreProviderAccessTokenColumnMigration verifies that
+// opening a database created before the provider_access_token column existed
+// does not fail, and that the column becomes usable afterward (idempotent
+// ALTER TABLE ADD COLUMN).
+func TestSQLiteRefreshTokenStoreProviderAccessTokenColumnMigration(t *testing.T) {
+	path := tempSQLitePath(t)
+
+	// Simulate a pre-migration database: create the table without the
+	// provider_access_token column (as it existed before scottlz0310/mcp-gateway#188).
+	preSchema := `
+CREATE TABLE IF NOT EXISTS refresh_tokens (
+	token_hash   TEXT    PRIMARY KEY,
+	access_token TEXT    NOT NULL,
+	audience     TEXT    NOT NULL DEFAULT '',
+	family_id    TEXT    NOT NULL DEFAULT '',
+	expires_at   INTEGER NOT NULL,
+	revoked      INTEGER NOT NULL DEFAULT 0,
+	nonce        TEXT    NOT NULL DEFAULT ''
+);`
+	db, err := sql.Open("sqlite", path+"?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=on")
+	if err != nil {
+		t.Fatalf("opening raw sqlite db: %v", err)
+	}
+	if _, err := db.Exec(preSchema); err != nil {
+		t.Fatalf("creating pre-migration schema: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO refresh_tokens (token_hash, access_token, expires_at) VALUES (?, ?, ?)`,
+		tokenKey("rt-premigration"), "jwt-premigration", time.Now().Add(time.Hour).Unix(),
+	); err != nil {
+		t.Fatalf("inserting pre-migration row: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("closing raw sqlite db: %v", err)
+	}
+
+	// NewSQLiteRefreshTokenStore must migrate the schema without error and
+	// leave the pre-existing row's provider_access_token as the column default.
+	rts, err := NewSQLiteRefreshTokenStore(path)
+	if err != nil {
+		t.Fatalf("NewSQLiteRefreshTokenStore on pre-migration db: %v", err)
+	}
+	closeSQLiteStore(t, rts)
+	if got := rts.LookupProviderAccessToken("rt-premigration"); got != "" {
+		t.Errorf("pre-migration row provider_access_token: got %q, want empty default", got)
+	}
+	if err := rts.SaveProviderAccessToken("rt-premigration", "gho_postmigration"); err != nil {
+		t.Fatalf("SaveProviderAccessToken after migration: %v", err)
+	}
+	if got := rts.LookupProviderAccessToken("rt-premigration"); got != "gho_postmigration" {
+		t.Errorf("post-migration write: got %q, want %q", got, "gho_postmigration")
 	}
 }
 

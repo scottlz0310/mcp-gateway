@@ -344,6 +344,8 @@ MCP_GATEWAY_TOKEN_STORE_PATH=
 - コンテナイメージやスナップショットにいずれのファイルも含めないこと。
 - 再起動をまたいだローテーションが不要な場合は `github_refresh_enabled` を無効にしてください。リフレッシュトークンはディスクに書き込まれません。
 
+**builtin mode（`OAUTH_PROVIDER=builtin`）の追加事項:** builtin mode ではクライアントに渡すアクセストークンはゲートウェイ署名の JWT であり、GitHub アクセストークン自体ではありません。ただし Phase B delegated access（`EnsureFreshAccessTokenForSubject`、`upstream_provider_token=true` ルートおよび `/internal/v1/whoami` が使用）が upstream サービスへ GitHub トークンを引き渡せるようにするため、GitHub アクセストークンは JWT に紐付けて `tokens.json`（および `github_refresh_enabled` 無効時でも常に）と、そのリフレッシュトークンストア（file-backed 構成では `tokens.json.refresh`、`MCP_GATEWAY_TOKEN_STORE_PATH` が SQLite バックエンドを指す場合は同 DB 内）の両方に**平文で常に**保存されます。`github_refresh_enabled` はリフレッシュトークン自体の保存有無のみを制御し、GitHub アクセストークンの保存有無は制御しません。したがって上記の「`tokens.json` の読者はログイン済みユーザーの GitHub セッションを乗っ取れる」というリスクは、`github_refresh_enabled` の設定に関わらず builtin mode にも同様に適用されます。
+
 ## リバースプロキシヘッダー
 
 mcp-gateway の前で TLS を終端する場合:

@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"errors"
 	"sync/atomic"
 	"testing"
@@ -468,5 +470,79 @@ func TestRotationPermanentlyFailedSurvivesRestart(t *testing.T) {
 	_, err = h2.EnsureFreshAccessTokenForSubject(context.Background(), "alice")
 	if !errors.Is(err, ErrSubjectNotFound) {
 		t.Fatalf("EnsureFresh after restart: err=%v want ErrSubjectNotFound (dead bearer must not be returned)", err)
+	}
+}
+
+// newDelegatedBuiltinTestHandler builds a builtin-mode Handler (gateway issues
+// its own RS256 JWTs; the Mock provider's Name() is "builtin") for exercising
+// EnsureFreshAccessTokenForSubject's builtin branch. ghExchangeAccessToken is
+// the GitHub access token ExchangeCode returns during the OAuth callback.
+func newDelegatedBuiltinTestHandler(t *testing.T, ghExchangeAccessToken string) *Handler {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+	p := &provider.Mock{
+		NameValue:     "builtin",
+		ClientIDValue: "builtin-client-id",
+		ScopesValue:   "read:user,user:email",
+		ExchangeCodeFunc: func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{AccessToken: ghExchangeAccessToken}, nil
+		},
+		ValidateFunc: func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Subject: "alice"}, nil
+		},
+	}
+	h, err := NewHandler(Config{
+		BaseURL:        "http://localhost:8080",
+		SessionTTL:     10 * time.Minute,
+		CacheTTL:       5 * time.Minute,
+		ExpiresIn:      90 * 24 * time.Hour,
+		OIDCPrivateKey: key,
+	}, p)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	return h
+}
+
+// TestEnsureFreshAccessTokenForSubject_BuiltinReturnsProviderTokenNotJWT is
+// the direct regression test for scottlz0310/mcp-gateway#188: in builtin
+// mode, EnsureFreshAccessTokenForSubject must return the GitHub access token
+// recorded at token-exchange time, never the gateway-issued JWT the client
+// was handed.
+func TestEnsureFreshAccessTokenForSubject_BuiltinReturnsProviderTokenNotJWT(t *testing.T) {
+	const ghAccessToken = "gho_realgithubtoken"
+	h := newDelegatedBuiltinTestHandler(t, ghAccessToken)
+	_, jwt := runBuiltinFullFlow(t, h, "alice")
+	if jwt == "" {
+		t.Fatal("runBuiltinFullFlow: empty access_token in token response")
+	}
+
+	res, err := h.EnsureFreshAccessTokenForSubject(context.Background(), "alice")
+	if err != nil {
+		t.Fatalf("EnsureFreshAccessTokenForSubject: %v", err)
+	}
+	if res.AccessToken != ghAccessToken {
+		t.Errorf("access token: got %q, want provider token %q", res.AccessToken, ghAccessToken)
+	}
+	if res.AccessToken == jwt {
+		t.Fatal("regression: EnsureFreshAccessTokenForSubject leaked the gateway JWT instead of the GitHub access token")
+	}
+}
+
+// TestEnsureFreshAccessTokenForSubject_BuiltinLegacyRecordWithoutProviderToken
+// verifies the safe-fallback behavior for a JWT cached before this fix existed
+// (ProviderAccessToken empty): EnsureFreshAccessTokenForSubject must return
+// ErrSubjectNotFound (forcing re-authentication) rather than falling through
+// to the non-builtin logic, which would otherwise hand back the raw JWT.
+func TestEnsureFreshAccessTokenForSubject_BuiltinLegacyRecordWithoutProviderToken(t *testing.T) {
+	h := newDelegatedBuiltinTestHandler(t, "gho_unused")
+	h.store.CacheToken("legacy-jwt-no-provider-token", "bob", "http://localhost:8080")
+
+	_, err := h.EnsureFreshAccessTokenForSubject(context.Background(), "bob")
+	if !errors.Is(err, ErrSubjectNotFound) {
+		t.Fatalf("err: got %v, want ErrSubjectNotFound (force re-auth for pre-fix JWTs)", err)
 	}
 }

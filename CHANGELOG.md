@@ -7,6 +7,14 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `EnsureFreshAccessTokenForSubject` (Phase B delegated access) now returns the GitHub provider access token in builtin mode (`OAUTH_PROVIDER=builtin`), instead of the gateway-issued JWT. Previously, the GitHub access token obtained during the OAuth token exchange was used only for identity resolution and then discarded; the token store held only the gateway JWT, which delegated-access callers (e.g. review-raven's `upstream_provider_token=true` route and the `/internal/v1/whoami` endpoint) received as if it were a usable GitHub bearer token, causing every downstream GitHub API call to fail with `401 Unauthorized` regardless of whether the user's GitHub session was actually still valid. ([#188](https://github.com/scottlz0310/mcp-gateway/issues/188))
+  - `TokenRecord.ProviderAccessToken` — new field recording the provider access token associated with a cached entry; populated across the authorization-code flow, the device flow, and carried forward on `refresh_token` grant (via the refresh-token store, since a refresh token's grace period can outlive the access-token cache entry it was issued alongside).
+  - `TokenStore.SaveProviderAccessToken` / `RefreshTokenStore.SaveProviderAccessToken` + `LookupProviderAccessToken` — new store methods (mem, file, and SQLite `RefreshTokenStore` backends).
+  - `ValidateToken` no longer runs the non-builtin GitHub rotation path on a cache hit in builtin mode, closing a token-leak risk that would otherwise surface once builtin-mode rotation support lands (tracked as a follow-up; not yet implemented — `builtinProvider.RefreshToken` still returns `ErrRefreshNotSupported`).
+  - `docs/configuration.md` — documented that builtin mode always persists the GitHub access token in `tokens.json`/the refresh-token store, independent of `github_refresh_enabled`.
+
 ### Added
 
 - `Mcp-Session-Id` 双方向透過の回帰テストと診断ログ・トラブルシュート手順を追加 ([#182](https://github.com/scottlz0310/mcp-gateway/issues/182))
