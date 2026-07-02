@@ -107,10 +107,14 @@ var knownOAuthErrorCodes = map[string]struct{}{
 	"request_not_supported":      {},
 	"request_uri_not_supported":  {},
 	"registration_not_supported": {},
-	// GitHub 固有
+	// GitHub 固有 — bad_refresh_token は docs/configuration.md の
+	// 「rotation_failed err=bad_refresh_token → 再認証が必要」という
+	// 運用診断契約が依存するため、必ず保持すること
 	"incorrect_client_credentials": {},
 	"redirect_uri_mismatch":        {},
 	"bad_verification_code":        {},
+	"bad_refresh_token":            {},
+	"unverified_user_email":        {},
 	"incorrect_device_code":        {},
 	"device_flow_disabled":         {},
 	"application_suspended":        {},

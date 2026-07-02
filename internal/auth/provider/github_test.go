@@ -238,6 +238,7 @@ func TestNormalizeOAuthErrorCode(t *testing.T) {
 		{input: " access_denied ", want: "access_denied"},
 		{input: "Authorization_Pending", want: "authorization_pending"},
 		{input: "incorrect_client_credentials", want: "incorrect_client_credentials"},
+		{input: "bad_refresh_token", want: "bad_refresh_token"},
 		{input: "unknown_error", want: "unknown_error"},
 		// 未知値は fail-closed で固定値へ: 文字種・長さが正当でも、AS が
 		// 秘密値を error フィールドへ反映したケースを素通ししない。
@@ -270,6 +271,7 @@ func TestGitHubRefreshToken(t *testing.T) {
 		wantAccessExpiry  time.Duration
 		wantErr           bool
 		wantUpstrm        bool
+		wantOAuthCode     string
 	}{
 		{
 			name:              "success rotates tokens",
@@ -290,11 +292,14 @@ func TestGitHubRefreshToken(t *testing.T) {
 			wantAccessExpiry:  28800 * time.Second,
 		},
 		{
+			// bad_refresh_token は docs/configuration.md の再認証判断の
+			// 診断契約: ErrorDetails まで unknown_error に潰されず保持される。
 			name:              "bad refresh token rejected",
 			refreshTokenInput: "rt-bad",
 			status:            http.StatusOK,
 			body:              `{"error":"bad_refresh_token"}`,
 			wantErr:           true,
+			wantOAuthCode:     "bad_refresh_token",
 		},
 		{
 			name:              "upstream 503 is transient",
@@ -340,6 +345,11 @@ func TestGitHubRefreshToken(t *testing.T) {
 				}
 				if !tc.wantUpstrm && errors.As(err, &ue) {
 					t.Errorf("did not expect UpstreamError, got %v", err)
+				}
+				if tc.wantOAuthCode != "" {
+					if code, _, _ := ErrorDetails(err); code != tc.wantOAuthCode {
+						t.Errorf("ErrorDetails code: got %q, want %q", code, tc.wantOAuthCode)
+					}
 				}
 				return
 			}
