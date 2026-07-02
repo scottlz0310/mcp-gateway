@@ -5,11 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
-	"strings"
 	"time"
 
 	"golang.org/x/sync/singleflight"
@@ -200,9 +198,7 @@ func (r *Refresher) callRefreshEndpoint(ctx context.Context, rec ClientRecord, r
 	// the refresh_token is invalid or revoked by the AS.
 	permanent := resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests
 	if resp.StatusCode != http.StatusOK {
-		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
-		return nil, permanent, fmt.Errorf("token endpoint %s: status %d: %s",
-			rec.TokenEndpoint, resp.StatusCode, strings.TrimSpace(string(snippet)))
+		return nil, permanent, tokenEndpointError(rec.TokenEndpoint, resp.StatusCode, resp.Body)
 	}
 
 	var tr tokenExchangeResponse

@@ -96,9 +96,14 @@ func TestBuiltinFlowLogsDoNotLeakTokens(t *testing.T) {
 		t.Fatalf("refresh: got %d; body=%s", refreshRec.Code, refreshRec.Body.String())
 	}
 	var refreshResp map[string]any
-	_ = json.NewDecoder(refreshRec.Body).Decode(&refreshResp)
+	if err := json.NewDecoder(refreshRec.Body).Decode(&refreshResp); err != nil {
+		t.Fatalf("decode refresh response: %v", err)
+	}
 	newAccessToken, _ := refreshResp["access_token"].(string)
 	newRefreshToken, _ := refreshResp["refresh_token"].(string)
+	if newAccessToken == "" || newRefreshToken == "" {
+		t.Fatalf("refresh did not rotate tokens: access=%q refresh=%q", newAccessToken, newRefreshToken)
+	}
 
 	out := logs.String()
 	if !strings.Contains(out, "oauth audit") {
@@ -112,10 +117,6 @@ func TestBuiltinFlowLogsDoNotLeakTokens(t *testing.T) {
 		"rotated refresh token": newRefreshToken,
 	}
 	for name, secret := range secrets {
-		if secret == "" {
-			t.Errorf("%s was not issued", name)
-			continue
-		}
 		if strings.Contains(out, secret) {
 			t.Errorf("log output contains raw %s", name)
 		}

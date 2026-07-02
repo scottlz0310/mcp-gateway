@@ -11,8 +11,9 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 - Completed the systematic token log-leak audit of all `slog` call sites (#24 Phase 4 backlog). No raw token or secret value is logged anywhere, apart from the deliberate and documented setup-mode one-time token. ([#193](https://github.com/scottlz0310/mcp-gateway/issues/193))
   - `docs/token-log-audit.md` — audit record: scope, per-package findings, safe-helper inventory (`tokenFingerprint` / `tokenHash` / `subjectHash`, all sha256-based), the indirect-leak check for error strings, and the setup-mode exception rationale
-  - `CONTRIBUTING.md` — new "Logging & Secrets" policy: sha256-based helpers are required to identify tokens in logs; error strings may embed only non-2xx response bodies capped at 256 bytes; access logs must not include query strings
-  - Regression tests pinning the no-raw-token guarantee: builtin authorization-code + refresh flow and both GitHub rotation outcomes (`internal/auth/log_leak_test.go`), and the proxy 401 invalidation path (`internal/proxy/handler_test.go`)
+  - `CONTRIBUTING.md` — new "Logging & Secrets" policy: sha256-based helpers are required to identify tokens in logs; response bodies from endpoints that receive secrets (token endpoints) must never be embedded in error strings, while endpoints that receive no secrets (discovery, DCR) may embed non-2xx bodies capped at 256 bytes; access logs must not include query strings
+  - Token endpoint error handling (`internal/upstreamoauth` authorization-code exchange / refresh / client_credentials) no longer embeds non-2xx response bodies into error strings — an AS reflecting the submitted authorization code, refresh token, or client secret into an error body would otherwise leak them into logs (found in PR #194 review); only the HTTP status and the normalized OAuth error code survive (`tokenEndpointError`)
+  - Regression tests pinning the no-raw-token guarantee: builtin authorization-code + refresh flow and both GitHub rotation outcomes (`internal/auth/log_leak_test.go`), all three token-endpoint call paths against a secret-reflecting AS (`internal/upstreamoauth/log_leak_test.go`), and the proxy 401 invalidation path (`internal/proxy/handler_test.go`)
 
 ### Fixed
 

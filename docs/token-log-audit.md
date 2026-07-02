@@ -13,7 +13,7 @@ Issue [#193](https://github.com/scottlz0310/mcp-gateway/issues/193)(#24 Phase 4 
 | 確認観点 | 結果 |
 | --- | --- |
 | slog 引数へのトークン生値の直渡し | なし(意図的例外 1 箇所のみ、後述) |
-| `err` 値経由の間接漏洩(URL・レスポンスボディ混入) | なし(後述) |
+| `err` 値経由の間接漏洩(URL・レスポンスボディ混入) | token endpoint のエラー本文反映リスクを PR #194 レビューで指摘され、本文非出力へ修正済み(後述) |
 | HTTP アクセスログのクエリ文字列漏洩 | なし(`r.URL.Path` のみ出力、query 非出力) |
 | トークン識別用ヘルパーのハッシュ化 | すべて sha256 ベース(後述) |
 
@@ -40,9 +40,21 @@ Issue [#193](https://github.com/scottlz0310/mcp-gateway/issues/193)(#24 Phase 4 
 
 ## err 経由の間接漏洩の確認
 
-トークンエンドポイント・DCR・discovery の HTTP エラーをエラー文字列に含める箇所(`internal/upstreamoauth/{flow,callback,refresher,dcr}.go`、`internal/auth/provider/oidc.go`)は、いずれも以下の条件を満たす:
+外部 HTTP レスポンスをエラー文字列へ反映する箇所は、リクエストに秘密値を含むかどうかで扱いを分ける。
 
-- **非 2xx のエラーレスポンスのみ**をボディとして読む(トークンを含む成功レスポンスはエラーに載らない)
+### 秘密値を送信するエンドポイント: レスポンス本文をエラーに含めない
+
+token endpoint への POST(`internal/upstreamoauth/{flow,callback,refresher}.go`)は authorization code・refresh token・client secret を送信するため、AS がこれらをエラー本文へ反映すると、本文込みのエラーが `slog` に到達して漏洩する。初回監査では「非 2xx のみ・256 バイト制限」を根拠に許容と判断していたが、PR #194 のレビューでこの反映リスクを指摘され、方針を修正した:
+
+- 非 2xx レスポンスの本文はエラー文字列へ一切含めない
+- エラーに残すのは HTTP status と、本文 JSON の `error` フィールドを `provider.NormalizeOAuthErrorCode` で正規化した OAuth error code のみ(`internal/upstreamoauth/errors.go` の `tokenEndpointError`)
+- 秘密値をエラー本文へ反映する token endpoint を模した回帰テストで固定(`internal/upstreamoauth/log_leak_test.go`)
+
+### 秘密値を送信しないエンドポイント: 256 バイト snippet を許容
+
+DCR 登録(`internal/upstreamoauth/dcr.go`)と OIDC discovery(`internal/auth/provider/oidc.go`)はリクエストに秘密値を含まないため、エラー本文への反映リスクが構造的に存在しない。診断性を優先し、以下の条件で snippet を許容する:
+
+- **非 2xx のエラーレスポンスのみ**をボディとして読む(シークレットを含む成功レスポンスはエラーに載らない)
 - `io.LimitReader(resp.Body, 256)` で 256 バイトに制限
 - エラーに含まれる URL はエンドポイント URL のみ(トークンをクエリに載せる実装はない)
 
@@ -59,5 +71,5 @@ Issue [#193](https://github.com/scottlz0310/mcp-gateway/issues/193)(#24 Phase 4 
 ## 再発防止
 
 - ログ・機密情報の取り扱いポリシーは `CONTRIBUTING.md` の「Logging & Secrets」を参照
-- トークンを扱う主要フローのログにトークン生値が現れないことは回帰テストで固定している(`internal/auth/log_leak_test.go`、`internal/proxy/handler_test.go` の該当テスト)
+- トークンを扱う主要フローのログにトークン生値が現れないことは回帰テストで固定している(`internal/auth/log_leak_test.go`、`internal/upstreamoauth/log_leak_test.go`、`internal/proxy/handler_test.go` の該当テスト)
 - 新たにトークン・シークレットを扱う経路を追加する PR では、レビューで本ポリシーへの準拠を確認する
