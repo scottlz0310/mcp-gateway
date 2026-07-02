@@ -33,18 +33,27 @@ func captureLogs(t *testing.T) *bytes.Buffer {
 	return &buf
 }
 
-// reflectingTokenServer responds 400 invalid_grant and reflects every
-// submitted form value and the Authorization header into error_description,
-// mimicking an AS that echoes request parameters back in error responses.
+// reflectingTokenServer responds 400 and reflects submitted secrets back in
+// the error response, mimicking an AS that echoes request parameters. The
+// "error" field itself carries a submitted secret (alphanumeric + hyphens
+// only, so a charset/length filter alone would let it through), and
+// error_description carries the full form and Authorization header.
 func reflectingTokenServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
+		reflected := r.Form.Get("code")
+		if reflected == "" {
+			reflected = r.Form.Get("refresh_token")
+		}
+		if reflected == "" {
+			reflected = "reflected-marker-MUST-NOT-LOG"
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = fmt.Fprintf(w,
-			`{"error":"invalid_grant","error_description":"REFLECTED form=%s authorization=%s"}`,
-			r.Form.Encode(), r.Header.Get("Authorization"))
+			`{"error":%q,"error_description":"REFLECTED form=%s authorization=%s"}`,
+			reflected, r.Form.Encode(), r.Header.Get("Authorization"))
 	}))
 	t.Cleanup(srv.Close)
 	return srv
@@ -52,9 +61,9 @@ func reflectingTokenServer(t *testing.T) *httptest.Server {
 
 // TestTokenEndpointErrorLogsDoNotLeakSecrets drives all three token-endpoint
 // call paths (authorization_code exchange, refresh_token, client_credentials)
-// against a secret-reflecting AS and asserts that the reflected body never
-// appears in the captured slog output while the normalized OAuth error code
-// still does.
+// against a secret-reflecting AS and asserts that the reflected body — even
+// via the "error" field itself — never appears in the captured slog output;
+// the unknown error value must be classified to the fixed "unknown_error".
 func TestTokenEndpointErrorLogsDoNotLeakSecrets(t *testing.T) {
 	const (
 		routeName    = "myroute"
@@ -135,7 +144,9 @@ func TestTokenEndpointErrorLogsDoNotLeakSecrets(t *testing.T) {
 		{
 			name:        "client_credentials",
 			wantLogLine: "client_credentials token fetch failed",
-			secrets:     map[string]string{},
+			secrets: map[string]string{
+				"reflected error marker": "reflected-marker-MUST-NOT-LOG",
+			},
 			run: func(t *testing.T, ts *httptest.Server) {
 				cs := &testClientStore{records: clientRecord(ts, "client_credentials")}
 				mgr := upstreamoauth.NewManager(cs, publicURL)
@@ -169,8 +180,8 @@ func TestTokenEndpointErrorLogsDoNotLeakSecrets(t *testing.T) {
 			if !strings.Contains(out, tc.wantLogLine) {
 				t.Fatalf("expected %q log line; got: %s", tc.wantLogLine, out)
 			}
-			if !strings.Contains(out, "invalid_grant") {
-				t.Errorf("expected normalized oauth_error code in log; got: %s", out)
+			if !strings.Contains(out, "unknown_error") {
+				t.Errorf("expected unknown oauth_error to be classified to the fixed value in log; got: %s", out)
 			}
 			if strings.Contains(out, "REFLECTED") {
 				t.Errorf("log output contains reflected token endpoint response body: %s", out)

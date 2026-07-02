@@ -47,8 +47,8 @@ Issue [#193](https://github.com/scottlz0310/mcp-gateway/issues/193)(#24 Phase 4 
 token endpoint への POST(`internal/upstreamoauth/{flow,callback,refresher}.go`)は authorization code・refresh token・client secret を送信するため、AS がこれらをエラー本文へ反映すると、本文込みのエラーが `slog` に到達して漏洩する。初回監査では「非 2xx のみ・256 バイト制限」を根拠に許容と判断していたが、PR #194 のレビューでこの反映リスクを指摘され、方針を修正した:
 
 - 非 2xx レスポンスの本文はエラー文字列へ一切含めない
-- エラーに残すのは HTTP status と、本文 JSON の `error` フィールドを `provider.NormalizeOAuthErrorCode` で正規化した OAuth error code のみ(`internal/upstreamoauth/errors.go` の `tokenEndpointError`)
-- 秘密値をエラー本文へ反映する token endpoint を模した回帰テストで固定(`internal/upstreamoauth/log_leak_test.go`)
+- エラーに残すのは HTTP status と、本文 JSON の `error` フィールドを `provider.NormalizeOAuthErrorCode` で既知の OAuth / OIDC error code の allowlist へ分類した結果のみ(`internal/upstreamoauth/errors.go` の `tokenEndpointError`)。未知値は固定値 `unknown_error` へ落とすため、AS が秘密値を `error` フィールド自体へ反映しても生値はログへ残らない
+- 秘密値をエラー本文(`error` フィールド自体を含む)へ反映する token endpoint を模した回帰テストで固定(`internal/upstreamoauth/log_leak_test.go`)
 
 ### 秘密値を送信しないエンドポイント: 256 バイト snippet を許容
 
