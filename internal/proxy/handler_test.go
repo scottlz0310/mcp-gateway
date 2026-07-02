@@ -1,8 +1,10 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -13,6 +15,17 @@ import (
 	"github.com/scottlz0310/mcp-gateway/internal/auth"
 	"github.com/scottlz0310/mcp-gateway/internal/middleware"
 )
+
+// captureLogs redirects the default slog logger to a buffer and restores it
+// via t.Cleanup. Tests using this helper must not call t.Parallel().
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(old) })
+	return &buf
+}
 
 // testValidator is a stub TokenValidator for integration-level tests.
 type testValidator struct {
@@ -163,6 +176,32 @@ func TestProxyInvalidatesCacheOn401(t *testing.T) {
 
 	if len(inv.tokens) != 1 || inv.tokens[0] != "secret-token" {
 		t.Errorf("invalidated tokens: %v", inv.tokens)
+	}
+}
+
+// TestProxy401LogsDoNotLeakToken is a regression test for issue #193: the
+// proxy request log and the 401 invalidation log must identify the bearer
+// only via tokenHash, never the raw value.
+func TestProxy401LogsDoNotLeakToken(t *testing.T) {
+	logs := captureLogs(t)
+	upstream := upstreamWithStatus(http.StatusUnauthorized)
+	defer upstream.Close()
+
+	u, _ := url.Parse(upstream.URL)
+	h := NewHandler(u, &mockInvalidator{}, "", "", nil)
+
+	const bearer = "SECRET-BEARER-MUST-NOT-LOG"
+	h.ServeHTTP(httptest.NewRecorder(), requestWithContext("dave", bearer))
+
+	out := logs.String()
+	if !strings.Contains(out, "cache invalidated") {
+		t.Fatalf("expected 401 invalidation log line; got: %s", out)
+	}
+	if strings.Contains(out, bearer) {
+		t.Errorf("log output contains raw bearer token: %s", out)
+	}
+	if !strings.Contains(out, tokenHash(bearer)) {
+		t.Errorf("expected token_hash %q in log output; got: %s", tokenHash(bearer), out)
 	}
 }
 

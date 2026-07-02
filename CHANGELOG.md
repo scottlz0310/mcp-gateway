@@ -7,6 +7,13 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Security
+
+- Completed the systematic token log-leak audit of all `slog` call sites (#24 Phase 4 backlog). No raw token or secret value is logged anywhere, apart from the deliberate and documented setup-mode one-time token. ([#193](https://github.com/scottlz0310/mcp-gateway/issues/193))
+  - `docs/token-log-audit.md` — audit record: scope, per-package findings, safe-helper inventory (`tokenFingerprint` / `tokenHash` / `subjectHash`, all sha256-based), the indirect-leak check for error strings, and the setup-mode exception rationale
+  - `CONTRIBUTING.md` — new "Logging & Secrets" policy: sha256-based helpers are required to identify tokens in logs; error strings may embed only non-2xx response bodies capped at 256 bytes; access logs must not include query strings
+  - Regression tests pinning the no-raw-token guarantee: builtin authorization-code + refresh flow and both GitHub rotation outcomes (`internal/auth/log_leak_test.go`), and the proxy 401 invalidation path (`internal/proxy/handler_test.go`)
+
 ### Fixed
 
 - `EnsureFreshAccessTokenForSubject` (Phase B delegated access) now returns the GitHub provider access token in builtin mode (`OAUTH_PROVIDER=builtin`), instead of the gateway-issued JWT. Previously, the GitHub access token obtained during the OAuth token exchange was used only for identity resolution and then discarded; the token store held only the gateway JWT, which delegated-access callers (e.g. review-raven's `upstream_provider_token=true` route and the `/internal/v1/whoami` endpoint) received as if it were a usable GitHub bearer token, causing every downstream GitHub API call to fail with `401 Unauthorized` regardless of whether the user's GitHub session was actually still valid. ([#188](https://github.com/scottlz0310/mcp-gateway/issues/188))

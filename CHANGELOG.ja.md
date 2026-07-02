@@ -5,6 +5,13 @@
 
 ## [Unreleased]
 
+### セキュリティ
+
+- 全 `slog` call site を対象としたトークン値のログ漏洩監査を完了（#24 Phase 4 の残タスク）。意図的かつ文書化済みの setup mode ワンタイムトークン提示を除き、トークン・シークレットの生値はどこにもログ出力されないことを確認した。（[#193](https://github.com/scottlz0310/mcp-gateway/issues/193)）
+  - `docs/token-log-audit.md` — 監査記録: 対象範囲、パッケージ別の確認結果、安全化ヘルパー一覧（`tokenFingerprint` / `tokenHash` / `subjectHash`、いずれも sha256 ベース）、エラー文字列経由の間接漏洩の確認、setup mode 例外の根拠
+  - `CONTRIBUTING.md` — 「Logging & Secrets」ポリシーを新設: ログでのトークン識別には sha256 ベースのヘルパーを必須とし、エラー文字列に含めるレスポンスボディは非 2xx かつ 256 バイト制限、アクセスログにクエリ文字列を含めない
+  - トークン生値がログに現れないことを固定する回帰テストを追加: builtin authorization-code + refresh フローと GitHub rotation の成功・失敗両経路（`internal/auth/log_leak_test.go`）、proxy の 401 invalidation 経路（`internal/proxy/handler_test.go`）
+
 ### 修正
 
 - `EnsureFreshAccessTokenForSubject`（Phase B delegated access）が builtin mode（`OAUTH_PROVIDER=builtin`）で gateway 発行の JWT ではなく GitHub provider アクセストークンを返すよう修正。従来は OAuth token 交換時に取得した GitHub アクセストークンが identity 解決にのみ使われて破棄され、トークンストアには gateway JWT しか残らなかった。そのため delegated access の呼び出し元（review-raven の `upstream_provider_token=true` ルートや `/internal/v1/whoami` エンドポイントなど）は gateway JWT を利用可能な GitHub bearer トークンとして受け取ってしまい、ユーザーの GitHub セッションが実際には有効なままでも、以降のすべての GitHub API 呼び出しが `401 Unauthorized` で失敗していた。（[#188](https://github.com/scottlz0310/mcp-gateway/issues/188)）
