@@ -71,23 +71,67 @@ func decodeOAuthErrorCode(body io.Reader) string {
 	return NormalizeOAuthErrorCode(payload.Error)
 }
 
+// knownOAuthErrorCodes は監査ログ・エラー文字列へそのまま残してよい既知の
+// OAuth / OIDC error code の集合。RFC 6749 §4.1.2.1・§5.2、RFC 8628 §3.5、
+// OIDC Core §3.1.2.6、GitHub 固有コードをカバーする。
+// NormalizeOAuthErrorCode の冪等性のため "unknown_error" 自身も含む。
+var knownOAuthErrorCodes = map[string]struct{}{
+	// RFC 6749 §4.1.2.1 (authorization endpoint) / §5.2 (token endpoint)
+	"invalid_request":           {},
+	"invalid_client":            {},
+	"invalid_grant":             {},
+	"unauthorized_client":       {},
+	"unsupported_grant_type":    {},
+	"invalid_scope":             {},
+	"access_denied":             {},
+	"unsupported_response_type": {},
+	"server_error":              {},
+	"temporarily_unavailable":   {},
+	// RFC 8628 §3.5 (device flow)
+	"authorization_pending": {},
+	"slow_down":             {},
+	"expired_token":         {},
+	// RFC 6750 §3.1 (Bearer token) — invalid_token は本パッケージの
+	// ValidateToken 分類コードとしても内部生成される
+	"invalid_token":      {},
+	"insufficient_scope": {},
+	// 内部生成の分類コード(github.go / oidc.go の ValidateToken)
+	"rate_limited": {},
+	// OIDC Core §3.1.2.6
+	"interaction_required":       {},
+	"login_required":             {},
+	"account_selection_required": {},
+	"consent_required":           {},
+	"invalid_request_uri":        {},
+	"invalid_request_object":     {},
+	"request_not_supported":      {},
+	"request_uri_not_supported":  {},
+	"registration_not_supported": {},
+	// GitHub 固有 — bad_refresh_token は docs/configuration.md の
+	// 「rotation_failed err=bad_refresh_token → 再認証が必要」という
+	// 運用診断契約が依存するため、必ず保持すること
+	"incorrect_client_credentials": {},
+	"redirect_uri_mismatch":        {},
+	"bad_verification_code":        {},
+	"bad_refresh_token":            {},
+	"unverified_user_email":        {},
+	"incorrect_device_code":        {},
+	"device_flow_disabled":         {},
+	"application_suspended":        {},
+	"unknown_error":                {},
+}
+
 // NormalizeOAuthErrorCode は外部入力の error code を監査ログ向け識別子へ制限する。
+// 既知の OAuth / OIDC error code のみ小文字化して返し、未知値は固定値
+// "unknown_error" へ落とす。文字種・長さの制限だけでは、AS が秘密値を
+// error フィールドへ反映した場合に生値がログへ残るため fail-closed とする。
 func NormalizeOAuthErrorCode(code string) string {
-	code = strings.TrimSpace(code)
+	code = strings.ToLower(strings.TrimSpace(code))
 	if code == "" {
 		return ""
 	}
-	if len(code) > 64 {
-		return "invalid_error_code"
+	if _, ok := knownOAuthErrorCodes[code]; ok {
+		return code
 	}
-	for _, char := range code {
-		if char >= 'a' && char <= 'z' ||
-			char >= 'A' && char <= 'Z' ||
-			char >= '0' && char <= '9' ||
-			char == '_' || char == '-' || char == '.' {
-			continue
-		}
-		return "invalid_error_code"
-	}
-	return code
+	return "unknown_error"
 }

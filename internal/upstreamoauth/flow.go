@@ -7,7 +7,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -213,9 +212,7 @@ func fetchClientCredentialsToken(ctx context.Context, httpClient *http.Client, r
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
-		return nil, fmt.Errorf("token endpoint %s: unexpected status %d: %s",
-			rec.TokenEndpoint, resp.StatusCode, strings.TrimSpace(string(snippet)))
+		return nil, tokenEndpointError(rec.TokenEndpoint, resp.StatusCode, resp.Body)
 	}
 
 	var tr tokenExchangeResponse

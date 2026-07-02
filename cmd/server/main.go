@@ -465,6 +465,10 @@ func runSetupWizard(cfg config, appCfg *appconfig.AppConfig, km *appconfig.KeyMa
 
 	setupURL := strings.TrimRight(cfg.publicURL, "/") + "/setup?token=" + mgr.Token()
 
+	// Deliberate exception to the no-raw-secrets logging policy: the console
+	// log is the delivery channel for this one-time setup token — the operator
+	// reading it is the same person authorized to run setup, and the token
+	// expires after first use. See docs/token-log-audit.md before widening this.
 	slog.Warn("mcp-gateway starting in setup mode — configure via /setup",
 		"setup_url", setupURL,
 		"token", mgr.Token(),

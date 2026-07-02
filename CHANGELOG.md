@@ -7,6 +7,15 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Security
+
+- Completed the systematic token log-leak audit of all `slog` call sites (#24 Phase 4 backlog). No raw token or secret value is logged anywhere, apart from the deliberate and documented setup-mode one-time token. ([#193](https://github.com/scottlz0310/mcp-gateway/issues/193))
+  - `docs/token-log-audit.md` — audit record: scope, per-package findings, safe-helper inventory (`tokenFingerprint` / `tokenHash` / `subjectHash`, all sha256-based), the indirect-leak check for error strings, and the setup-mode exception rationale
+  - `CONTRIBUTING.md` — new "Logging & Secrets" policy: sha256-based helpers are required to identify tokens in logs; response bodies from endpoints that receive secrets (token endpoints) must never be embedded in error strings, while endpoints that receive no secrets (discovery, DCR) may embed non-2xx bodies capped at 256 bytes; access logs must not include query strings
+  - Token endpoint error handling (`internal/upstreamoauth` authorization-code exchange / refresh / client_credentials) no longer embeds non-2xx response bodies into error strings — an AS reflecting the submitted authorization code, refresh token, or client secret into an error body would otherwise leak them into logs (found in PR #194 review); only the HTTP status and the OAuth error code survive (`tokenEndpointError`)
+  - `provider.NormalizeOAuthErrorCode` now classifies external `error` values against an allowlist of known OAuth / OIDC / GitHub error codes and collapses unknown values to the fixed `unknown_error` — a charset/length filter alone would pass through a secret reflected into the `error` field itself (found in PR #194 review); this hardens every caller at once: `tokenEndpointError`, the authorization callback `error` query parameter, and the `oauth_error` field of audit events
+  - Regression tests pinning the no-raw-token guarantee: builtin authorization-code + refresh flow and both GitHub rotation outcomes (`internal/auth/log_leak_test.go`), all three token-endpoint call paths against a secret-reflecting AS (`internal/upstreamoauth/log_leak_test.go`), and the proxy 401 invalidation path (`internal/proxy/handler_test.go`)
+
 ### Fixed
 
 - `EnsureFreshAccessTokenForSubject` (Phase B delegated access) now returns the GitHub provider access token in builtin mode (`OAUTH_PROVIDER=builtin`), instead of the gateway-issued JWT. Previously, the GitHub access token obtained during the OAuth token exchange was used only for identity resolution and then discarded; the token store held only the gateway JWT, which delegated-access callers (e.g. review-raven's `upstream_provider_token=true` route and the `/internal/v1/whoami` endpoint) received as if it were a usable GitHub bearer token, causing every downstream GitHub API call to fail with `401 Unauthorized` regardless of whether the user's GitHub session was actually still valid. ([#188](https://github.com/scottlz0310/mcp-gateway/issues/188))
