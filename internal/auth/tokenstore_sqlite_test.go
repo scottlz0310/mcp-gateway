@@ -81,6 +81,7 @@ func TestSQLiteRefreshTokenStoreProviderAccessTokenPersists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open 1: %v", err)
 	}
+	closeSQLiteStore(t, rts1)
 	if err := rts1.Save("rt-pat-persist", "jwt-persist", "aud", "fid-pat", exp); err != nil {
 		t.Fatalf("Save: %v", err)
 	}

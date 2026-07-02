@@ -13,7 +13,7 @@ and versioning follows [Semantic Versioning](https://semver.org/).
   - `TokenRecord.ProviderAccessToken` — new field recording the provider access token associated with a cached entry; populated across the authorization-code flow, the device flow, and carried forward on `refresh_token` grant (via the refresh-token store, since a refresh token's grace period can outlive the access-token cache entry it was issued alongside).
   - `TokenStore.SaveProviderAccessToken` / `RefreshTokenStore.SaveProviderAccessToken` + `LookupProviderAccessToken` — new store methods (mem, file, and SQLite `RefreshTokenStore` backends).
   - `ValidateToken` no longer runs the non-builtin GitHub rotation path on a cache hit in builtin mode, closing a token-leak risk that would otherwise surface once builtin-mode rotation support lands (tracked as a follow-up; not yet implemented — `builtinProvider.RefreshToken` still returns `ErrRefreshNotSupported`).
-  - `docs/configuration.md` — documented that builtin mode always persists the GitHub access token in `tokens.json`/the refresh-token store, independent of `github_refresh_enabled`.
+  - `docs/configuration.md` — documented that builtin mode always persists the GitHub access token in `tokens.json`/the refresh-token store, independent of `github_refresh_enabled`, and that builtin-mode delegated access effectively requires a persistent token store (with an in-memory store, the bound GitHub access token is lost after the token-cache TTL or a gateway restart while the JWT stays valid, so delegated access keeps demanding re-authentication).
 
 ### Added
 

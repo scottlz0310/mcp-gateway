@@ -469,6 +469,7 @@ gateway:
 ### 制限事項
 
 - `MCP_GATEWAY_TOKEN_STORE_PATH` が未設定の場合、ゲートウェイ再起動時にリフレッシュトークンが失われます。再起動をまたいでローテーションを継続するにはトークン状態をディスクに永続化してください。
+- builtin mode（`OAUTH_PROVIDER=builtin`）の delegated access（`EnsureFreshAccessTokenForSubject`、`upstream_provider_token=true` ルート、`/internal/v1/whoami`）には永続トークンストアが実質必須です。`MCP_GATEWAY_TOKEN_STORE_PATH` を空値に設定した in-memory 構成では、JWT に紐付けた GitHub アクセストークンがトークンキャッシュ TTL（`TOKEN_CACHE_TTL_MIN`、既定 30 分）の経過またはゲートウェイ再起動で失われます。JWT 自体は有効期限（90 日）まで検証に成功し続けるため、プロキシ転送は正常に動作したまま delegated access だけが再認証を要求し続ける、原因に気づきにくい状態になります。
 - ローテーションリードタイムは約 5 分に固定されています。上流操作が著しく長いオペレーターは、リードタイムを拡大するより Phase B（委任バックグラウンドアクセス）を検討してください。
 - ローテーションには `gateway.github_client_secret` が必要です。GitHub のリフレッシュエンドポイントが初回交換と同様にローテーションリクエストを認証するためです。
 
