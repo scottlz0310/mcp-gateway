@@ -40,6 +40,10 @@ func migrateFileRefreshTokenStore(path string, dst RefreshTokenStore) error {
 
 	// Wrap all inserts in a single transaction: atomic and significantly faster
 	// than one fsync per row when the entry count is large.
+	//
+	// provider_access_token is intentionally omitted from the column list below:
+	// legacy fileRTEntry never had this field, and the schema's
+	// DEFAULT '' fills it in automatically for every migrated row.
 	tx, err := sq.db.BeginTx(context.Background(), nil)
 	if err != nil {
 		return fmt.Errorf("beginning migration transaction: %w", err)

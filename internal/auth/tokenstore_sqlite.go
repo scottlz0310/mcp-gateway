@@ -18,7 +18,8 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
 	family_id    TEXT    NOT NULL DEFAULT '',
 	expires_at   INTEGER NOT NULL,
 	revoked      INTEGER NOT NULL DEFAULT 0,
-	nonce        TEXT    NOT NULL DEFAULT ''
+	nonce        TEXT    NOT NULL DEFAULT '',
+	provider_access_token TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_rt_family  ON refresh_tokens (family_id) WHERE revoked = 0;
 CREATE INDEX IF NOT EXISTS idx_rt_expires ON refresh_tokens (expires_at);
@@ -42,10 +43,12 @@ func NewSQLiteRefreshTokenStore(path string) (RefreshTokenStore, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("initialising SQLite refresh token store schema: %w", err)
 	}
-	// Add nonce column to existing databases created before this field was introduced.
-	// ALTER TABLE ADD COLUMN is idempotent in SQLite when the column already exists
-	// (returns "duplicate column name" which we intentionally ignore).
+	// Add nonce/provider_access_token columns to existing databases created before
+	// these fields were introduced. ALTER TABLE ADD COLUMN is idempotent in SQLite
+	// when the column already exists (returns "duplicate column name" which we
+	// intentionally ignore).
 	_, _ = db.Exec(`ALTER TABLE refresh_tokens ADD COLUMN nonce TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE refresh_tokens ADD COLUMN provider_access_token TEXT NOT NULL DEFAULT ''`)
 	if path != ":memory:" {
 		if err := os.Chmod(path, 0o600); err != nil && !os.IsNotExist(err) {
 			slog.Warn("SQLite refresh token store chmod failed", "path", path, "err", err)
@@ -146,6 +149,26 @@ func (s *sqliteRefreshTokenStore) LookupNonce(refreshToken string) string {
 		tokenKey(refreshToken), time.Now().Unix(),
 	).Scan(&nonce)
 	return nonce
+}
+
+func (s *sqliteRefreshTokenStore) SaveProviderAccessToken(refreshToken, providerAccessToken string) error {
+	_, err := s.db.Exec(
+		`UPDATE refresh_tokens SET provider_access_token = ? WHERE token_hash = ? AND expires_at > ?`,
+		providerAccessToken, tokenKey(refreshToken), time.Now().Unix(),
+	)
+	if err != nil {
+		return fmt.Errorf("saving refresh token provider access token: %w", err)
+	}
+	return nil
+}
+
+func (s *sqliteRefreshTokenStore) LookupProviderAccessToken(refreshToken string) string {
+	var providerAccessToken string
+	_ = s.db.QueryRow(
+		`SELECT provider_access_token FROM refresh_tokens WHERE token_hash = ? AND expires_at > ?`,
+		tokenKey(refreshToken), time.Now().Unix(),
+	).Scan(&providerAccessToken)
+	return providerAccessToken
 }
 
 func (s *sqliteRefreshTokenStore) Delete(refreshToken string) error {

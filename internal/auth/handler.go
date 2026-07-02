@@ -590,9 +590,11 @@ func (h *Handler) tokenAuthCode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if h.isBuiltinMode() {
-		// builtin mode: discard GitHub access token, issue gateway-signed JWT instead.
-		// GitHub token was used only for identity resolution in Callback(); it must not
-		// reach the client.
+		// builtin mode: the client never sees the GitHub access token — it is
+		// issued a gateway-signed JWT instead. The GitHub token itself is kept
+		// server-side, indexed under the JWT, so that EnsureFreshAccessTokenForSubject
+		// (Phase B delegated access) can still hand it to authorized background
+		// workers. See scottlz0310/mcp-gateway#188.
 		gatewayToken, genErr := h.generateGatewayAccessToken(result.Subject, result.Audience)
 		if genErr != nil {
 			h.auditFailure("token_exchange", "server_error", "gateway access token generation failed", genErr, http.StatusInternalServerError, "")
@@ -601,6 +603,7 @@ func (h *Handler) tokenAuthCode(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.store.CacheToken(gatewayToken, result.Subject, result.Audience)
+		h.store.RecordProviderAccessToken(gatewayToken, result.AccessToken)
 		h.store.SaveTokenNonce(gatewayToken, result.Nonce)
 		familyID, fidErr := generateCode()
 		if fidErr != nil {
@@ -612,6 +615,7 @@ func (h *Handler) tokenAuthCode(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("failed to create refresh token", "err", rtErr)
 		}
 		h.store.SaveRefreshTokenNonce(refreshToken, result.Nonce)
+		h.store.SaveRefreshTokenProviderAccessToken(refreshToken, result.AccessToken)
 		h.writeTokenResponse(w, gatewayToken, result.Scope, refreshToken, result.Subject, result.Nonce, result.ClientID)
 		h.auditSuccess("token_exchange", "authorization code exchange completed (builtin)", http.StatusOK)
 		return
@@ -692,6 +696,13 @@ func (h *Handler) tokenDeviceGrant(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		h.store.CacheToken(token, completed.Subject, completed.Audience)
+		if h.isBuiltinMode() {
+			// See the equivalent comment in tokenAuthCode: the GitHub access
+			// token is kept server-side, indexed under the gateway JWT, so
+			// EnsureFreshAccessTokenForSubject can still hand it to
+			// authorized background workers.
+			h.store.RecordProviderAccessToken(token, completed.AccessToken)
+		}
 		h.persistProviderRefresh(completed.AccessToken, completed.ProviderRefreshToken, completed.ProviderAccessExpiry)
 		familyID, fidErr := generateCode()
 		if fidErr != nil {
@@ -701,6 +712,9 @@ func (h *Handler) tokenDeviceGrant(w http.ResponseWriter, r *http.Request) {
 		refreshToken, rtErr := h.store.CreateRefreshToken(token, completed.Audience, familyID, h.refreshTokenTTL())
 		if rtErr != nil {
 			slog.Warn("failed to create refresh token (device)", "err", rtErr)
+		}
+		if h.isBuiltinMode() {
+			h.store.SaveRefreshTokenProviderAccessToken(refreshToken, completed.AccessToken)
 		}
 		h.writeTokenResponse(w, token, completed.Scope, refreshToken, completed.Subject, "", completed.ClientID)
 		h.auditSuccess("token_exchange", "device token exchange completed", http.StatusOK)
@@ -772,6 +786,12 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 	// original authentication request. We key on the refresh token (not the
 	// access token) so the nonce remains available past the access-token TTL.
 	nonce := h.store.LookupRefreshTokenNonce(rt)
+	// Likewise, recover the provider access token (builtin mode) from the
+	// refresh token before it is soft-revoked. The access-token TokenStore
+	// entry (a gateway JWT) can already be swept by the time this grant runs
+	// — refresh tokens carry a 30-day grace period beyond the access token
+	// TTL — so the refresh token is the only reliable place to read it from.
+	providerAccessToken := h.store.LookupRefreshTokenProviderAccessToken(rt)
 
 	// Atomically reserve (remove) the token. Concurrent callers presenting the
 	// same token will fail here, preventing double-rotation.
@@ -835,6 +855,9 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.store.CacheToken(newGatewayToken, sub, audience)
+		if providerAccessToken != "" {
+			h.store.RecordProviderAccessToken(newGatewayToken, providerAccessToken)
+		}
 		h.store.SaveTokenNonce(newGatewayToken, nonce)
 		// Propagate the same familyID so the token lineage remains traceable.
 		newRT, rtErr := h.store.CreateRefreshToken(newGatewayToken, audience, familyID, h.refreshTokenTTL())
@@ -846,6 +869,9 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.store.SaveRefreshTokenNonce(newRT, nonce)
+		if providerAccessToken != "" {
+			h.store.SaveRefreshTokenProviderAccessToken(newRT, providerAccessToken)
+		}
 		h.writeTokenResponse(w, newGatewayToken, "", newRT, sub, nonce, r.FormValue("client_id"))
 		h.auditSuccess("refresh", "refresh token exchange completed (builtin)", http.StatusOK)
 		return
@@ -1104,8 +1130,19 @@ func (h *Handler) ValidateToken(ctx context.Context, token, audience string) (su
 		if err := h.validateAudience(token, record, audience); err != nil {
 			return "", "", err
 		}
-		if rotated, newSubject, ok := h.tryGitHubRotation(ctx, token, record, audience); ok {
-			return newSubject, rotated, nil
+		// tryGitHubRotation assumes the cache key IS the provider access
+		// token (true for non-builtin mode) and, on success, hands the
+		// rotated provider token back as rotatedToken for proxy forwarding.
+		// In builtin mode the cache key is a gateway JWT, so rotating it
+		// this way would either be meaningless or — once a provider refresh
+		// token is attached to the JWT's record (scottlz0310/mcp-gateway#188
+		// follow-up) — leak a raw GitHub access token to any route that
+		// forwards ContextKeyToken, regardless of upstream_provider_token.
+		// Builtin mode must never take this path.
+		if !h.isBuiltinMode() {
+			if rotated, newSubject, ok := h.tryGitHubRotation(ctx, token, record, audience); ok {
+				return newSubject, rotated, nil
+			}
 		}
 		if record.Subject != "" {
 			if !record.RotationPermanentlyFailed {
@@ -1420,6 +1457,17 @@ var ErrRotationFailed = errors.New("auth: rotation failed for delegated access")
 // delegated-access internal API so background workers (e.g. an upstream MCP
 // watcher) can pull a fresh bearer without re-authenticating the user.
 //
+// In builtin mode the cache key (rawToken) is a gateway-issued JWT, not a
+// provider access token — callers must never receive the JWT here, since it
+// is meaningless to an upstream API and its whole purpose is to stay
+// server-side. This function returns record.ProviderAccessToken instead (see
+// scottlz0310/mcp-gateway#188), and returns ErrSubjectNotFound when that
+// field is empty (e.g. a JWT issued before this field existed) rather than
+// falling through to the non-builtin logic below, which would leak the JWT.
+// Builtin mode does not yet support rotation (tracked as a follow-up); the
+// returned AccessToken/ProviderAccessExpiry reflect whatever was recorded at
+// token-issuance or refresh time.
+//
 // Returns ErrSubjectNotFound when no cached token exists for subject (including
 // after a permanent rotation failure: MarkRotationPermanentlyFailed removes the
 // token from the subject index so this function never reaches the lenient branch
@@ -1439,6 +1487,16 @@ func (h *Handler) EnsureFreshAccessTokenForSubject(ctx context.Context, subject 
 	rawToken, record, ok := h.store.LatestBySubject(subject)
 	if !ok {
 		return DelegatedAccessResult{}, ErrSubjectNotFound
+	}
+	if h.isBuiltinMode() {
+		if record.ProviderAccessToken == "" {
+			return DelegatedAccessResult{}, ErrSubjectNotFound
+		}
+		return DelegatedAccessResult{
+			AccessToken:          record.ProviderAccessToken,
+			ProviderAccessExpiry: record.ProviderAccessExpiry,
+			Scopes:               parseScopes(h.provider.Scopes()),
+		}, nil
 	}
 	// Choose a representative audience: prefer one already on the record
 	// (so HasAudience semantics in tryGitHubRotation hit cache), otherwise

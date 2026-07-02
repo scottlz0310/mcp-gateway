@@ -344,6 +344,8 @@ MCP_GATEWAY_TOKEN_STORE_PATH=
 - コンテナイメージやスナップショットにいずれのファイルも含めないこと。
 - 再起動をまたいだローテーションが不要な場合は `github_refresh_enabled` を無効にしてください。リフレッシュトークンはディスクに書き込まれません。
 
+**builtin mode（`OAUTH_PROVIDER=builtin`）の追加事項:** builtin mode ではクライアントに渡すアクセストークンはゲートウェイ署名の JWT であり、GitHub アクセストークン自体ではありません。ただし Phase B delegated access（`EnsureFreshAccessTokenForSubject`、`upstream_provider_token=true` ルートおよび `/internal/v1/whoami` が使用）が upstream サービスへ GitHub トークンを引き渡せるようにするため、GitHub アクセストークンは JWT に紐付けて `tokens.json`（および `github_refresh_enabled` 無効時でも常に）と、そのリフレッシュトークンストア（file-backed 構成では `tokens.json.refresh`、`MCP_GATEWAY_TOKEN_STORE_PATH` が SQLite バックエンドを指す場合は同 DB 内）の両方に**平文で常に**保存されます。`github_refresh_enabled` はリフレッシュトークン自体の保存有無のみを制御し、GitHub アクセストークンの保存有無は制御しません。したがって上記の「`tokens.json` の読者はログイン済みユーザーの GitHub セッションを乗っ取れる」というリスクは、`github_refresh_enabled` の設定に関わらず builtin mode にも同様に適用されます。
+
 ## リバースプロキシヘッダー
 
 mcp-gateway の前で TLS を終端する場合:
@@ -467,6 +469,7 @@ gateway:
 ### 制限事項
 
 - `MCP_GATEWAY_TOKEN_STORE_PATH` が未設定の場合、ゲートウェイ再起動時にリフレッシュトークンが失われます。再起動をまたいでローテーションを継続するにはトークン状態をディスクに永続化してください。
+- builtin mode（`OAUTH_PROVIDER=builtin`）の delegated access（`EnsureFreshAccessTokenForSubject`、`upstream_provider_token=true` ルート、`/internal/v1/whoami`）には永続トークンストアが実質必須です。`MCP_GATEWAY_TOKEN_STORE_PATH` を空値に設定した in-memory 構成では、JWT に紐付けた GitHub アクセストークンがトークンキャッシュ TTL（`TOKEN_CACHE_TTL_MIN`、既定 30 分）の経過またはゲートウェイ再起動で失われます。JWT 自体は有効期限（90 日）まで検証に成功し続けるため、プロキシ転送は正常に動作したまま delegated access だけが再認証を要求し続ける、原因に気づきにくい状態になります。
 - ローテーションリードタイムは約 5 分に固定されています。上流操作が著しく長いオペレーターは、リードタイムを拡大するより Phase B（委任バックグラウンドアクセス）を検討してください。
 - ローテーションには `gateway.github_client_secret` が必要です。GitHub のリフレッシュエンドポイントが初回交換と同様にローテーションリクエストを認証するためです。
 

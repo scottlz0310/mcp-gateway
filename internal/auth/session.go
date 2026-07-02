@@ -21,19 +21,19 @@ var ErrRefreshTokenDeleteFailed = errors.New("refresh token delete failed")
 
 // Session holds OAuth flow state between /authorize and /token.
 type Session struct {
-	State                 string
-	RedirectURI           string
-	CodeChallenge         string
-	Audience              string
-	Nonce                 string    // OIDC Core §3.1.3.7: forwarded to id_token if provided
-	ClientID              string    // OIDC Core §2: client_id of the relying party; used as id_token aud
-	InternalCode          string
-	AccessToken           string
-	Scope                 string
-	ExpiresAt             time.Time
-	ProviderRefreshToken  string    // optional GitHub refresh token (expiring tokens)
-	ProviderAccessExpiry  time.Time // optional GitHub access-token expiry (zero = no expiry hint)
-	Subject               string    // resolved subject
+	State                string
+	RedirectURI          string
+	CodeChallenge        string
+	Audience             string
+	Nonce                string // OIDC Core §3.1.3.7: forwarded to id_token if provided
+	ClientID             string // OIDC Core §2: client_id of the relying party; used as id_token aud
+	InternalCode         string
+	AccessToken          string
+	Scope                string
+	ExpiresAt            time.Time
+	ProviderRefreshToken string    // optional GitHub refresh token (expiring tokens)
+	ProviderAccessExpiry time.Time // optional GitHub access-token expiry (zero = no expiry hint)
+	Subject              string    // resolved subject
 }
 
 type deviceStatus int
@@ -47,7 +47,7 @@ const (
 // DeviceSession tracks a Device Authorization Grant (RFC 8628) flow and its current status.
 type DeviceSession struct {
 	InternalCode         string
-	UserCode             string    // XXXX-XXXX format shown to the user at /activate
+	UserCode             string // XXXX-XXXX format shown to the user at /activate
 	ExpiresAt            time.Time
 	Interval             int // minimum seconds between client polls (RFC 8628 §3.5)
 	AccessToken          string
@@ -131,13 +131,13 @@ func NewStore(sessionTTL, tokensTTL time.Duration, ts TokenStore, opts ...StoreO
 		ts = NewMemTokenStore()
 	}
 	s := &Store{
-		sessions:     make(map[string]*Session),
-		codes:        make(map[string]*Session),
-		devices:      make(map[string]*DeviceSession),
-		ttl:          sessionTTL,
-		tokens:       ts,
-		tokensTTL:    tokensTTL,
-		refreshStore: NewMemRefreshTokenStore(),
+		sessions:       make(map[string]*Session),
+		codes:          make(map[string]*Session),
+		devices:        make(map[string]*DeviceSession),
+		ttl:            sessionTTL,
+		tokens:         ts,
+		tokensTTL:      tokensTTL,
+		refreshStore:   NewMemRefreshTokenStore(),
 		subjectIndex:   make(map[string][]subjectIndexEntry),
 		rotationFailed: make(map[string]struct{}),
 		stopCh:         make(chan struct{}),
@@ -219,11 +219,11 @@ type ExchangeCodeResult struct {
 	AccessToken          string
 	Scope                string
 	Audience             string
-	Nonce                string    // OIDC Core §3.1.3.7: forwarded to id_token if provided
-	ClientID             string    // OIDC Core §2: client_id of the relying party; used as id_token aud
+	Nonce                string // OIDC Core §3.1.3.7: forwarded to id_token if provided
+	ClientID             string // OIDC Core §2: client_id of the relying party; used as id_token aud
 	ProviderRefreshToken string
 	ProviderAccessExpiry time.Time
-	Subject              string    // resolved subject
+	Subject              string // resolved subject
 }
 
 // ExchangeCode validates PKCE and returns the access token, granted scope, and
@@ -385,7 +385,6 @@ func (s *Store) DenyDevice(internalCode string) {
 		d.Status = deviceDenied
 	}
 }
-
 
 // CreateRefreshToken generates a gateway-issued refresh token for the given
 // accessToken and stores it with the supplied TTL. The refresh token is an
@@ -722,6 +721,19 @@ func (s *Store) RecordProviderRefresh(token, providerRefreshToken string, provid
 	// is no separate index hint to update here.
 }
 
+// RecordProviderAccessToken attaches the upstream provider's access token
+// (e.g. a GitHub token) to an already-cached token entry. Unlike
+// RecordProviderRefresh, this is unconditional: builtin mode relies on it to
+// make the provider token recoverable at all (the cache key is a
+// gateway-issued JWT, not the provider token itself), so there is no
+// "refresh not configured" gate to check. No-op when the underlying cache
+// entry is missing (CacheToken has not yet run for this token).
+func (s *Store) RecordProviderAccessToken(token, providerAccessToken string) {
+	if err := s.tokens.SaveProviderAccessToken(token, providerAccessToken); err != nil {
+		slog.Warn("token store provider access token save failed", "err", err)
+	}
+}
+
 // SaveTokenNonce attaches the OIDC nonce to an existing token entry so it can
 // be forwarded in the id_token on refresh (OIDC Core §12.2). An empty nonce
 // clears any previously stored value, ensuring stale nonces from a prior grant
@@ -746,6 +758,27 @@ func (s *Store) SaveRefreshTokenNonce(refreshToken, nonce string) {
 // by ReserveRefreshToken) so the nonce remains readable during the rotation.
 func (s *Store) LookupRefreshTokenNonce(refreshToken string) string {
 	return s.refreshStore.LookupNonce(refreshToken)
+}
+
+// SaveRefreshTokenProviderAccessToken attaches the upstream provider's access
+// token to a refresh-token entry so it survives past the access token's TTL.
+// Builtin mode's access-token TokenStore entry (a gateway JWT) can be swept
+// before its refresh token expires (refresh tokens carry a 30-day grace
+// period beyond the access token TTL); this is the durable place tokenRefresh
+// recovers the provider token from during that gap. No-op when entry is
+// absent or expired.
+func (s *Store) SaveRefreshTokenProviderAccessToken(refreshToken, providerAccessToken string) {
+	if err := s.refreshStore.SaveProviderAccessToken(refreshToken, providerAccessToken); err != nil {
+		slog.Warn("refresh token store provider access token save failed", "err", err)
+	}
+}
+
+// LookupRefreshTokenProviderAccessToken returns the provider access token
+// stored for refreshToken, or "" when absent, expired, or never set. Reads
+// even soft-revoked entries (already rotated by ReserveRefreshToken) so the
+// value remains readable during the rotation, mirroring LookupRefreshTokenNonce.
+func (s *Store) LookupRefreshTokenProviderAccessToken(refreshToken string) string {
+	return s.refreshStore.LookupProviderAccessToken(refreshToken)
 }
 
 // ClearProviderRefresh drops the provider refresh metadata for token (sets

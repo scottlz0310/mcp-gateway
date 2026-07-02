@@ -5,6 +5,14 @@
 
 ## [Unreleased]
 
+### 修正
+
+- `EnsureFreshAccessTokenForSubject`（Phase B delegated access）が builtin mode（`OAUTH_PROVIDER=builtin`）で gateway 発行の JWT ではなく GitHub provider アクセストークンを返すよう修正。従来は OAuth token 交換時に取得した GitHub アクセストークンが identity 解決にのみ使われて破棄され、トークンストアには gateway JWT しか残らなかった。そのため delegated access の呼び出し元（review-raven の `upstream_provider_token=true` ルートや `/internal/v1/whoami` エンドポイントなど）は gateway JWT を利用可能な GitHub bearer トークンとして受け取ってしまい、ユーザーの GitHub セッションが実際には有効なままでも、以降のすべての GitHub API 呼び出しが `401 Unauthorized` で失敗していた。（[#188](https://github.com/scottlz0310/mcp-gateway/issues/188)）
+  - `TokenRecord.ProviderAccessToken` — キャッシュエントリに紐づく provider アクセストークンを保持する新フィールド。authorization-code フロー・device フローの両方で設定され、`refresh_token` grant でも引き継がれる（refresh token の猶予期間が、それと共に発行された access-token キャッシュエントリの寿命より長く続く可能性があるため、refresh token ストア経由で引き継ぐ）。
+  - `TokenStore.SaveProviderAccessToken` / `RefreshTokenStore.SaveProviderAccessToken` + `LookupProviderAccessToken` — 新規ストアメソッド（mem・file・SQLite の `RefreshTokenStore` 実装すべてに対応）。
+  - `ValidateToken` は builtin mode ではキャッシュヒット時に非 builtin 用の GitHub rotation 経路を呼ばなくなった。将来 builtin mode の rotation 対応が入った際に顕在化しうるトークン漏洩リスクを事前に塞ぐもの（rotation 自体は follow-up として未実装 — `builtinProvider.RefreshToken` は引き続き `ErrRefreshNotSupported` を返す）。
+  - `docs/configuration.md` — builtin mode では `github_refresh_enabled` の設定に関わらず、GitHub アクセストークンが常に `tokens.json` / refresh token ストアに永続化される旨を追記。また builtin mode の delegated access には永続トークンストアが実質必須である旨を制限事項に追記（in-memory ストア構成では JWT に紐付けた GitHub アクセストークンがトークンキャッシュ TTL 経過または再起動で失われ、JWT が有効なまま delegated access だけが再認証を要求し続けるため）。
+
 ## [0.7.0] - 2026-06-21
 
 ### 追加

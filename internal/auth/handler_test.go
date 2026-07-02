@@ -1488,12 +1488,18 @@ func (d *deleteFailRefreshStore) Lookup(rt string) (string, string, string, time
 func (d *deleteFailRefreshStore) LookupAny(rt string) (string, string, string, time.Time, bool, bool) {
 	return d.inner.LookupAny(rt)
 }
-func (d *deleteFailRefreshStore) Revoke(_ string) error            { return fmt.Errorf("disk I/O error") }
-func (d *deleteFailRefreshStore) RevokeFamily(fid string) error    { return d.inner.RevokeFamily(fid) }
-func (d *deleteFailRefreshStore) SaveNonce(rt, n string) error     { return d.inner.SaveNonce(rt, n) }
-func (d *deleteFailRefreshStore) LookupNonce(rt string) string     { return d.inner.LookupNonce(rt) }
-func (d *deleteFailRefreshStore) Delete(_ string) error            { return fmt.Errorf("disk I/O error") }
-func (d *deleteFailRefreshStore) Sweep() error                     { return d.inner.Sweep() }
+func (d *deleteFailRefreshStore) Revoke(_ string) error         { return fmt.Errorf("disk I/O error") }
+func (d *deleteFailRefreshStore) RevokeFamily(fid string) error { return d.inner.RevokeFamily(fid) }
+func (d *deleteFailRefreshStore) SaveNonce(rt, n string) error  { return d.inner.SaveNonce(rt, n) }
+func (d *deleteFailRefreshStore) LookupNonce(rt string) string  { return d.inner.LookupNonce(rt) }
+func (d *deleteFailRefreshStore) SaveProviderAccessToken(rt, pat string) error {
+	return d.inner.SaveProviderAccessToken(rt, pat)
+}
+func (d *deleteFailRefreshStore) LookupProviderAccessToken(rt string) string {
+	return d.inner.LookupProviderAccessToken(rt)
+}
+func (d *deleteFailRefreshStore) Delete(_ string) error { return fmt.Errorf("disk I/O error") }
+func (d *deleteFailRefreshStore) Sweep() error          { return d.inner.Sweep() }
 
 // TestTokenRefreshDeleteFailed503 verifies that when the refresh token store
 // fails to delete the token during rotation (ErrRefreshTokenDeleteFailed),
@@ -4095,5 +4101,252 @@ func TestDeviceCallbackApproveDeviceFails(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status: got %d, want 400", w.Code)
+	}
+}
+
+// ── scottlz0310/mcp-gateway#188 regression tests ───────────────────────────
+//
+// These verify that builtin mode retains the GitHub provider access token
+// (indexed under the gateway JWT) across the authorization-code flow, the
+// device flow, and refresh_token rotation, and that ValidateToken never
+// leaks a raw provider token through the non-builtin rotation path.
+
+// TestBuiltinTokenAuthCodePersistsProviderAccessToken verifies that
+// tokenAuthCode's builtin branch records the GitHub access token obtained
+// during ExchangeCode, indexed under the issued gateway JWT.
+func TestBuiltinTokenAuthCodePersistsProviderAccessToken(t *testing.T) {
+	const ghAccessToken = "gho_authcode_provider_tok"
+	h := newBuiltinTestHandler(t,
+		func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{AccessToken: ghAccessToken}, nil
+		},
+		func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Subject: "grace"}, nil
+		},
+	)
+
+	_, jwt := runBuiltinFullFlow(t, h, "grace")
+	if jwt == "" {
+		t.Fatal("runBuiltinFullFlow: empty access_token in token response")
+	}
+
+	rec, ok := h.store.LookupToken(jwt)
+	if !ok {
+		t.Fatal("LookupToken: expected cache hit for issued JWT")
+	}
+	if rec.ProviderAccessToken != ghAccessToken {
+		t.Errorf("ProviderAccessToken: got %q, want %q", rec.ProviderAccessToken, ghAccessToken)
+	}
+}
+
+// TestBuiltinDeviceGrantPersistsProviderAccessToken verifies that
+// tokenDeviceGrant's builtin branch records the GitHub access token approved
+// via the device flow, indexed under the issued gateway JWT (not under the
+// GitHub token itself, which is never cached in builtin mode).
+func TestBuiltinDeviceGrantPersistsProviderAccessToken(t *testing.T) {
+	const ghAccessToken = "gho_device_provider_tok"
+	h := newBuiltinTestHandler(t,
+		func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{AccessToken: ghAccessToken}, nil
+		},
+		func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Subject: "heidi"}, nil
+		},
+	)
+
+	deviceCode, err := h.store.CreateDevice("DEVI-0001", time.Now().Add(10*time.Minute), "mcp-gateway", "")
+	if err != nil {
+		t.Fatalf("CreateDevice: %v", err)
+	}
+	if !h.store.ApproveDevice(deviceCode, ghAccessToken, "read:user", "heidi", "", time.Time{}) {
+		t.Fatal("ApproveDevice failed")
+	}
+
+	body := fmt.Sprintf("grant_type=urn:ietf%%3Aparams%%3Aoauth%%3Agrant-type%%3Adevice_code&device_code=%s", deviceCode)
+	r := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	h.Token(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("token exchange: got %d want 200; body: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	jwt, _ := resp["access_token"].(string)
+	if jwt == "" {
+		t.Fatal("device token response: empty access_token")
+	}
+	if jwt == ghAccessToken {
+		t.Fatal("device token response leaked the raw GitHub access token instead of a gateway JWT")
+	}
+
+	rec, ok := h.store.LookupToken(jwt)
+	if !ok {
+		t.Fatal("LookupToken: expected cache hit for issued JWT")
+	}
+	if rec.ProviderAccessToken != ghAccessToken {
+		t.Errorf("ProviderAccessToken: got %q, want %q", rec.ProviderAccessToken, ghAccessToken)
+	}
+}
+
+// TestBuiltinTokenRefreshCarriesForwardProviderAccessToken verifies that
+// tokenRefresh's builtin branch carries the provider access token forward to
+// the newly-issued gateway JWT.
+func TestBuiltinTokenRefreshCarriesForwardProviderAccessToken(t *testing.T) {
+	const ghAccessToken = "gho_refresh_provider_tok"
+	h := newBuiltinTestHandler(t,
+		func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{AccessToken: ghAccessToken}, nil
+		},
+		func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Subject: "ivan"}, nil
+		},
+	)
+
+	tokenResp, firstJWT := runBuiltinFullFlow(t, h, "ivan")
+	refreshToken, _ := tokenResp["refresh_token"].(string)
+	if refreshToken == "" {
+		t.Fatal("missing refresh_token in initial response")
+	}
+
+	refreshBody := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(refreshToken)
+	refreshReq := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(refreshBody))
+	refreshReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	refreshRec := httptest.NewRecorder()
+	h.Token(refreshRec, refreshReq)
+	if refreshRec.Code != http.StatusOK {
+		t.Fatalf("refresh: got %d; body=%s", refreshRec.Code, refreshRec.Body.String())
+	}
+	var refreshResp map[string]any
+	_ = json.NewDecoder(refreshRec.Body).Decode(&refreshResp)
+	newJWT, _ := refreshResp["access_token"].(string)
+	if newJWT == "" || newJWT == firstJWT {
+		t.Fatalf("refresh must issue a new JWT: got %q (first was %q)", newJWT, firstJWT)
+	}
+
+	rec, ok := h.store.LookupToken(newJWT)
+	if !ok {
+		t.Fatal("LookupToken: expected cache hit for refreshed JWT")
+	}
+	if rec.ProviderAccessToken != ghAccessToken {
+		t.Errorf("ProviderAccessToken after refresh: got %q, want %q", rec.ProviderAccessToken, ghAccessToken)
+	}
+}
+
+// TestBuiltinTokenRefreshCarriesForwardAfterOldRecordSwept is the direct
+// regression test for the refresh-token grace-period gap identified during
+// the #188 investigation: refresh tokens outlive the access-token TokenStore
+// entry by design (30-day grace period beyond the access token TTL), so by
+// the time a client refreshes, the old JWT's TokenRecord may already be gone.
+// The provider access token must still be recoverable via the refresh token
+// itself, not via the old JWT's (possibly-swept) record.
+func TestBuiltinTokenRefreshCarriesForwardAfterOldRecordSwept(t *testing.T) {
+	const ghAccessToken = "gho_swept_provider_tok"
+	h := newBuiltinTestHandler(t,
+		func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{AccessToken: ghAccessToken}, nil
+		},
+		func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Subject: "judy"}, nil
+		},
+	)
+
+	tokenResp, firstJWT := runBuiltinFullFlow(t, h, "judy")
+	refreshToken, _ := tokenResp["refresh_token"].(string)
+	if refreshToken == "" {
+		t.Fatal("missing refresh_token in initial response")
+	}
+
+	// Simulate the old JWT's TokenStore entry having already been swept
+	// (e.g. it hit its CacheTTL before the client got around to refreshing).
+	h.InvalidateCachedToken(firstJWT)
+	if _, ok := h.store.LookupToken(firstJWT); ok {
+		t.Fatal("setup: expected old JWT to be evicted from the token store")
+	}
+
+	refreshBody := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(refreshToken)
+	refreshReq := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(refreshBody))
+	refreshReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	refreshRec := httptest.NewRecorder()
+	h.Token(refreshRec, refreshReq)
+	if refreshRec.Code != http.StatusOK {
+		t.Fatalf("refresh: got %d; body=%s", refreshRec.Code, refreshRec.Body.String())
+	}
+	var refreshResp map[string]any
+	_ = json.NewDecoder(refreshRec.Body).Decode(&refreshResp)
+	newJWT, _ := refreshResp["access_token"].(string)
+	if newJWT == "" {
+		t.Fatal("refresh response missing access_token")
+	}
+
+	rec, ok := h.store.LookupToken(newJWT)
+	if !ok {
+		t.Fatal("LookupToken: expected cache hit for refreshed JWT")
+	}
+	if rec.ProviderAccessToken != ghAccessToken {
+		t.Errorf("ProviderAccessToken recovered via refresh token after old record sweep: got %q, want %q",
+			rec.ProviderAccessToken, ghAccessToken)
+	}
+}
+
+// TestValidateToken_BuiltinModeDoesNotRotateOnCacheHit is the security
+// regression test for the ValidateToken cache-hit guard: even if a builtin
+// JWT's TokenRecord somehow carries GitHub-style rotation metadata
+// (ProviderRefreshToken/ProviderAccessExpiry), ValidateToken must never
+// invoke the non-builtin rotation path for it, which would otherwise return
+// a raw GitHub access token as rotatedToken — leaking it via ContextKeyToken
+// to any route that forwards the bearer, not just upstream_provider_token
+// routes. See scottlz0310/mcp-gateway#188.
+func TestValidateToken_BuiltinModeDoesNotRotateOnCacheHit(t *testing.T) {
+	var refreshCalled bool
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+	p := &provider.Mock{
+		NameValue:     "builtin",
+		ClientIDValue: "builtin-client-id",
+		ScopesValue:   "read:user,user:email",
+		RefreshTokenFunc: func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			refreshCalled = true
+			return provider.TokenResponse{AccessToken: "gho_leaked_via_rotation"}, nil
+		},
+	}
+	h, err := NewHandler(Config{
+		BaseURL:              "http://localhost:8080",
+		SessionTTL:           10 * time.Minute,
+		CacheTTL:             5 * time.Minute,
+		ExpiresIn:            90 * 24 * time.Hour,
+		OIDCPrivateKey:       key,
+		GitHubRefreshEnabled: true,
+		GitHubRefreshLeeway:  time.Hour, // wide leeway so any expiry in the past triggers rotation
+	}, p)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	jwt, err := h.generateGatewayAccessToken("kevin", "http://localhost:8080")
+	if err != nil {
+		t.Fatalf("generateGatewayAccessToken: %v", err)
+	}
+	h.store.CacheToken(jwt, "kevin", "http://localhost:8080")
+	// Force rotation preconditions to be satisfied: known subject, refresh
+	// metadata present, expiry already within (in fact past) the leeway window.
+	h.store.RecordProviderRefresh(jwt, "gh-refresh-should-not-be-used", time.Now().Add(-time.Minute))
+
+	sub, rotated, err := h.ValidateToken(context.Background(), jwt, "")
+	if err != nil {
+		t.Fatalf("ValidateToken: %v", err)
+	}
+	if sub != "kevin" {
+		t.Errorf("subject: got %q, want %q", sub, "kevin")
+	}
+	if rotated != "" {
+		t.Fatalf("regression: ValidateToken returned a rotated token in builtin mode: %q (must be empty)", rotated)
+	}
+	if refreshCalled {
+		t.Fatal("regression: provider.RefreshToken was invoked for a builtin-mode JWT on cache hit")
 	}
 }
