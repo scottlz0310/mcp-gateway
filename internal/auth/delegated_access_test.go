@@ -6,6 +6,7 @@ import (
 	"crypto/rsa"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -599,6 +600,23 @@ func newDelegatedBuiltinRotationTestHandler(t *testing.T, exchangeAccessToken, e
 	return h
 }
 
+func runBuiltinGatewayRefresh(t *testing.T, h *Handler, refreshToken string) map[string]any {
+	t.Helper()
+	body := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(refreshToken)
+	req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.Token(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("gateway refresh: got %d; body=%s", rec.Code, rec.Body.String())
+	}
+	var response map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("decode gateway refresh response: %v", err)
+	}
+	return response
+}
+
 // TestEnsureFreshAccessTokenForSubject_BuiltinRotationSucceeds verifies that
 // builtin-mode rotation refreshes the GitHub access token in place — the
 // gateway JWT's TokenRecord.ProviderAccessToken is updated — while the JWT
@@ -697,18 +715,7 @@ func TestEnsureFreshAccessTokenForSubject_BuiltinRotationSurvivesGatewayRefresh(
 		t.Fatalf("first delegated rotation access token: got %q, want %q", firstResult.AccessToken, "gho_rotated_1")
 	}
 
-	refreshBody := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(refreshToken)
-	refreshReq := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(refreshBody))
-	refreshReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	refreshRec := httptest.NewRecorder()
-	h.Token(refreshRec, refreshReq)
-	if refreshRec.Code != http.StatusOK {
-		t.Fatalf("gateway refresh grant: got %d; body=%s", refreshRec.Code, refreshRec.Body.String())
-	}
-	var refreshResp map[string]any
-	if err := json.NewDecoder(refreshRec.Body).Decode(&refreshResp); err != nil {
-		t.Fatalf("decode gateway refresh response: %v", err)
-	}
+	refreshResp := runBuiltinGatewayRefresh(t, h, refreshToken)
 	secondJWT, _ := refreshResp["access_token"].(string)
 	secondRefreshToken, _ := refreshResp["refresh_token"].(string)
 	if secondJWT == "" || secondRefreshToken == "" {
@@ -741,6 +748,138 @@ func TestEnsureFreshAccessTokenForSubject_BuiltinRotationSurvivesGatewayRefresh(
 	}
 	if len(observedRefreshTokens) != 2 || observedRefreshTokens[0] != "ghr_original" || observedRefreshTokens[1] != "ghr_rotated_1" {
 		t.Fatalf("provider refresh sequence: got %v, want [ghr_original ghr_rotated_1]", observedRefreshTokens)
+	}
+}
+
+func TestEnsureFreshAccessTokenForSubject_BuiltinRotationSerializesGatewayRefresh(t *testing.T) {
+	rotationStarted := make(chan struct{})
+	releaseRotation := make(chan struct{})
+	h := newDelegatedBuiltinRotationTestHandler(t, "gho_original", "ghr_original", 30*time.Second,
+		func(_ context.Context, rt string) (provider.TokenResponse, error) {
+			if rt != "ghr_original" {
+				return provider.TokenResponse{}, fmt.Errorf("unexpected refresh token %q", rt)
+			}
+			close(rotationStarted)
+			<-releaseRotation
+			return provider.TokenResponse{
+				AccessToken:          "gho_rotated",
+				RefreshToken:         "ghr_rotated",
+				AccessTokenExpiresIn: 8 * time.Hour,
+			}, nil
+		})
+	tokenResp, _ := runBuiltinFullFlow(t, h, "alice")
+	refreshToken, _ := tokenResp["refresh_token"].(string)
+
+	rotationResult := make(chan error, 1)
+	go func() {
+		_, err := h.EnsureFreshAccessTokenForSubject(context.Background(), "alice")
+		rotationResult <- err
+	}()
+	<-rotationStarted
+
+	refreshStarted := make(chan struct{})
+	refreshDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		close(refreshStarted)
+		body := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(refreshToken)
+		req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		h.Token(rec, req)
+		refreshDone <- rec
+	}()
+	<-refreshStarted
+
+	select {
+	case rec := <-refreshDone:
+		t.Fatalf("gateway refresh completed before provider rotation: status=%d body=%s", rec.Code, rec.Body.String())
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseRotation)
+	if err := <-rotationResult; err != nil {
+		t.Fatalf("delegated rotation: %v", err)
+	}
+	rec := <-refreshDone
+	if rec.Code != http.StatusOK {
+		t.Fatalf("gateway refresh: got %d; body=%s", rec.Code, rec.Body.String())
+	}
+	var response map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("decode gateway refresh response: %v", err)
+	}
+	newJWT, _ := response["access_token"].(string)
+	newRefreshToken, _ := response["refresh_token"].(string)
+	newRecord, ok := h.store.LookupToken(newJWT)
+	if !ok {
+		t.Fatal("gateway refresh did not cache the new JWT")
+	}
+	if newRecord.ProviderAccessToken != "gho_rotated" || newRecord.ProviderRefreshToken != "ghr_rotated" {
+		t.Fatalf("gateway refresh copied stale provider generation: access=%q refresh=%q",
+			newRecord.ProviderAccessToken, newRecord.ProviderRefreshToken)
+	}
+	if got, _ := h.store.LookupRefreshTokenProviderRefresh(newRefreshToken); got != "ghr_rotated" {
+		t.Fatalf("new refresh-token entry provider refresh token: got %q, want %q", got, "ghr_rotated")
+	}
+}
+
+func TestEnsureFreshAccessTokenForSubject_BuiltinRotationAfterGatewayRefreshUpdatesCurrentFamily(t *testing.T) {
+	h := newDelegatedBuiltinRotationTestHandler(t, "gho_original", "ghr_original", 30*time.Second,
+		func(_ context.Context, rt string) (provider.TokenResponse, error) {
+			if rt != "ghr_original" {
+				return provider.TokenResponse{}, fmt.Errorf("unexpected refresh token %q", rt)
+			}
+			return provider.TokenResponse{
+				AccessToken:          "gho_rotated",
+				RefreshToken:         "ghr_rotated",
+				AccessTokenExpiresIn: 8 * time.Hour,
+			}, nil
+		})
+	tokenResp, firstJWT := runBuiltinFullFlow(t, h, "alice")
+	firstRefreshToken, _ := tokenResp["refresh_token"].(string)
+
+	response := runBuiltinGatewayRefresh(t, h, firstRefreshToken)
+	currentJWT, _ := response["access_token"].(string)
+	currentRefreshToken, _ := response["refresh_token"].(string)
+
+	if result := h.runBuiltinRotation(context.Background(), firstJWT); !result.ok {
+		t.Fatalf("provider rotation after gateway refresh did not succeed: %+v", result)
+	}
+	currentRecord, ok := h.store.LookupToken(currentJWT)
+	if !ok {
+		t.Fatal("current gateway JWT is not cached")
+	}
+	if currentRecord.ProviderAccessToken != "gho_rotated" || currentRecord.ProviderRefreshToken != "ghr_rotated" {
+		t.Fatalf("current gateway JWT kept stale provider metadata: access=%q refresh=%q",
+			currentRecord.ProviderAccessToken, currentRecord.ProviderRefreshToken)
+	}
+	if got, _ := h.store.LookupRefreshTokenProviderRefresh(currentRefreshToken); got != "ghr_rotated" {
+		t.Fatalf("current refresh-token entry provider refresh token: got %q, want %q", got, "ghr_rotated")
+	}
+}
+
+func TestEnsureFreshAccessTokenForSubject_BuiltinPermanentFailureAfterGatewayRefreshRevokesCurrentFamily(t *testing.T) {
+	h := newDelegatedBuiltinRotationTestHandler(t, "gho_poisoned", "ghr_poisoned", 30*time.Second,
+		func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{}, errors.New("bad_refresh_token")
+		})
+	tokenResp, firstJWT := runBuiltinFullFlow(t, h, "alice")
+	firstRefreshToken, _ := tokenResp["refresh_token"].(string)
+
+	response := runBuiltinGatewayRefresh(t, h, firstRefreshToken)
+	currentJWT, _ := response["access_token"].(string)
+	currentRefreshToken, _ := response["refresh_token"].(string)
+
+	if result := h.runBuiltinRotation(context.Background(), firstJWT); result.ok {
+		t.Fatalf("permanently rejected rotation unexpectedly succeeded: %+v", result)
+	}
+	if !h.store.IsRotationPermanentlyFailed(currentJWT) {
+		t.Fatal("current gateway JWT was not marked permanently failed")
+	}
+	if _, _, _, _, revoked, ok := h.store.LookupAnyRefreshToken(currentRefreshToken); !ok || !revoked {
+		t.Fatalf("current refresh-token family must be revoked: ok=%t revoked=%t", ok, revoked)
+	}
+	if _, err := h.EnsureFreshAccessTokenForSubject(context.Background(), "alice"); !errors.Is(err, ErrSubjectNotFound) {
+		t.Fatalf("delegated access after family failure: got %v, want ErrSubjectNotFound", err)
 	}
 }
 
@@ -779,7 +918,8 @@ func TestEnsureFreshAccessTokenForSubject_BuiltinRotationPermanentlyFailed(t *te
 		func(_ context.Context, _ string) (provider.TokenResponse, error) {
 			return provider.TokenResponse{}, errors.New("bad_refresh_token")
 		})
-	_, jwt := runBuiltinFullFlow(t, h, "alice")
+	tokenResp, jwt := runBuiltinFullFlow(t, h, "alice")
+	refreshToken, _ := tokenResp["refresh_token"].(string)
 
 	_, err := h.EnsureFreshAccessTokenForSubject(context.Background(), "alice")
 	if !errors.Is(err, ErrRotationFailed) {
@@ -799,6 +939,18 @@ func TestEnsureFreshAccessTokenForSubject_BuiltinRotationPermanentlyFailed(t *te
 	_, err = h.EnsureFreshAccessTokenForSubject(context.Background(), "alice")
 	if !errors.Is(err, ErrSubjectNotFound) {
 		t.Fatalf("second call err: got %v, want ErrSubjectNotFound", err)
+	}
+
+	refreshBody := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(refreshToken)
+	refreshReq := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(refreshBody))
+	refreshReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	refreshRec := httptest.NewRecorder()
+	h.Token(refreshRec, refreshReq)
+	if refreshRec.Code != http.StatusBadRequest {
+		t.Fatalf("gateway refresh after permanent failure: got %d; body=%s", refreshRec.Code, refreshRec.Body.String())
+	}
+	if _, _, _, _, revoked, ok := h.store.LookupAnyRefreshToken(refreshToken); !ok || !revoked {
+		t.Fatalf("provider failure must revoke the active refresh-token family: ok=%t revoked=%t", ok, revoked)
 	}
 }
 

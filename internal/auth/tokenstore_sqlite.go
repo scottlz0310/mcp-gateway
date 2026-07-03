@@ -419,12 +419,38 @@ func (s *sqliteRefreshTokenStore) LookupProviderRefresh(refreshToken string) (st
 	return providerRefreshToken, timeFromUnixOrZero(providerAccessExpiryUnix)
 }
 
+func (s *sqliteRefreshTokenStore) LookupFamilyByAccessToken(accessToken string) (string, string) {
+	var familyID string
+	err := s.db.QueryRow(
+		`SELECT family_id FROM refresh_tokens
+		 WHERE access_token = ? AND family_id != '' AND expires_at > ?
+		 LIMIT 1`,
+		accessToken, time.Now().Unix(),
+	).Scan(&familyID)
+	if err != nil {
+		return "", ""
+	}
+	var currentAccessToken string
+	_ = s.db.QueryRow(
+		`SELECT access_token FROM family_current_access_token
+		 WHERE family_id = ? AND expires_at > ?`,
+		familyID, time.Now().Unix(),
+	).Scan(&currentAccessToken)
+	return familyID, currentAccessToken
+}
+
 func (s *sqliteRefreshTokenStore) UpdateProviderTokensByAccessToken(accessToken, providerAccessToken, providerRefreshToken string, providerAccessExpiry time.Time) error {
 	_, err := s.db.Exec(
 		`UPDATE refresh_tokens
 		 SET provider_access_token = ?, provider_refresh_token = ?, provider_access_expiry = ?
-		 WHERE access_token = ? AND revoked = 0 AND expires_at > ?`,
-		providerAccessToken, providerRefreshToken, unixOrZero(providerAccessExpiry), accessToken, time.Now().Unix(),
+		 WHERE revoked = 0 AND expires_at > ? AND (
+			access_token = ? OR family_id IN (
+				SELECT family_id FROM refresh_tokens
+				WHERE access_token = ? AND family_id != '' AND expires_at > ?
+			)
+		 )`,
+		providerAccessToken, providerRefreshToken, unixOrZero(providerAccessExpiry),
+		time.Now().Unix(), accessToken, accessToken, time.Now().Unix(),
 	)
 	if err != nil {
 		return fmt.Errorf("updating refresh token provider metadata by access token: %w", err)
@@ -520,7 +546,7 @@ type sqliteTokenStore struct {
 }
 
 // encodeAudiences serialises audiences for the access_tokens.audiences column.
-// An empty slice is stored as '' so decodeAudiences can round-trip it to nil.
+// An empty slice is stored as ” so decodeAudiences can round-trip it to nil.
 func encodeAudiences(audiences []string) (string, error) {
 	if len(audiences) == 0 {
 		return "", nil

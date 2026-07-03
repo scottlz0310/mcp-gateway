@@ -815,6 +815,13 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 		oauthError(w, "invalid_request", "missing refresh_token", http.StatusBadRequest)
 		return
 	}
+	if h.isBuiltinMode() {
+		_, _, familyID, _, _, ok := h.store.LookupAnyRefreshToken(rt)
+		if ok && familyID != "" {
+			unlock := h.store.LockRefreshTokenFamily(familyID)
+			defer unlock()
+		}
+	}
 
 	// Look up the nonce before reserving (soft-revoking) the refresh token so
 	// the nonce is still readable via LookupNonce even after revocation.
@@ -1557,6 +1564,14 @@ func (h *Handler) tryBuiltinRotationWithAttempt(ctx context.Context, token strin
 // (rotationResult.newToken echoes token unchanged) instead of caching the
 // rotated provider token under a new key.
 func (h *Handler) runBuiltinRotation(ctx context.Context, token string) rotationResult {
+	familyID, _ := h.store.LookupRefreshTokenFamilyByAccessToken(token)
+	lockKey := familyID
+	if lockKey == "" {
+		lockKey = tokenKey(token)
+	}
+	unlock := h.store.LockRefreshTokenFamily(lockKey)
+	defer unlock()
+
 	// Re-read the cache entry: a previous leader on this same key may have
 	// just completed a rotation, in which case the expiry is now outside the
 	// leeway window and there is nothing more to do.
@@ -1632,10 +1647,15 @@ func (h *Handler) runBuiltinRotation(ctx context.Context, token string) rotation
 		h.store.MarkRotationPermanentlyFailed(token)
 		return rotationResult{}
 	}
+	_, currentAccessToken := h.store.LookupRefreshTokenFamilyByAccessToken(token)
 	// Unlike runGitHubRotation, the cache key (the gateway JWT) never
 	// changes: update the existing entry's provider fields in place.
 	h.store.RecordProviderAccessToken(token, tokens.AccessToken)
 	h.persistProviderRefresh(token, newRefresh, newAccessExpiry)
+	if currentAccessToken != "" && currentAccessToken != token {
+		h.store.RecordProviderAccessToken(currentAccessToken, tokens.AccessToken)
+		h.persistProviderRefresh(currentAccessToken, newRefresh, newAccessExpiry)
+	}
 	slog.Info("github access token rotated (builtin)",
 		"jwt_hash", tokenFingerprint(token),
 	)

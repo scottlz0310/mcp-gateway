@@ -719,8 +719,9 @@ func testRefreshTokenStoreContract(t *testing.T, rts RefreshTokenStore) {
 	if got, gotExp := rts.LookupProviderRefresh("rt-prt-empty"); got != "" || !gotExp.IsZero() {
 		t.Errorf("LookupProviderRefresh on unset metadata: got (%q, %v), want (\"\", zero)", got, gotExp)
 	}
-	// builtin delegated rotation は gateway JWT に紐づく active refresh-token entry を
-	// 更新し、後続の gateway refresh による旧 provider token 世代の復元を防ぐ。
+	// builtin delegated rotation は soft-revoke 済み predecessor から family を辿る。
+	// provider rotation の commit 前に gateway refresh が current JWT を更新した
+	// 場合も、同じ family の active entry を更新できることを検証する。
 	if err := rts.Save("rt-prt-active", "gateway-jwt", "", "fid-prt-active", time.Now().Add(time.Hour)); err != nil {
 		t.Fatalf("Save rt-prt-active: %v", err)
 	}
@@ -730,14 +731,29 @@ func testRefreshTokenStoreContract(t *testing.T, rts RefreshTokenStore) {
 	if err := rts.SaveProviderRefresh("rt-prt-active", "ghr_old", prExpiry); err != nil {
 		t.Fatalf("SaveProviderRefresh rt-prt-active: %v", err)
 	}
+	if err := rts.Revoke("rt-prt-active"); err != nil {
+		t.Fatalf("Revoke rt-prt-active: %v", err)
+	}
+	if err := rts.Save("rt-prt-current", "gateway-jwt-current", "", "fid-prt-active", time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("Save rt-prt-current: %v", err)
+	}
+	if err := rts.SaveProviderAccessToken("rt-prt-current", "gho_old"); err != nil {
+		t.Fatalf("SaveProviderAccessToken rt-prt-current: %v", err)
+	}
+	if err := rts.SaveProviderRefresh("rt-prt-current", "ghr_old", prExpiry); err != nil {
+		t.Fatalf("SaveProviderRefresh rt-prt-current: %v", err)
+	}
+	if familyID, current := rts.LookupFamilyByAccessToken("gateway-jwt"); familyID != "fid-prt-active" || current != "gateway-jwt-current" {
+		t.Fatalf("LookupFamilyByAccessToken: got (%q, %q), want (%q, %q)", familyID, current, "fid-prt-active", "gateway-jwt-current")
+	}
 	rotatedExpiry := time.Now().Add(12 * time.Hour).Truncate(time.Second)
 	if err := rts.UpdateProviderTokensByAccessToken("gateway-jwt", "gho_new", "ghr_new", rotatedExpiry); err != nil {
 		t.Fatalf("UpdateProviderTokensByAccessToken: %v", err)
 	}
-	if got := rts.LookupProviderAccessToken("rt-prt-active"); got != "gho_new" {
+	if got := rts.LookupProviderAccessToken("rt-prt-current"); got != "gho_new" {
 		t.Errorf("provider access token after update: got %q, want %q", got, "gho_new")
 	}
-	if got, gotExp := rts.LookupProviderRefresh("rt-prt-active"); got != "ghr_new" || !gotExp.Equal(rotatedExpiry) {
+	if got, gotExp := rts.LookupProviderRefresh("rt-prt-current"); got != "ghr_new" || !gotExp.Equal(rotatedExpiry) {
 		t.Errorf("provider refresh metadata after update: got (%q, %v), want (%q, %v)", got, gotExp, "ghr_new", rotatedExpiry)
 	}
 	// SaveProviderRefresh on absent token is a no-op (no error).
@@ -1069,6 +1085,9 @@ func (f *alwaysFailRefreshStore) SaveProviderRefresh(_, _ string, _ time.Time) e
 }
 func (f *alwaysFailRefreshStore) LookupProviderRefresh(_ string) (string, time.Time) {
 	return "", time.Time{}
+}
+func (f *alwaysFailRefreshStore) LookupFamilyByAccessToken(_ string) (string, string) {
+	return "", ""
 }
 func (f *alwaysFailRefreshStore) UpdateProviderTokensByAccessToken(_, _, _ string, _ time.Time) error {
 	return nil

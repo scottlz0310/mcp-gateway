@@ -28,6 +28,7 @@
   - `builtinProvider.RefreshToken` が GitHub OAuth への委譲実装になった（従来は常に `ErrRefreshNotSupported` を返していた）
   - builtin mode 専用の rotation ロジック（`tryBuiltinRotationWithAttempt` / `runBuiltinRotation`）を新設。非 builtin mode の rotation（cache key = provider トークン自体を差し替える設計）とは異なり、cache key（gateway JWT）はそのままに、record 内の `ProviderAccessToken` / `ProviderRefreshToken` / `ProviderAccessExpiry` のみを更新する。`EnsureFreshAccessTokenForSubject`（Phase B delegated access）の builtin 分岐にのみ組み込み、`ValidateToken` のキャッシュヒット分岐（PR #189 で追加した「非 builtin rotation を呼ばない」ガード）には手を入れていない — JWT 検証と provider トークンの rotation は builtin mode では独立した関心事であり、rotation が必要になるのは delegated access が provider トークン自体を使う場面のみのため
   - `RefreshTokenStore.SaveProviderRefresh` / `LookupProviderRefresh`（`ProviderRefreshToken` + `ProviderAccessExpiry`）を新設（mem・file・SQLite の3実装）。`tokenAuthCode` / `tokenDeviceGrant` / `tokenRefresh` の builtin 分岐でこれらを使い、rotation に必要なメタデータをアクセストークン TokenStore エントリの sweep 後も refresh token 経由で引き継げるようにした（既存の `ProviderAccessToken` と同じパターン）
+  - delegated rotation と gateway refresh を refresh-token family 単位で直列化し、rotation 成功時は current JWT と active refresh-token entry を同じ provider token 世代へ更新する。永久失敗時は family 全体を revoke し、失効済み metadata から新しい lineage が復活しないようにした
   - `tokenDeviceGrant` の builtin 分岐が誤ったキー（`completed.AccessToken`、非 builtin mode 用のキー）で provider refresh metadata を保存していたため実質 no-op になっていたバグを修正し、正しいキー（gateway JWT）で保存するようにした
 
 ### 変更

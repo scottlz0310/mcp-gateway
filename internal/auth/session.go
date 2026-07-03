@@ -74,6 +74,10 @@ type Store struct {
 	tokensTTL    time.Duration // TTL applied when saving a validated token
 	refreshStore RefreshTokenStore
 	refreshMu    sync.Mutex // guards atomic lookup+delete in UseRefreshToken and ReserveRefreshToken
+	// refreshFamilyMu は同じ refresh-token family の builtin provider rotation と
+	// gateway refresh を直列化する。固定 shard により lock map の無制限な増加を防ぎ、
+	// 無関係な family 間の並行性は維持する。
+	refreshFamilyMu [64]sync.Mutex
 
 	// subjectIndex maps a subject (e.g. GitHub login) to the raw access
 	// tokens currently cached for that subject. Used by the Phase B
@@ -811,9 +815,25 @@ func (s *Store) LookupRefreshTokenProviderRefresh(refreshToken string) (string, 
 	return s.refreshStore.LookupProviderRefresh(refreshToken)
 }
 
-// UpdateRefreshTokenProviderTokens は accessToken に紐づく active refresh-token entry の
-// provider metadata を更新する。builtin rotation の成功を返す前に、file/SQLite を含む
-// RefreshTokenStore が3つの provider field をまとめて永続化する。
+// LockRefreshTokenFamily は refresh-token family 内の provider metadata を
+// 複製・更新する操作を直列化する。呼び出し側は provider rotation または gateway
+// refresh の処理全体が完了するまで lock を保持する。
+func (s *Store) LockRefreshTokenFamily(familyID string) func() {
+	hash := sha256.Sum256([]byte(familyID))
+	mu := &s.refreshFamilyMu[int(hash[0])%len(s.refreshFamilyMu)]
+	mu.Lock()
+	return mu.Unlock
+}
+
+// LookupRefreshTokenFamilyByAccessToken は active と soft-revoke 済みの両方の
+// refresh-token entry から gateway JWT の family を解決する。
+// currentAccessToken はその family に最後に保存された JWT を返す。
+func (s *Store) LookupRefreshTokenFamilyByAccessToken(accessToken string) (familyID, currentAccessToken string) {
+	return s.refreshStore.LookupFamilyByAccessToken(accessToken)
+}
+
+// UpdateRefreshTokenProviderTokens は accessToken を含む family の active な
+// refresh-token entry に provider metadata を反映する。
 func (s *Store) UpdateRefreshTokenProviderTokens(accessToken, providerAccessToken, providerRefreshToken string, providerAccessExpiry time.Time) error {
 	if err := s.refreshStore.UpdateProviderTokensByAccessToken(accessToken, providerAccessToken, providerRefreshToken, providerAccessExpiry); err != nil {
 		return fmt.Errorf("updating refresh token provider metadata: %w", err)
@@ -874,32 +894,30 @@ func (s *Store) ClearProviderRefresh(token string) {
 	}
 }
 
-// MarkRotationPermanentlyFailed records a permanent rotation failure for
-// token. It first persists a durable RotationPermanentlyFailed flag in the
-// token store. If that flush fails, the function updates in-memory state only
-// (subject index eviction + rotationFailed map) and returns without clearing
-// provider refresh metadata — this guarantees the file store is never left in
-// the non-durable intermediate state (cleared metadata, no flag) that would
-// allow a dead bearer to be re-seeded after a gateway restart. The next
-// rotation attempt will retry the flush and eventually converge.
-//
-// When the flush succeeds, ClearProviderRefresh is called next, then the
-// token is removed from the subject index so EnsureFreshAccessTokenForSubject
-// cannot return it via the lenient branch, and an in-memory flag is set for
-// belt-and-suspenders protection within the same process.
-//
-// After a gateway restart with a file-backed store, the
-// RotationPermanentlyFailed flag is restored from disk and ValidateToken
-// skips RefreshSubjectIndex, so the dead bearer is never re-inserted into
-// the subject index.
+// MarkRotationPermanentlyFailed は token と同じ refresh-token family の current
+// access token に永久失敗を記録し、family 全体を revoke する。これにより gateway
+// refresh が失効済み provider metadata を新しい JWT へ継承することを防ぐ。
 func (s *Store) MarkRotationPermanentlyFailed(token string) {
-	// Persist the durable flag FIRST. If the flush fails, do not proceed to
-	// ClearProviderRefresh: leaving cleared metadata on disk without the
-	// RotationPermanentlyFailed flag recreates the original restart bug
-	// (ValidateToken re-seeds the subject index → dead bearer returned).
-	// On flush failure we still update in-memory state so the dead bearer is
-	// blocked within this process; the next rotation attempt will retry the
-	// flush and eventually converge.
+	familyID, currentAccessToken := s.refreshStore.LookupFamilyByAccessToken(token)
+	tokens := []string{token}
+	if currentAccessToken != "" && currentAccessToken != token {
+		tokens = append(tokens, currentAccessToken)
+	}
+
+	for _, failedToken := range tokens {
+		s.markTokenRotationPermanentlyFailed(failedToken)
+	}
+	if familyID != "" {
+		if _, err := s.refreshStore.RevokeFamily(familyID); err != nil {
+			slog.Warn("refresh token family revoke after permanent rotation failure failed", "err", err)
+		}
+	}
+}
+
+func (s *Store) markTokenRotationPermanentlyFailed(token string) {
+	// 永続 flag を先に保存する。保存に失敗した状態で metadata だけを消すと、再起動後に
+	// dead bearer が subject index へ復元されるため、その場合は in-memory state のみを
+	// 無効化する。
 	if err := s.tokens.MarkRotationFailed(token); err != nil {
 		slog.Warn("token store mark rotation failed; not clearing metadata to preserve durable-state invariant", "err", err)
 		if rec, ok := s.tokens.Lookup(token); ok && rec.Subject != "" {
@@ -911,8 +929,7 @@ func (s *Store) MarkRotationPermanentlyFailed(token string) {
 		return
 	}
 	s.ClearProviderRefresh(token)
-	// Remove from subject index so EnsureFreshAccessTokenForSubject cannot
-	// serve the dead bearer via the lenient branch (no rotation metadata).
+	// rotation metadata がない lenient branch から dead bearer を返さないようにする。
 	if rec, ok := s.tokens.Lookup(token); ok && rec.Subject != "" {
 		s.removeSubjectIndexEntry(rec.Subject, token)
 	}
