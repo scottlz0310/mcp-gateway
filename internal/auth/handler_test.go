@@ -1470,6 +1470,55 @@ func TestHandlerRefreshTokenSurvivesRestart(t *testing.T) {
 	}
 }
 
+// TestNewHandlerMigratesLegacyTokenStore verifies that a legacy tokens.json
+// written by the file-backed TokenStore is imported into the SQLite store on
+// startup and renamed to .migrated, so tokens validated before the upgrade
+// keep working (#191).
+func TestNewHandlerMigratesLegacyTokenStore(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "tokens.json")
+
+	legacy, err := NewFileTokenStore(storePath)
+	if err != nil {
+		t.Fatalf("NewFileTokenStore: %v", err)
+	}
+	if err := legacy.Save("tok-legacy", "alice", []string{"http://localhost:8080/mcp"}, time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("legacy Save: %v", err)
+	}
+
+	p := provider.NewGitHub(provider.GitHubConfig{
+		ClientID:     "test-client-id",
+		ClientSecret: "test-client-secret",
+		RedirectURI:  "http://localhost:8080/callback",
+		Scopes:       "repo,user",
+	})
+	h, err := NewHandler(Config{
+		BaseURL:        "http://localhost:8080",
+		SessionTTL:     10 * time.Minute,
+		CacheTTL:       5 * time.Minute,
+		ExpiresIn:      90 * 24 * time.Hour,
+		TokenStorePath: storePath,
+	}, p)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+
+	rec, ok := h.store.tokens.Lookup("tok-legacy")
+	if !ok {
+		t.Fatal("legacy token not found in SQLite store after migration")
+	}
+	if rec.Subject != "alice" {
+		t.Errorf("Subject: got %q, want %q", rec.Subject, "alice")
+	}
+	if _, statErr := os.Stat(storePath); !os.IsNotExist(statErr) {
+		t.Error("legacy tokens.json should have been renamed after migration")
+	}
+	if _, statErr := os.Stat(storePath + ".migrated"); statErr != nil {
+		t.Errorf("tokens.json.migrated not found: %v", statErr)
+	}
+}
+
 // ── error-injection helpers ───────────────────────────────────────────────────
 
 // deleteFailRefreshStore wraps a real in-memory store for all operations
@@ -1575,6 +1624,77 @@ func TestNewHandlerRefreshStoreInitError(t *testing.T) {
 	}, p)
 	if err == nil {
 		t.Fatal("expected error when refresh token store init fails, got nil")
+	}
+}
+
+// TestNewHandlerClosesDBOnTokenMigrationFailure verifies that when
+// migrateFileTokenStore fails, NewHandler closes the shared SQLite handle
+// before returning rather than leaking it (thread-owl review, PR #196):
+// leaving the handle open would keep the underlying .refresh.db file locked,
+// which on Windows makes even removing the file fail with "the process
+// cannot access the file because it is being used by another process".
+func TestNewHandlerClosesDBOnTokenMigrationFailure(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "tokens.json")
+	if err := os.WriteFile(storePath, []byte("{not valid json"), 0o600); err != nil {
+		t.Fatalf("writing corrupt tokens.json: %v", err)
+	}
+
+	p := provider.NewGitHub(provider.GitHubConfig{
+		ClientID:     "test-client-id",
+		ClientSecret: "test-client-secret",
+		RedirectURI:  "http://localhost:8080/callback",
+		Scopes:       "repo,user",
+	})
+	_, err := NewHandler(Config{
+		BaseURL:        "http://localhost:8080",
+		SessionTTL:     10 * time.Minute,
+		TokenStorePath: storePath,
+	}, p)
+	if err == nil {
+		t.Fatal("expected error from corrupt legacy tokens.json, got nil")
+	}
+
+	refreshDBPath := storePath + ".refresh.db"
+	if _, statErr := os.Stat(refreshDBPath); statErr != nil {
+		t.Fatalf(".refresh.db should have been created before migration ran: %v", statErr)
+	}
+	if removeErr := os.Remove(refreshDBPath); removeErr != nil {
+		t.Errorf("removing .refresh.db after failed migration: %v (handle appears to be leaked)", removeErr)
+	}
+}
+
+// TestNewHandlerClosesDBOnRefreshMigrationFailure is the counterpart of
+// TestNewHandlerClosesDBOnTokenMigrationFailure for the second migration call
+// (migrateFileRefreshTokenStore) in the same NewHandler error path.
+func TestNewHandlerClosesDBOnRefreshMigrationFailure(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "tokens.json")
+	if err := os.WriteFile(storePath+".refresh", []byte("{not valid json"), 0o600); err != nil {
+		t.Fatalf("writing corrupt tokens.json.refresh: %v", err)
+	}
+
+	p := provider.NewGitHub(provider.GitHubConfig{
+		ClientID:     "test-client-id",
+		ClientSecret: "test-client-secret",
+		RedirectURI:  "http://localhost:8080/callback",
+		Scopes:       "repo,user",
+	})
+	_, err := NewHandler(Config{
+		BaseURL:        "http://localhost:8080",
+		SessionTTL:     10 * time.Minute,
+		TokenStorePath: storePath,
+	}, p)
+	if err == nil {
+		t.Fatal("expected error from corrupt legacy tokens.json.refresh, got nil")
+	}
+
+	refreshDBPath := storePath + ".refresh.db"
+	if _, statErr := os.Stat(refreshDBPath); statErr != nil {
+		t.Fatalf(".refresh.db should have been created before migration ran: %v", statErr)
+	}
+	if removeErr := os.Remove(refreshDBPath); removeErr != nil {
+		t.Errorf("removing .refresh.db after failed migration: %v (handle appears to be leaked)", removeErr)
 	}
 }
 

@@ -18,6 +18,57 @@ func tempSQLitePath(t *testing.T) string {
 	return filepath.Join(t.TempDir(), "tokens.refresh.db")
 }
 
+// TestOpenSQLiteTokenDBChmodsWALSideFiles verifies that the -wal/-shm side
+// files WAL mode creates alongside the main database also get the owner-only
+// permission — not just the main file (thread-owl review, PR #196): those
+// side files can contain token data mid-transaction, so leaving them at the
+// process umask would defeat the confidentiality the main file's 0600 is
+// meant to provide. Skipped on Windows where permission bits are not
+// enforced (see the isWindows() pattern used by the other *FilePermissions
+// tests in this package).
+//
+// Whether -wal/-shm exist at all by the time openSQLiteTokenDB returns is a
+// SQLite-driver/platform implementation detail (observed: present on
+// Windows, absent on Linux CI for a freshly-created, otherwise-empty
+// database — thread-owl re-review, PR #196 run 28655143021), matching the
+// chmod loop's own best-effort contract (os.IsNotExist is not an error). So
+// this only asserts the permission on side files that do exist; the main
+// database file is always expected to exist and be checked unconditionally.
+func TestOpenSQLiteTokenDBChmodsWALSideFiles(t *testing.T) {
+	if isWindows() {
+		t.Skip("file permission bits not enforced on Windows")
+	}
+	path := tempSQLitePath(t)
+	db, err := openSQLiteTokenDB(path)
+	if err != nil {
+		t.Fatalf("openSQLiteTokenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	info, statErr := os.Stat(path)
+	if statErr != nil {
+		t.Fatalf("stat %q: %v", path, statErr)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("%s: mode = %o, want 0600", path, perm)
+	}
+
+	for _, suffix := range []string{"-wal", "-shm"} {
+		p := path + suffix
+		info, statErr := os.Stat(p)
+		if statErr != nil {
+			if os.IsNotExist(statErr) {
+				t.Logf("%s: not materialised by this SQLite build/platform at this point; skipping permission check", p)
+				continue
+			}
+			t.Fatalf("stat %q: %v", p, statErr)
+		}
+		if perm := info.Mode().Perm(); perm != 0o600 {
+			t.Errorf("%s: mode = %o, want 0600", p, perm)
+		}
+	}
+}
+
 func newTestSQLiteStore(t *testing.T) RefreshTokenStore {
 	t.Helper()
 	rts, err := NewSQLiteRefreshTokenStore(":memory:")
@@ -523,5 +574,375 @@ func TestSQLiteRefreshTokenStoreBackfillsFamilyPointerOnReopen(t *testing.T) {
 	}
 	if current != "at-legacy-current" {
 		t.Errorf("RevokeFamily after backfill-on-reopen: got %q, want %q", current, "at-legacy-current")
+	}
+}
+
+// ── SQLite TokenStore ────────────────────────────────────────────────────────
+
+// newTestSQLiteTokenStores opens a shared in-memory database and registers
+// cleanup for the shared handle.
+func newTestSQLiteTokenStores(t *testing.T) (TokenStore, RefreshTokenStore) {
+	t.Helper()
+	ts, rts, err := NewSQLiteTokenStores(":memory:")
+	if err != nil {
+		t.Fatalf("NewSQLiteTokenStores: %v", err)
+	}
+	t.Cleanup(func() { _ = ts.(*sqliteTokenStore).Close() })
+	return ts, rts
+}
+
+func TestSQLiteTokenStoreContract(t *testing.T) {
+	ts, _ := newTestSQLiteTokenStores(t)
+	testTokenStoreContract(t, ts)
+}
+
+func TestSQLiteRefreshTokenStoreContractOnSharedDB(t *testing.T) {
+	_, rts := newTestSQLiteTokenStores(t)
+	testRefreshTokenStoreContract(t, rts)
+}
+
+// TestSQLiteTokenStorePersistence verifies that every TokenRecord field
+// round-trips through a store reopen (process-restart simulation), including
+// the zero ProviderAccessExpiry ("no expiry hint") sentinel.
+func TestSQLiteTokenStorePersistence(t *testing.T) {
+	path := tempSQLitePath(t)
+	exp := time.Now().Add(time.Hour)
+	pae := time.Now().Add(8 * time.Hour).Truncate(time.Second)
+
+	ts1, _, err := NewSQLiteTokenStores(path)
+	if err != nil {
+		t.Fatalf("open 1: %v", err)
+	}
+	if err := ts1.Save("tok-full", "alice", []string{"https://gw.example/mcp"}, exp); err != nil {
+		t.Fatalf("Save tok-full: %v", err)
+	}
+	if err := ts1.SaveProviderAccessToken("tok-full", "gho_persist"); err != nil {
+		t.Fatalf("SaveProviderAccessToken: %v", err)
+	}
+	if err := ts1.SaveProviderRefresh("tok-full", "ghr_persist", pae); err != nil {
+		t.Fatalf("SaveProviderRefresh: %v", err)
+	}
+	if err := ts1.SaveNonce("tok-full", "nonce-persist"); err != nil {
+		t.Fatalf("SaveNonce: %v", err)
+	}
+	if err := ts1.SaveJti("tok-full", "jti-persist"); err != nil {
+		t.Fatalf("SaveJti: %v", err)
+	}
+	// Second entry: provider refresh saved without an expiry hint — must come
+	// back as the zero time, not Unix(0).
+	if err := ts1.Save("tok-nohint", "bob", nil, exp); err != nil {
+		t.Fatalf("Save tok-nohint: %v", err)
+	}
+	if err := ts1.SaveProviderRefresh("tok-nohint", "ghr_nohint", time.Time{}); err != nil {
+		t.Fatalf("SaveProviderRefresh (zero expiry): %v", err)
+	}
+	if err := ts1.(*sqliteTokenStore).Close(); err != nil {
+		t.Fatalf("close 1: %v", err)
+	}
+
+	ts2, _, err := NewSQLiteTokenStores(path)
+	if err != nil {
+		t.Fatalf("open 2: %v", err)
+	}
+	t.Cleanup(func() { _ = ts2.(*sqliteTokenStore).Close() })
+	rec, ok := ts2.Lookup("tok-full")
+	if !ok {
+		t.Fatal("Lookup tok-full after reopen: expected hit")
+	}
+	if rec.Subject != "alice" {
+		t.Errorf("Subject: got %q, want %q", rec.Subject, "alice")
+	}
+	if !rec.HasAudience("https://gw.example/mcp") {
+		t.Errorf("Audiences: got %#v, want https://gw.example/mcp", rec.Audiences)
+	}
+	if rec.ProviderAccessToken != "gho_persist" {
+		t.Errorf("ProviderAccessToken: got %q, want %q", rec.ProviderAccessToken, "gho_persist")
+	}
+	if rec.ProviderRefreshToken != "ghr_persist" {
+		t.Errorf("ProviderRefreshToken: got %q, want %q", rec.ProviderRefreshToken, "ghr_persist")
+	}
+	if !rec.ProviderAccessExpiry.Equal(pae) {
+		t.Errorf("ProviderAccessExpiry: got %v, want %v", rec.ProviderAccessExpiry, pae)
+	}
+	if rec.Nonce != "nonce-persist" {
+		t.Errorf("Nonce: got %q, want %q", rec.Nonce, "nonce-persist")
+	}
+	if rec.Jti != "jti-persist" {
+		t.Errorf("Jti: got %q, want %q", rec.Jti, "jti-persist")
+	}
+
+	recNoHint, ok := ts2.Lookup("tok-nohint")
+	if !ok {
+		t.Fatal("Lookup tok-nohint after reopen: expected hit")
+	}
+	if !recNoHint.ProviderAccessExpiry.IsZero() {
+		t.Errorf("ProviderAccessExpiry: got %v, want zero time", recNoHint.ProviderAccessExpiry)
+	}
+}
+
+// TestSQLiteTokenStoreMarkRotationFailedPersists verifies the restart
+// durability of RotationPermanentlyFailed — the property that keeps a dead
+// bearer out of the subject index after a gateway restart.
+func TestSQLiteTokenStoreMarkRotationFailedPersists(t *testing.T) {
+	path := tempSQLitePath(t)
+
+	ts1, _, err := NewSQLiteTokenStores(path)
+	if err != nil {
+		t.Fatalf("open 1: %v", err)
+	}
+	if err := ts1.Save("tok-dead", "alice", nil, time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := ts1.MarkRotationFailed("tok-dead"); err != nil {
+		t.Fatalf("MarkRotationFailed: %v", err)
+	}
+	if err := ts1.(*sqliteTokenStore).Close(); err != nil {
+		t.Fatalf("close 1: %v", err)
+	}
+
+	ts2, _, err := NewSQLiteTokenStores(path)
+	if err != nil {
+		t.Fatalf("open 2: %v", err)
+	}
+	t.Cleanup(func() { _ = ts2.(*sqliteTokenStore).Close() })
+	rec, ok := ts2.Lookup("tok-dead")
+	if !ok {
+		t.Fatal("Lookup after reopen: expected hit")
+	}
+	if !rec.RotationPermanentlyFailed {
+		t.Error("RotationPermanentlyFailed must survive a reopen")
+	}
+}
+
+// TestSQLiteTokenStoresShareDatabase verifies that the TokenStore and
+// RefreshTokenStore returned by NewSQLiteTokenStores write into the same
+// database file and both survive a reopen through it.
+func TestSQLiteTokenStoresShareDatabase(t *testing.T) {
+	path := tempSQLitePath(t)
+	exp := time.Now().Add(time.Hour)
+
+	ts1, rts1, err := NewSQLiteTokenStores(path)
+	if err != nil {
+		t.Fatalf("open 1: %v", err)
+	}
+	if err := ts1.Save("at-shared", "alice", nil, exp); err != nil {
+		t.Fatalf("TokenStore.Save: %v", err)
+	}
+	if err := rts1.Save("rt-shared", "at-shared", "aud", "fid-shared", exp); err != nil {
+		t.Fatalf("RefreshTokenStore.Save: %v", err)
+	}
+	if err := ts1.(*sqliteTokenStore).Close(); err != nil {
+		t.Fatalf("close 1: %v", err)
+	}
+
+	ts2, rts2, err := NewSQLiteTokenStores(path)
+	if err != nil {
+		t.Fatalf("open 2: %v", err)
+	}
+	t.Cleanup(func() { _ = ts2.(*sqliteTokenStore).Close() })
+	if _, ok := ts2.Lookup("at-shared"); !ok {
+		t.Error("TokenStore entry must survive reopen of the shared database")
+	}
+	if _, _, _, _, ok := rts2.Lookup("rt-shared"); !ok {
+		t.Error("RefreshTokenStore entry must survive reopen of the shared database")
+	}
+}
+
+// TestMigrateFileTokenStore verifies that entries from a legacy tokens.json
+// are imported into the SQLite store with all fields intact and the source
+// file is renamed to .migrated.
+func TestMigrateFileTokenStore(t *testing.T) {
+	dir := t.TempDir()
+	legacyPath := filepath.Join(dir, "tokens.json")
+
+	exp := time.Now().Add(time.Hour)
+	pae := time.Now().Add(8 * time.Hour).Truncate(time.Second)
+	entries := map[string]fileEntry{
+		tokenKey("tok-legacy-full"): {
+			Subject:              "alice",
+			Audiences:            []string{"https://gw.example/mcp"},
+			ExpiresAt:            exp,
+			ProviderAccessToken:  "gho_legacy",
+			ProviderRefreshToken: "ghr_legacy",
+			ProviderAccessExpiry: pae,
+			RotationFailed:       true,
+			Nonce:                "nonce-legacy",
+			Jti:                  "jti-legacy",
+		},
+		tokenKey("tok-legacy-min"): {Subject: "bob", ExpiresAt: exp},
+	}
+	data, _ := json.Marshal(entries)
+	if err := os.WriteFile(legacyPath, data, 0o600); err != nil {
+		t.Fatalf("writing legacy file: %v", err)
+	}
+
+	dst, _ := newTestSQLiteTokenStores(t)
+	if err := migrateFileTokenStore(legacyPath, dst); err != nil {
+		t.Fatalf("migrateFileTokenStore: %v", err)
+	}
+
+	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+		t.Error("legacy file should have been renamed, but still exists")
+	}
+	if _, err := os.Stat(legacyPath + ".migrated"); err != nil {
+		t.Errorf(".migrated file not found: %v", err)
+	}
+
+	rec, ok := dst.Lookup("tok-legacy-full")
+	if !ok {
+		t.Fatal("Lookup tok-legacy-full: expected hit after migration")
+	}
+	if rec.Subject != "alice" {
+		t.Errorf("Subject: got %q, want %q", rec.Subject, "alice")
+	}
+	if !rec.HasAudience("https://gw.example/mcp") {
+		t.Errorf("Audiences: got %#v", rec.Audiences)
+	}
+	if rec.ProviderAccessToken != "gho_legacy" {
+		t.Errorf("ProviderAccessToken: got %q, want %q", rec.ProviderAccessToken, "gho_legacy")
+	}
+	if rec.ProviderRefreshToken != "ghr_legacy" {
+		t.Errorf("ProviderRefreshToken: got %q, want %q", rec.ProviderRefreshToken, "ghr_legacy")
+	}
+	if !rec.ProviderAccessExpiry.Equal(pae) {
+		t.Errorf("ProviderAccessExpiry: got %v, want %v", rec.ProviderAccessExpiry, pae)
+	}
+	if !rec.RotationPermanentlyFailed {
+		t.Error("RotationPermanentlyFailed must survive migration")
+	}
+	if rec.Nonce != "nonce-legacy" {
+		t.Errorf("Nonce: got %q, want %q", rec.Nonce, "nonce-legacy")
+	}
+	if rec.Jti != "jti-legacy" {
+		t.Errorf("Jti: got %q, want %q", rec.Jti, "jti-legacy")
+	}
+
+	recMin, ok := dst.Lookup("tok-legacy-min")
+	if !ok {
+		t.Fatal("Lookup tok-legacy-min: expected hit after migration")
+	}
+	if recMin.Subject != "bob" || len(recMin.Audiences) != 0 || !recMin.ProviderAccessExpiry.IsZero() {
+		t.Errorf("tok-legacy-min: got %+v, want minimal record", recMin)
+	}
+}
+
+// TestMigrateFileTokenStoreDoesNotOverwrite verifies that INSERT OR IGNORE
+// keeps an already-present SQLite row authoritative over the legacy file.
+func TestMigrateFileTokenStoreDoesNotOverwrite(t *testing.T) {
+	dir := t.TempDir()
+	legacyPath := filepath.Join(dir, "tokens.json")
+
+	exp := time.Now().Add(time.Hour)
+	entries := map[string]fileEntry{
+		tokenKey("tok-conflict"): {Subject: "stale-subject", ExpiresAt: exp},
+	}
+	data, _ := json.Marshal(entries)
+	if err := os.WriteFile(legacyPath, data, 0o600); err != nil {
+		t.Fatalf("writing legacy file: %v", err)
+	}
+
+	dst, _ := newTestSQLiteTokenStores(t)
+	if err := dst.Save("tok-conflict", "current-subject", nil, exp); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := migrateFileTokenStore(legacyPath, dst); err != nil {
+		t.Fatalf("migrateFileTokenStore: %v", err)
+	}
+	rec, ok := dst.Lookup("tok-conflict")
+	if !ok {
+		t.Fatal("Lookup tok-conflict: expected hit")
+	}
+	if rec.Subject != "current-subject" {
+		t.Errorf("Subject: got %q, want the pre-existing SQLite row to win", rec.Subject)
+	}
+}
+
+// TestMigrateFileTokenStoreEmptyFileRenameError verifies that a rename
+// failure on an empty legacy file is surfaced as an error rather than
+// silently swallowed (thread-owl review, PR #196): swallowing it would let
+// startup proceed while leaving the empty file in place to be re-processed
+// (and potentially fail the same way again) on every subsequent restart,
+// contradicting the "renamed to .migrated" contract other callers rely on.
+func TestMigrateFileTokenStoreEmptyFileRenameError(t *testing.T) {
+	dir := t.TempDir()
+	legacyPath := filepath.Join(dir, "tokens.json")
+	if err := os.WriteFile(legacyPath, []byte{}, 0o600); err != nil {
+		t.Fatalf("writing empty file: %v", err)
+	}
+	// Pre-create the .migrated destination as a non-empty directory so
+	// renameOverwrite's os.Remove(dst) fails with something other than
+	// "not exist", forcing the rename failure down the error path instead of
+	// the normal no-op-if-absent path.
+	migratedPath := legacyPath + ".migrated"
+	if err := os.Mkdir(migratedPath, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(migratedPath, "blocker"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("writing blocker file: %v", err)
+	}
+
+	dst, _ := newTestSQLiteTokenStores(t)
+	if err := migrateFileTokenStore(legacyPath, dst); err == nil {
+		t.Fatal("expected error when the .migrated destination cannot be removed, got nil")
+	}
+	if _, statErr := os.Stat(legacyPath); statErr != nil {
+		t.Errorf("legacy empty file should remain in place after a failed rename: %v", statErr)
+	}
+}
+
+// TestMigrateFileRefreshTokenStoreEmptyFileRenameError is the
+// RefreshTokenStore counterpart of TestMigrateFileTokenStoreEmptyFileRenameError.
+func TestMigrateFileRefreshTokenStoreEmptyFileRenameError(t *testing.T) {
+	dir := t.TempDir()
+	legacyPath := filepath.Join(dir, "tokens.json.refresh")
+	if err := os.WriteFile(legacyPath, []byte{}, 0o600); err != nil {
+		t.Fatalf("writing empty file: %v", err)
+	}
+	migratedPath := legacyPath + ".migrated"
+	if err := os.Mkdir(migratedPath, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(migratedPath, "blocker"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("writing blocker file: %v", err)
+	}
+
+	dst, err := NewSQLiteRefreshTokenStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewSQLiteRefreshTokenStore: %v", err)
+	}
+	if err := migrateFileRefreshTokenStore(legacyPath, dst); err == nil {
+		t.Fatal("expected error when the .migrated destination cannot be removed, got nil")
+	}
+	if _, statErr := os.Stat(legacyPath); statErr != nil {
+		t.Errorf("legacy empty file should remain in place after a failed rename: %v", statErr)
+	}
+}
+
+// TestMigrateFileTokenStoreNoFile verifies that migration is a no-op when the
+// legacy file does not exist.
+func TestMigrateFileTokenStoreNoFile(t *testing.T) {
+	dst, _ := newTestSQLiteTokenStores(t)
+	if err := migrateFileTokenStore(filepath.Join(t.TempDir(), "nonexistent"), dst); err != nil {
+		t.Errorf("expected nil for missing file, got %v", err)
+	}
+}
+
+// TestMigrateFileTokenStoreEmptyFile verifies that an empty legacy file is
+// renamed to .migrated without error.
+func TestMigrateFileTokenStoreEmptyFile(t *testing.T) {
+	dir := t.TempDir()
+	legacyPath := filepath.Join(dir, "tokens.json")
+	if err := os.WriteFile(legacyPath, []byte{}, 0o600); err != nil {
+		t.Fatalf("writing empty file: %v", err)
+	}
+	dst, _ := newTestSQLiteTokenStores(t)
+	if err := migrateFileTokenStore(legacyPath, dst); err != nil {
+		t.Fatalf("migrateFileTokenStore: %v", err)
+	}
+	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+		t.Error("empty legacy file should have been renamed")
+	}
+	if _, err := os.Stat(legacyPath + ".migrated"); err != nil {
+		t.Errorf(".migrated file not found: %v", err)
 	}
 }

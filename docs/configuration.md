@@ -60,7 +60,7 @@ OAuth クライアントシークレットは意図的に特別扱いです。`c
 | `MCP_GATEWAY_PORT` | `8080` | `public_url` と `bind_addr` のデフォルト導出に使用するポート。 |
 | `MCP_GATEWAY_BASE_URL` | なし | `MCP_GATEWAY_PUBLIC_URL` の非推奨エイリアス。設定されると起動時警告を出力。 |
 | `MCP_GATEWAY_TRUSTED_PROXIES` | なし | `X-Forwarded-*` ヘッダーを信頼する直前のリバースプロキシの CIDR リスト（カンマ区切り）。 |
-| `MCP_GATEWAY_TOKEN_STORE_PATH` | OS state dir¹ `/tokens.json` | 永続トークンストアのパス。空値に設定すると永続化を無効化。Docker 環境は環境変数で上書き。 |
+| `MCP_GATEWAY_TOKEN_STORE_PATH` | OS state dir¹ `/tokens.json` | 永続トークンストアのベースパス。実データは `<パス>.refresh.db`（SQLite）に保存される（[トークン永続化](#トークン永続化)参照）。空値に設定すると永続化を無効化。Docker 環境は環境変数で上書き。 |
 | `MCP_GATEWAY_AUTH_AUDIT_LOG_PATH` | OS audit dir² | OAuth 監査 JSON Lines の絶対 path。相対 path と Git worktree 配下は起動時に拒否される。 |
 | `MCP_GATEWAY_AUTH_AUDIT_MAX_SIZE_MB` | `10` | 監査ログ 1 ファイルの最大サイズ（MiB）。 |
 | `MCP_GATEWAY_AUTH_AUDIT_MAX_BACKUPS` | `5` | 保持するローテーション済み監査ログの最大数。 |
@@ -313,11 +313,13 @@ routes:
 
 ## トークン永続化
 
-デフォルトでは、検証済みトークン状態は `{state-dir}/tokens.json` に保存されます（上記[環境変数](#環境変数)セクションの OS state directory テーブルを参照）。Docker 環境は `docker-compose.yml` の `MCP_GATEWAY_TOKEN_STORE_PATH` で上書きします。明示的なパスを指定する場合:
+デフォルトでは、検証済みトークン状態は `{state-dir}/tokens.json.refresh.db`（SQLite、WAL モード）に保存されます（`{state-dir}` は上記[環境変数](#環境変数)セクションの OS state directory テーブルを参照）。Docker 環境は `docker-compose.yml` の `MCP_GATEWAY_TOKEN_STORE_PATH` で上書きします。明示的なパスを指定する場合:
 
 ```bash
 MCP_GATEWAY_TOKEN_STORE_PATH=/var/lib/mcp-gateway/tokens.json
 ```
+
+`MCP_GATEWAY_TOKEN_STORE_PATH` はベースパスであり、実データは `<パス>.refresh.db` に保存されます。アクセストークンストアとリフレッシュトークンストアは同一 SQLite データベースを共有し、単一のファイル・単一のトランザクション境界で管理されます。ファイル名の `.refresh` はリフレッシュトークンストアだけが SQLite だった時期の歴史的経緯によるもので、現在は全トークン状態を保持します（旧バージョンへのロールバック時にも同じパスが参照できるよう維持されています）。
 
 永続化を無効にするには空値に設定します:
 
@@ -327,24 +329,25 @@ MCP_GATEWAY_TOKEN_STORE_PATH=
 
 プライマリトークンストアの動作:
 
-- 起動時にトークンと identity のマッピングをロード。
-- 認証成功後にマッピングを保存。
-- 毎分、期限切れエントリをスイープ。
+- 認証成功後にトークンと identity のマッピングを保存。フィールド更新は単一の `UPDATE` 文で原子的に行われる。
+- 毎分、期限切れエントリをスイープ（インデックス付き `DELETE`）。
 - サポートされる環境ではモード `0600` で書き込み。
-- SHA-256 でハッシュ化したトークンキーを保存（生トークン値は保存しない）。
+- SHA-256 でハッシュ化したトークンキーを保存(生トークン値は保存しない)。
 
-トークン永続化が有効な場合、リフレッシュトークンは `<path>.refresh` に保存されます。このファイルはハッシュ化されたリフレッシュトークンキーと、対応するアクセストークン値を平文で保存します（ゲートウェイがリフレッシュ時に GitHub へアクセストークンを再提示する必要があるため）。機密データとして扱ってください。
+旧バージョンからのマイグレーション: 旧 file-backed ストア（`tokens.json` および `tokens.json.refresh`）が存在する場合、初回起動時に内容を SQLite データベースへインポートし、元ファイルを `<元パス>.migrated` にリネームします。マイグレーションに失敗した場合は元ファイルを残したまま起動を中止します。
 
-`MCP_GATEWAY_GITHUB_REFRESH_ENABLED=true`（または `gateway.github_refresh_enabled: true`）の場合、ゲートウェイは GitHub OAuth **リフレッシュトークン**を（`.refresh` サイドファイルではなく）プライマリストアの `tokens.json` にも保存します。再起動をまたいでローテーションを継続するためです。リフレッシュトークンは GitHub の `/login/oauth/access_token` エンドポイントへの再送が必要なため平文で書き込まれます。
+リフレッシュトークンストアは、ハッシュ化されたリフレッシュトークンキーと対応するアクセストークン値を平文で保存します（ゲートウェイがリフレッシュ時に GitHub へアクセストークンを再提示する必要があるため）。機密データとして扱ってください。
+
+`MCP_GATEWAY_GITHUB_REFRESH_ENABLED=true`（または `gateway.github_refresh_enabled: true`）の場合、ゲートウェイは GitHub OAuth **リフレッシュトークン**をプライマリトークンストアにも保存します。再起動をまたいでローテーションを継続するためです。リフレッシュトークンは GitHub の `/login/oauth/access_token` エンドポイントへの再送が必要なため平文で書き込まれます。
 
 リフレッシュトークン永続化の運用上の注意:
 
-- `tokens.json` の読者はリフレッシュトークンの有効期間中、ログイン済みユーザーの GitHub セッションを乗っ取れます。GitHub の expiring-user-token 設定では通常**6ヶ月**（ユーザーが認可を取り消すか GitHub App が再設定されるまで）。
-- `tokens.json` のバックアップも同じリスクを持ちます。バックアップボリュームを保存時暗号化するか、広いバックアップスコープから `tokens.json` と `tokens.json.refresh` を除外してください。
+- トークンデータベースの読者はリフレッシュトークンの有効期間中、ログイン済みユーザーの GitHub セッションを乗っ取れます。GitHub の expiring-user-token 設定では通常**6ヶ月**（ユーザーが認可を取り消すか GitHub App が再設定されるまで）。
+- バックアップも同じリスクを持ちます。バックアップボリュームを保存時暗号化するか、広いバックアップスコープから `tokens.json.refresh.db`（および SQLite の付随ファイル `-wal` / `-shm`、マイグレーション済みの `*.migrated`）を除外してください。
 - コンテナイメージやスナップショットにいずれのファイルも含めないこと。
 - 再起動をまたいだローテーションが不要な場合は `github_refresh_enabled` を無効にしてください。リフレッシュトークンはディスクに書き込まれません。
 
-**builtin mode（`OAUTH_PROVIDER=builtin`）の追加事項:** builtin mode ではクライアントに渡すアクセストークンはゲートウェイ署名の JWT であり、GitHub アクセストークン自体ではありません。ただし Phase B delegated access（`EnsureFreshAccessTokenForSubject`、`upstream_provider_token=true` ルートおよび `/internal/v1/whoami` が使用）が upstream サービスへ GitHub トークンを引き渡せるようにするため、GitHub アクセストークンは JWT に紐付けて `tokens.json`（および `github_refresh_enabled` 無効時でも常に）と、そのリフレッシュトークンストア（file-backed 構成では `tokens.json.refresh`、`MCP_GATEWAY_TOKEN_STORE_PATH` が SQLite バックエンドを指す場合は同 DB 内）の両方に**平文で常に**保存されます。`github_refresh_enabled` はリフレッシュトークン自体の保存有無のみを制御し、GitHub アクセストークンの保存有無は制御しません。したがって上記の「`tokens.json` の読者はログイン済みユーザーの GitHub セッションを乗っ取れる」というリスクは、`github_refresh_enabled` の設定に関わらず builtin mode にも同様に適用されます。
+**builtin mode（`OAUTH_PROVIDER=builtin`）の追加事項:** builtin mode ではクライアントに渡すアクセストークンはゲートウェイ署名の JWT であり、GitHub アクセストークン自体ではありません。ただし Phase B delegated access（`EnsureFreshAccessTokenForSubject`、`upstream_provider_token=true` ルートおよび `/internal/v1/whoami` が使用）が upstream サービスへ GitHub トークンを引き渡せるようにするため、GitHub アクセストークンは JWT に紐付けて、アクセストークンストアとリフレッシュトークンストアの両方（同一 SQLite データベース内）に**平文で常に**保存されます（`github_refresh_enabled` 無効時でも同様）。`github_refresh_enabled` はリフレッシュトークン自体の保存有無のみを制御し、GitHub アクセストークンの保存有無は制御しません。したがって上記の「トークンデータベースの読者はログイン済みユーザーの GitHub セッションを乗っ取れる」というリスクは、`github_refresh_enabled` の設定に関わらず builtin mode にも同様に適用されます。
 
 ## リバースプロキシヘッダー
 

@@ -236,7 +236,7 @@ Important paths:
 |---------|---------|-------|
 | `MCP_CONFIG_FILE` | `{state-dir}/config.yaml` | Persisted setup and encrypted secrets. |
 | `MCP_GATEWAY_KEY_PATH` | `{state-dir}/gateway.key` | age X25519 identity. Back it up securely. |
-| `MCP_GATEWAY_TOKEN_STORE_PATH` | `{state-dir}/tokens.json` | Persistent token store. Docker deployments pin this via env var. |
+| `MCP_GATEWAY_TOKEN_STORE_PATH` | `{state-dir}/tokens.json` | Persistent token store base path; data lives in `<path>.refresh.db` (SQLite). Docker deployments pin this via env var. |
 | `MCP_GATEWAY_AUTH_AUDIT_LOG_PATH` | OS user state directory; `/data/mcp-gateway/logs/auth-audit.jsonl` in the official image | Rotating OAuth audit JSON Lines file. Relative paths and Git worktree paths are rejected. |
 | *(auto)* | `{state-dir}/upstream_clients.json` | Upstream AS Dynamic Client Registration records (mode 0600). Created on first upstream OAuth route access. |
 | *(auto)* | `{state-dir}/upstream_tokens.json` | Per-user upstream OAuth access/refresh tokens (mode 0600). Created on first upstream OAuth authorization. |

@@ -229,7 +229,7 @@ environment:
 |---------|---------|-------|
 | `MCP_CONFIG_FILE` | `{state-dir}/config.yaml` | setup 結果と暗号化 secret。 |
 | `MCP_GATEWAY_KEY_PATH` | `{state-dir}/gateway.key` | age X25519 identity。安全にバックアップしてください。 |
-| `MCP_GATEWAY_TOKEN_STORE_PATH` | `{state-dir}/tokens.json` | token 永続化 path。Docker 環境では環境変数で上書きすること。 |
+| `MCP_GATEWAY_TOKEN_STORE_PATH` | `{state-dir}/tokens.json` | token 永続化のベース path。実データは `<path>.refresh.db`（SQLite）に保存。Docker 環境では環境変数で上書きすること。 |
 | `MCP_GATEWAY_AUTH_AUDIT_LOG_PATH` | OS のユーザー state 領域。公式 image では `/data/mcp-gateway/logs/auth-audit.jsonl` | OAuth 監査 JSON Lines。相対 path と Git worktree 配下は拒否されます。 |
 | *(自動生成)* | `{state-dir}/upstream_clients.json` | upstream AS の Dynamic Client Registration 記録（mode 0600）。upstream OAuth ルートへの初回アクセス時に作成。 |
 | *(自動生成)* | `{state-dir}/upstream_tokens.json` | ユーザーごとの upstream OAuth access/refresh token（mode 0600）。初回 upstream OAuth 認可完了時に作成。 |

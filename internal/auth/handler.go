@@ -57,10 +57,12 @@ type Config struct {
 	// GitHub classic OAuth tokens do not expire on GitHub's side; this only
 	// controls how long the MCP client trusts its cached copy. Defaults to 90 days.
 	ExpiresIn time.Duration
-	// TokenStorePath is the path to the JSON file used for persistent token storage.
-	// When empty, an in-memory store is used (default; data lost on restart).
-	// When set, validated tokens survive container restarts; the file is written
-	// with mode 0600 and only hashed token keys are stored.
+	// TokenStorePath enables persistent token storage. When empty, an in-memory
+	// store is used (default; data lost on restart). When set, validated tokens
+	// and refresh tokens survive container restarts, stored in a shared SQLite
+	// database at <TokenStorePath>.refresh.db (mode 0600, only hashed token
+	// keys). A legacy JSON file at TokenStorePath itself is imported on startup
+	// and renamed to <TokenStorePath>.migrated.
 	TokenStorePath string
 	// AllowedAudiences is the set of RFC 8707 resource indicator values accepted
 	// by this gateway. BaseURL is always allowed.
@@ -129,9 +131,10 @@ func WithAuditRecorder(recorder authaudit.Recorder) HandlerOption {
 // It returns an error if the provider is nil or if the persistent token store
 // cannot be initialized.
 //
-// When cfg.TokenStorePath is non-empty, validated tokens are stored durably in a
-// JSON file so that MCP clients do not need to re-authenticate after gateway
-// restarts. Tokens are stored with TTL equal to cfg.ExpiresIn (default 90 days).
+// When cfg.TokenStorePath is non-empty, validated tokens are stored durably in
+// a SQLite database (shared with the refresh-token store) so that MCP clients
+// do not need to re-authenticate after gateway restarts. Tokens are stored with
+// TTL equal to cfg.ExpiresIn (default 90 days).
 // When cfg.TokenStorePath is empty, an in-memory store is used (TTL = cfg.CacheTTL).
 func NewHandler(cfg Config, p provider.Provider, opts ...HandlerOption) (*Handler, error) {
 	if p == nil {
@@ -158,20 +161,34 @@ func NewHandler(cfg Config, p provider.Provider, opts ...HandlerOption) (*Handle
 	var tokensTTL time.Duration
 	var storeOpts []StoreOption
 	if cfg.TokenStorePath != "" {
-		fileStore, err := NewFileTokenStore(cfg.TokenStorePath)
+		// Both stores share one SQLite database. The file keeps its historical
+		// ".refresh.db" name (from when only the RefreshTokenStore was
+		// SQLite-backed, #135) so that upgrades reuse the existing database
+		// and a rollback to an older gateway still finds its denylist and
+		// refresh-token state at the path it expects.
+		sqliteTS, sqliteRTS, err := NewSQLiteTokenStores(cfg.TokenStorePath + ".refresh.db")
 		if err != nil {
 			return nil, fmt.Errorf("auth.NewHandler: token store: %w", err)
 		}
-		ts = fileStore
-		tokensTTL = cfg.ExpiresIn
-
-		sqliteRTS, err := NewSQLiteRefreshTokenStore(cfg.TokenStorePath + ".refresh.db")
-		if err != nil {
-			return nil, fmt.Errorf("auth.NewHandler: refresh token store: %w", err)
+		// Both stores share one *sql.DB (see NewSQLiteTokenStores), so closing
+		// either one releases the handle; sql.DB.Close is idempotent, so this is
+		// safe to call from either migration failure branch below without
+		// tracking which store owns "the" close.
+		closeSharedDB := func() {
+			if c, ok := sqliteTS.(io.Closer); ok {
+				_ = c.Close()
+			}
+		}
+		if err := migrateFileTokenStore(cfg.TokenStorePath, sqliteTS); err != nil {
+			closeSharedDB()
+			return nil, fmt.Errorf("auth.NewHandler: migrating legacy token store: %w", err)
 		}
 		if err := migrateFileRefreshTokenStore(cfg.TokenStorePath+".refresh", sqliteRTS); err != nil {
+			closeSharedDB()
 			return nil, fmt.Errorf("auth.NewHandler: migrating legacy refresh token store: %w", err)
 		}
+		ts = sqliteTS
+		tokensTTL = cfg.ExpiresIn
 		storeOpts = append(storeOpts, WithRefreshTokenStore(sqliteRTS))
 	} else {
 		ts = NewMemTokenStore()

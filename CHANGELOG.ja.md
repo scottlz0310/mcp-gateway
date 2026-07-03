@@ -22,6 +22,15 @@
   - `ValidateToken` は builtin mode ではキャッシュヒット時に非 builtin 用の GitHub rotation 経路を呼ばなくなった。将来 builtin mode の rotation 対応が入った際に顕在化しうるトークン漏洩リスクを事前に塞ぐもの（rotation 自体は follow-up として未実装 — `builtinProvider.RefreshToken` は引き続き `ErrRefreshNotSupported` を返す）。
   - `docs/configuration.md` — builtin mode では `github_refresh_enabled` の設定に関わらず、GitHub アクセストークンが常に `tokens.json` / refresh token ストアに永続化される旨を追記。また builtin mode の delegated access には永続トークンストアが実質必須である旨を制限事項に追記（in-memory ストア構成では JWT に紐付けた GitHub アクセストークンがトークンキャッシュ TTL 経過または再起動で失われ、JWT が有効なまま delegated access だけが再認証を要求し続けるため）。
 
+### 変更
+
+- プライマリトークンストア（TokenStore）を平文 JSON ファイル（`tokens.json`）から SQLite へ移行し、#135 でリフレッシュトークンストアに対して始まったストレージ統合を完了（[#191](https://github.com/scottlz0310/mcp-gateway/issues/191)）
+  - アクセストークンとリフレッシュトークンが単一の SQLite データベース（`<token-store-path>.refresh.db`）を共有するようになった: 単一ファイル・単一 writer ロック・単一トランザクション境界でゲートウェイの論理トークン状態全体を管理する。ファイル名は歴史的経緯の `.refresh.db` を維持し、アップグレード時に既存データベースを再利用でき、旧バージョンへのロールバック時にも denylist・リフレッシュ状態が期待されるパスから参照できるようにした
+  - フィールド更新（`SaveProviderRefresh` / `SaveProviderAccessToken` / `SaveNonce` / `SaveJti` / `MarkRotationFailed`）は有効期限ガード付きの単一 `UPDATE` 文になり、file ストアのファイル全体 rewrite + 手動インメモリロールバックのパターンを置き換えた。期限切れエントリの掃除も全走査 + rewrite からインデックス付き `DELETE` になった
+  - 自動ワンタイムマイグレーション: 既存の `tokens.json` は初回起動時に単一トランザクションでインポートされ、`tokens.json.migrated` にリネームされる（#135 のパターン踏襲）。マイグレーション失敗時は元ファイルを残したまま起動を中止する
+  - TokenStore 契約テストを SQLite 実装にも適用。file-backed 実装はマイグレーション元フォーマットとしてレガシー扱いで残置
+  - `docs/configuration.md` の「トークン永続化」を実装に合わせて全面改訂: `MCP_GATEWAY_TOKEN_STORE_PATH` のベースパスとしての意味、共有データベース構成、マイグレーション挙動、バックアップ除外対象（`tokens.json.refresh.db` + `-wal`/`-shm` + `*.migrated`）。PR #189 がプライマリストアの SQLite バックエンドに言及済みだったドキュメントと実装の乖離（#191 で指摘）もこれで解消
+
 ## [0.7.0] - 2026-06-21
 
 ### 追加
