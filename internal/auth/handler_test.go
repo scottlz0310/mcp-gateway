@@ -1627,6 +1627,77 @@ func TestNewHandlerRefreshStoreInitError(t *testing.T) {
 	}
 }
 
+// TestNewHandlerClosesDBOnTokenMigrationFailure verifies that when
+// migrateFileTokenStore fails, NewHandler closes the shared SQLite handle
+// before returning rather than leaking it (thread-owl review, PR #196):
+// leaving the handle open would keep the underlying .refresh.db file locked,
+// which on Windows makes even removing the file fail with "the process
+// cannot access the file because it is being used by another process".
+func TestNewHandlerClosesDBOnTokenMigrationFailure(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "tokens.json")
+	if err := os.WriteFile(storePath, []byte("{not valid json"), 0o600); err != nil {
+		t.Fatalf("writing corrupt tokens.json: %v", err)
+	}
+
+	p := provider.NewGitHub(provider.GitHubConfig{
+		ClientID:     "test-client-id",
+		ClientSecret: "test-client-secret",
+		RedirectURI:  "http://localhost:8080/callback",
+		Scopes:       "repo,user",
+	})
+	_, err := NewHandler(Config{
+		BaseURL:        "http://localhost:8080",
+		SessionTTL:     10 * time.Minute,
+		TokenStorePath: storePath,
+	}, p)
+	if err == nil {
+		t.Fatal("expected error from corrupt legacy tokens.json, got nil")
+	}
+
+	refreshDBPath := storePath + ".refresh.db"
+	if _, statErr := os.Stat(refreshDBPath); statErr != nil {
+		t.Fatalf(".refresh.db should have been created before migration ran: %v", statErr)
+	}
+	if removeErr := os.Remove(refreshDBPath); removeErr != nil {
+		t.Errorf("removing .refresh.db after failed migration: %v (handle appears to be leaked)", removeErr)
+	}
+}
+
+// TestNewHandlerClosesDBOnRefreshMigrationFailure is the counterpart of
+// TestNewHandlerClosesDBOnTokenMigrationFailure for the second migration call
+// (migrateFileRefreshTokenStore) in the same NewHandler error path.
+func TestNewHandlerClosesDBOnRefreshMigrationFailure(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "tokens.json")
+	if err := os.WriteFile(storePath+".refresh", []byte("{not valid json"), 0o600); err != nil {
+		t.Fatalf("writing corrupt tokens.json.refresh: %v", err)
+	}
+
+	p := provider.NewGitHub(provider.GitHubConfig{
+		ClientID:     "test-client-id",
+		ClientSecret: "test-client-secret",
+		RedirectURI:  "http://localhost:8080/callback",
+		Scopes:       "repo,user",
+	})
+	_, err := NewHandler(Config{
+		BaseURL:        "http://localhost:8080",
+		SessionTTL:     10 * time.Minute,
+		TokenStorePath: storePath,
+	}, p)
+	if err == nil {
+		t.Fatal("expected error from corrupt legacy tokens.json.refresh, got nil")
+	}
+
+	refreshDBPath := storePath + ".refresh.db"
+	if _, statErr := os.Stat(refreshDBPath); statErr != nil {
+		t.Fatalf(".refresh.db should have been created before migration ran: %v", statErr)
+	}
+	if removeErr := os.Remove(refreshDBPath); removeErr != nil {
+		t.Errorf("removing .refresh.db after failed migration: %v (handle appears to be leaked)", removeErr)
+	}
+}
+
 // newTestRefreshHandlerWithGitHub creates a Handler wired to a stub GitHub user API
 // and configured with a ResourceAudienceMap for refresh token audience tests.
 func newTestRefreshHandlerWithGitHub(t *testing.T, resourceMap map[string]string) (*Handler, *httptest.Server) {

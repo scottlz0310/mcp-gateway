@@ -170,10 +170,21 @@ func NewHandler(cfg Config, p provider.Provider, opts ...HandlerOption) (*Handle
 		if err != nil {
 			return nil, fmt.Errorf("auth.NewHandler: token store: %w", err)
 		}
+		// Both stores share one *sql.DB (see NewSQLiteTokenStores), so closing
+		// either one releases the handle; sql.DB.Close is idempotent, so this is
+		// safe to call from either migration failure branch below without
+		// tracking which store owns "the" close.
+		closeSharedDB := func() {
+			if c, ok := sqliteTS.(io.Closer); ok {
+				_ = c.Close()
+			}
+		}
 		if err := migrateFileTokenStore(cfg.TokenStorePath, sqliteTS); err != nil {
+			closeSharedDB()
 			return nil, fmt.Errorf("auth.NewHandler: migrating legacy token store: %w", err)
 		}
 		if err := migrateFileRefreshTokenStore(cfg.TokenStorePath+".refresh", sqliteRTS); err != nil {
+			closeSharedDB()
 			return nil, fmt.Errorf("auth.NewHandler: migrating legacy refresh token store: %w", err)
 		}
 		ts = sqliteTS

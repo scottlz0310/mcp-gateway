@@ -24,7 +24,9 @@ func migrateFileRefreshTokenStore(path string, dst RefreshTokenStore) error {
 		return fmt.Errorf("reading legacy refresh token store %q: %w", path, err)
 	}
 	if len(data) == 0 {
-		_ = renameOverwrite(path, path+".migrated")
+		if err := renameOverwrite(path, path+".migrated"); err != nil {
+			return fmt.Errorf("renaming empty legacy refresh token store %q: %w", path, err)
+		}
 		return nil
 	}
 
@@ -110,7 +112,9 @@ func migrateFileTokenStore(path string, dst TokenStore) error {
 		return fmt.Errorf("reading legacy token store %q: %w", path, err)
 	}
 	if len(data) == 0 {
-		_ = renameOverwrite(path, path+".migrated")
+		if err := renameOverwrite(path, path+".migrated"); err != nil {
+			return fmt.Errorf("renaming empty legacy token store %q: %w", path, err)
+		}
 		return nil
 	}
 

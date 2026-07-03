@@ -18,6 +18,37 @@ func tempSQLitePath(t *testing.T) string {
 	return filepath.Join(t.TempDir(), "tokens.refresh.db")
 }
 
+// TestOpenSQLiteTokenDBChmodsWALSideFiles verifies that the -wal/-shm side
+// files WAL mode creates alongside the main database also get the owner-only
+// permission — not just the main file (thread-owl review, PR #196): those
+// side files can contain token data mid-transaction, so leaving them at the
+// process umask would defeat the confidentiality the main file's 0600 is
+// meant to provide. Skipped on Windows where permission bits are not
+// enforced (see the isWindows() pattern used by the other *FilePermissions
+// tests in this package).
+func TestOpenSQLiteTokenDBChmodsWALSideFiles(t *testing.T) {
+	if isWindows() {
+		t.Skip("file permission bits not enforced on Windows")
+	}
+	path := tempSQLitePath(t)
+	db, err := openSQLiteTokenDB(path)
+	if err != nil {
+		t.Fatalf("openSQLiteTokenDB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		p := path + suffix
+		info, statErr := os.Stat(p)
+		if statErr != nil {
+			t.Fatalf("stat %q: %v", p, statErr)
+		}
+		if perm := info.Mode().Perm(); perm != 0o600 {
+			t.Errorf("%s: mode = %o, want 0600", p, perm)
+		}
+	}
+}
+
 func newTestSQLiteStore(t *testing.T) RefreshTokenStore {
 	t.Helper()
 	rts, err := NewSQLiteRefreshTokenStore(":memory:")
@@ -803,6 +834,67 @@ func TestMigrateFileTokenStoreDoesNotOverwrite(t *testing.T) {
 	}
 	if rec.Subject != "current-subject" {
 		t.Errorf("Subject: got %q, want the pre-existing SQLite row to win", rec.Subject)
+	}
+}
+
+// TestMigrateFileTokenStoreEmptyFileRenameError verifies that a rename
+// failure on an empty legacy file is surfaced as an error rather than
+// silently swallowed (thread-owl review, PR #196): swallowing it would let
+// startup proceed while leaving the empty file in place to be re-processed
+// (and potentially fail the same way again) on every subsequent restart,
+// contradicting the "renamed to .migrated" contract other callers rely on.
+func TestMigrateFileTokenStoreEmptyFileRenameError(t *testing.T) {
+	dir := t.TempDir()
+	legacyPath := filepath.Join(dir, "tokens.json")
+	if err := os.WriteFile(legacyPath, []byte{}, 0o600); err != nil {
+		t.Fatalf("writing empty file: %v", err)
+	}
+	// Pre-create the .migrated destination as a non-empty directory so
+	// renameOverwrite's os.Remove(dst) fails with something other than
+	// "not exist", forcing the rename failure down the error path instead of
+	// the normal no-op-if-absent path.
+	migratedPath := legacyPath + ".migrated"
+	if err := os.Mkdir(migratedPath, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(migratedPath, "blocker"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("writing blocker file: %v", err)
+	}
+
+	dst, _ := newTestSQLiteTokenStores(t)
+	if err := migrateFileTokenStore(legacyPath, dst); err == nil {
+		t.Fatal("expected error when the .migrated destination cannot be removed, got nil")
+	}
+	if _, statErr := os.Stat(legacyPath); statErr != nil {
+		t.Errorf("legacy empty file should remain in place after a failed rename: %v", statErr)
+	}
+}
+
+// TestMigrateFileRefreshTokenStoreEmptyFileRenameError is the
+// RefreshTokenStore counterpart of TestMigrateFileTokenStoreEmptyFileRenameError.
+func TestMigrateFileRefreshTokenStoreEmptyFileRenameError(t *testing.T) {
+	dir := t.TempDir()
+	legacyPath := filepath.Join(dir, "tokens.json.refresh")
+	if err := os.WriteFile(legacyPath, []byte{}, 0o600); err != nil {
+		t.Fatalf("writing empty file: %v", err)
+	}
+	migratedPath := legacyPath + ".migrated"
+	if err := os.Mkdir(migratedPath, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(migratedPath, "blocker"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("writing blocker file: %v", err)
+	}
+
+	dst, err := NewSQLiteRefreshTokenStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewSQLiteRefreshTokenStore: %v", err)
+	}
+	if err := migrateFileRefreshTokenStore(legacyPath, dst); err == nil {
+		t.Fatal("expected error when the .migrated destination cannot be removed, got nil")
+	}
+	if _, statErr := os.Stat(legacyPath); statErr != nil {
+		t.Errorf("legacy empty file should remain in place after a failed rename: %v", statErr)
 	}
 }
 

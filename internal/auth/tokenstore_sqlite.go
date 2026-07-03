@@ -160,8 +160,12 @@ func openSQLiteTokenDB(path string) (*sql.DB, error) {
 		return nil, fmt.Errorf("initialising SQLite token store: %w", err)
 	}
 	if path != ":memory:" {
-		if err := os.Chmod(path, 0o600); err != nil && !os.IsNotExist(err) {
-			slog.Warn("SQLite token store chmod failed", "path", path, "err", err)
+		// WAL mode can materialise token data into -wal/-shm side files, so the
+		// same owner-only permission must apply to them, not just the main file.
+		for _, suffix := range [...]string{"", "-wal", "-shm"} {
+			if err := os.Chmod(path+suffix, 0o600); err != nil && !os.IsNotExist(err) {
+				slog.Warn("SQLite token store chmod failed", "path", path+suffix, "err", err)
+			}
 		}
 	}
 	return db, nil
