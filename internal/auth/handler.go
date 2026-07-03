@@ -902,7 +902,18 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 		// independent of whether the durable family revoke succeeded, so it still
 		// catches the case where the store recovers and would otherwise let this
 		// grant copy the poisoned provider metadata onto a fresh, unfailed lineage.
-		if h.store.IsRotationPermanentlyFailed(accessToken) {
+		// The in-memory flag alone does not survive a gateway restart, though —
+		// also check the durable TokenRecord.RotationPermanentlyFailed flag
+		// (persisted by the access-token store's MarkRotationFailed write, which
+		// happens independently of the refresh-token family revoke) so a restart
+		// between a failed family revoke and this grant still fails closed.
+		permanentlyFailed := h.store.IsRotationPermanentlyFailed(accessToken)
+		if !permanentlyFailed {
+			if rec, ok := h.store.LookupToken(accessToken); ok {
+				permanentlyFailed = rec.RotationPermanentlyFailed
+			}
+		}
+		if permanentlyFailed {
 			// Do not RestoreRefreshToken: the backing JWT is permanently dead
 			// (mirrors the jwtErr branch below), and restoring it would hand
 			// out another chance to replay the poisoned provider metadata.

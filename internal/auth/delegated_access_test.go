@@ -1124,3 +1124,52 @@ func TestTokenRefresh_BuiltinFailsClosedWhenFamilyRevokePersistenceFails(t *test
 		t.Fatalf("gateway refresh error: got %v, want invalid_grant", errResp["error"])
 	}
 }
+
+// TestTokenRefresh_BuiltinFailsClosedAfterRestartWhenFamilyRevokePersistenceFailed
+// verifies that the fail-closed behavior survives a gateway restart.
+// IsRotationPermanentlyFailed is an in-memory-only flag that resets to empty
+// on a fresh Store, so tokenRefresh must also consult the durable
+// TokenRecord.RotationPermanentlyFailed flag written by the access-token
+// store's MarkRotationFailed (which persists independently of whether the
+// refresh-token family revoke succeeded) — otherwise a restart between a
+// failed family-revoke persistence and this grant would silently fall back
+// to fail-open (thread-owl review, PR #197).
+func TestTokenRefresh_BuiltinFailsClosedAfterRestartWhenFamilyRevokePersistenceFailed(t *testing.T) {
+	h := newDelegatedBuiltinRotationTestHandler(t, "gho_poisoned", "ghr_poisoned", 30*time.Second,
+		func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{}, errors.New("bad_refresh_token")
+		})
+	wrapped := &revokeFamilyFailStore{RefreshTokenStore: h.store.refreshStore}
+	h.store = NewStore(10*time.Minute, 90*24*time.Hour, h.store.tokens, WithRefreshTokenStore(wrapped))
+
+	tokenResp, jwt := runBuiltinFullFlow(t, h, "alice")
+	refreshToken, _ := tokenResp["refresh_token"].(string)
+
+	if result := h.runBuiltinRotation(context.Background(), jwt); result.ok {
+		t.Fatalf("permanently rejected rotation unexpectedly succeeded: %+v", result)
+	}
+
+	// Simulate a gateway restart: a fresh Store wraps the same durable
+	// TokenStore and RefreshTokenStore, but the in-memory rotationFailed set
+	// starts out empty.
+	h.store = NewStore(10*time.Minute, 90*24*time.Hour, h.store.tokens, WithRefreshTokenStore(wrapped))
+	if h.store.IsRotationPermanentlyFailed(jwt) {
+		t.Fatal("test setup invalid: in-memory flag should be empty after simulated restart")
+	}
+
+	body := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(refreshToken)
+	req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.Token(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("gateway refresh after restart with failed family revoke persistence: got %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	var errResp2 map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&errResp2); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if errResp2["error"] != "invalid_grant" {
+		t.Fatalf("gateway refresh error: got %v, want invalid_grant", errResp2["error"])
+	}
+}
