@@ -28,29 +28,29 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- builtin mode（`OAUTH_PROVIDER=builtin`）で GitHub provider アクセストークンの自動 rotation に対応 ([#190](https://github.com/scottlz0310/mcp-gateway/issues/190))
-  - `builtinProvider.RefreshToken` が GitHub OAuth への委譲実装になった（従来は常に `ErrRefreshNotSupported` を返していた）
-  - builtin mode 専用の rotation ロジック（`tryBuiltinRotationWithAttempt` / `runBuiltinRotation`）を新設。非 builtin mode の rotation（cache key = provider トークン自体を差し替える設計）とは異なり、cache key（gateway JWT）はそのままに、record 内の `ProviderAccessToken`/`ProviderRefreshToken`/`ProviderAccessExpiry` のみを更新する。`EnsureFreshAccessTokenForSubject`（Phase B delegated access）の builtin 分岐にのみ組み込み、`ValidateToken` のキャッシュヒット分岐（PR #189 で追加した「非 builtin rotation を呼ばない」ガード）には手を入れていない — JWT 検証と provider トークンの rotation は builtin mode では独立した関心事であり、rotation が必要になるのは delegated access が provider トークン自体を使う場面のみのため
-  - `RefreshTokenStore.SaveProviderRefresh` / `LookupProviderRefresh`（`ProviderRefreshToken` + `ProviderAccessExpiry`）を新設（mem・file・SQLite の3実装）。`tokenAuthCode`/`tokenDeviceGrant`/`tokenRefresh` の builtin 分岐でこれらを使い、rotation に必要なメタデータをアクセストークン TokenStore エントリの sweep 後も refresh token 経由で引き継げるようにした（既存の `ProviderAccessToken` と同じパターン）
-  - delegated rotation と gateway refresh を refresh-token family 単位で直列化し、rotation 成功時は current JWT と active refresh-token entry を同じ provider token 世代へ更新する。永久失敗時は family 全体を revoke し、失効済み metadata から新しい lineage が復活しないようにした
-  - `tokenDeviceGrant` の builtin 分岐が誤ったキー（`completed.AccessToken`、非 builtin mode 用のキー）で provider refresh metadata を保存していたため実質 no-op になっていたバグを修正し、正しいキー（gateway JWT）で保存するようにした
-- RFC 7009 OAuth 2.0 Token Revocation (`POST /revoke`) を実装 ([#192](https://github.com/scottlz0310/mcp-gateway/issues/192))
-  - `token` + 任意 `token_type_hint`（`access_token`/`refresh_token`）を受け付け、hint に関わらず両方の失効経路を試行する。未知・期限切れ・二重失効のトークンでも常に `200 OK` を返す（RFC 7009 §2.2）
-  - refresh token の失効は既存の RFC 6819 family 失効（`RevokeFamily`）を再利用し、ファミリー全体を無効化する
-  - builtin mode（`OAUTH_PROVIDER=builtin`）の gateway JWT は、`jti` クレームによる失効 denylist を新設して即時失効に対応。JWT 検証はステートレスなため、TokenStore からのキャッシュ削除だけでは有効期限（デフォルト 90 日）まで生き続けてしまう問題を解消した。denylist は `RefreshTokenStore` の SQLite DB（`tokens.json.refresh.db`）に相乗りし、既存の Sweep サイクルで自然に失効エントリを掃除する
-  - refresh token の失効時は、紐づく現行アクセストークン（gateway JWT）の `jti` も即座に denylist へ登録し、将来のローテーションだけでなく既発行トークンも即時失効させる
-  - `.well-known/oauth-authorization-server` の discovery メタデータに `revocation_endpoint` を追加
-  - non-builtin mode（GitHub トークンを直接使用）ではゲートウェイ側のローカルキャッシュのみ失効させる。GitHub 側のトークン自体の失効 API 呼び出しはスコープ外（別 issue で検討）
-- `Mcp-Session-Id` 双方向透過の回帰テストと診断ログ・トラブルシュート手順を追加 ([#182](https://github.com/scottlz0310/mcp-gateway/issues/182))
-  - `proxy request` / `proxy response` ログに `mcp_session_id_present` フィールドを追加（セッション ID の実値はログに出力しない）
-  - `handler_test.go` に request・response 双方向透過の回帰テスト追加
-  - `docs/operations.md` に正しい MCP 初期化シーケンス・切り分け手順・gateway/upstream エラー判別方法を追加
-- 新ルートオプション `upstream_provider_token=true` を追加し、review-raven 等の upstream へ gateway JWT ではなく該当 subject の provider アクセストークン（builtin mode: GitHub アクセストークン）を注入できるようにした ([#186](https://github.com/scottlz0310/mcp-gateway/issues/186))
-  - `EnsureFreshAccessTokenForSubject` でサブジェクトの provider アクセストークンを解決し、`ProviderTokenSource` インターフェース経由で proxy へ注入する `NewProviderTokenMiddleware` を新設
-  - `upstream_oauth` / `upstream_bearer_token_env` / `auth=none` との同時指定を fail-closed で拒否
-  - provider token が未解決・失効・rotation failure の場合は `401` + `WWW-Authenticate` でフェールクローズ
-  - upstream `401` 時は provider token 委任経路のみを対象とし、gateway JWT の validation cache を誤って失効させないようにした
-  - `docs/configuration.md` に `upstream_provider_token` オプションと「プロバイダートークン委任」セクションを追加
+- Automatic provider access token rotation in builtin mode (`OAUTH_PROVIDER=builtin`) ([#190](https://github.com/scottlz0310/mcp-gateway/issues/190))
+  - `builtinProvider.RefreshToken` now delegates to the GitHub OAuth implementation instead of always returning `ErrRefreshNotSupported`
+  - New builtin-mode-only rotation logic (`tryBuiltinRotationWithAttempt` / `runBuiltinRotation`). Unlike non-builtin-mode rotation (which replaces the cache key with the provider token itself), the cache key (the gateway JWT) never changes — only the record's `ProviderAccessToken`/`ProviderRefreshToken`/`ProviderAccessExpiry` fields are updated. Wired into `EnsureFreshAccessTokenForSubject`'s (Phase B delegated access) builtin branch only; `ValidateToken`'s cache-hit branch (the "never run non-builtin rotation" guard added in PR #189) is left untouched — JWT verification and provider token rotation are independent concerns in builtin mode, and rotation is only ever needed where delegated access consumes the provider token itself
+  - New `RefreshTokenStore.SaveProviderRefresh` / `LookupProviderRefresh` (`ProviderRefreshToken` + `ProviderAccessExpiry`), implemented for all three backends (mem, file, SQLite). Used by the builtin branches of `tokenAuthCode`/`tokenDeviceGrant`/`tokenRefresh` so rotation metadata survives past the access-token TokenStore entry's sweep via the refresh token (mirrors the existing `ProviderAccessToken` pattern)
+  - Serialized delegated rotation and gateway refresh per refresh-token family; on a successful rotation both the current JWT and the active refresh-token entry are updated to the same provider token generation. On a permanent failure the whole family is revoked so a dead lineage's metadata cannot resurface
+  - Fixed a bug where `tokenDeviceGrant`'s builtin branch saved provider refresh metadata under the wrong key (`completed.AccessToken`, the non-builtin-mode key), making it an effective no-op; it now saves under the correct key (the gateway JWT)
+- Implemented RFC 7009 OAuth 2.0 Token Revocation (`POST /revoke`) ([#192](https://github.com/scottlz0310/mcp-gateway/issues/192))
+  - Accepts `token` plus an optional `token_type_hint` (`access_token`/`refresh_token`) and attempts both revocation paths regardless of the hint. Always returns `200 OK` for unknown, expired, or already-revoked tokens (RFC 7009 §2.2)
+  - Refresh token revocation reuses the existing RFC 6819 family revocation (`RevokeFamily`), invalidating the whole family
+  - In builtin mode (`OAUTH_PROVIDER=builtin`), added a `jti`-claim revocation denylist so the gateway JWT can be revoked immediately — JWT verification is stateless, so cache eviction from the TokenStore alone would otherwise let a revoked token remain valid until its expiry (90 days by default). The denylist piggybacks on the existing `RefreshTokenStore` SQLite database (`tokens.json.refresh.db`) and is swept by the existing sweep cycle
+  - Revoking a refresh token also immediately denylists the `jti` of its associated current access token (the gateway JWT), so already-issued tokens are invalidated immediately, not just future rotations
+  - Added `revocation_endpoint` to the `.well-known/oauth-authorization-server` discovery metadata
+  - In non-builtin mode (using the GitHub token directly), only the gateway's local cache is invalidated; calling GitHub's own token revocation API is out of scope (tracked in a separate issue)
+- Added regression tests, diagnostic logging, and a troubleshooting guide for `Mcp-Session-Id` bidirectional passthrough ([#182](https://github.com/scottlz0310/mcp-gateway/issues/182))
+  - Added an `mcp_session_id_present` field to `proxy request` / `proxy response` logs (the session ID's actual value is never logged)
+  - Added bidirectional (request and response) passthrough regression tests to `handler_test.go`
+  - Added the correct MCP initialization sequence, a troubleshooting procedure, and how to tell gateway vs. upstream errors apart to `docs/operations.md`
+- Added a new route option, `upstream_provider_token=true`, so upstreams such as review-raven receive the subject's provider access token (builtin mode: the GitHub access token) instead of the gateway JWT ([#186](https://github.com/scottlz0310/mcp-gateway/issues/186))
+  - Added `NewProviderTokenMiddleware`, which resolves the subject's provider access token via `EnsureFreshAccessTokenForSubject` and injects it into the proxied request via the `ProviderTokenSource` interface
+  - Rejects `upstream_oauth` / `upstream_bearer_token_env` / `auth=none` combined with this option, fail-closed
+  - Fails closed with `401` + `WWW-Authenticate` when the provider token cannot be resolved, is expired, or rotation failed
+  - On an upstream `401`, only the provider-token-delegation path is affected — the gateway JWT's validation cache is no longer incorrectly invalidated
+  - Documented the `upstream_provider_token` option and added a "Provider Token Delegation" section to `docs/configuration.md`
 
 ### Changed
 
