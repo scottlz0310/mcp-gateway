@@ -1498,8 +1498,12 @@ func (d *deleteFailRefreshStore) SaveProviderAccessToken(rt, pat string) error {
 func (d *deleteFailRefreshStore) LookupProviderAccessToken(rt string) string {
 	return d.inner.LookupProviderAccessToken(rt)
 }
-func (d *deleteFailRefreshStore) Delete(_ string) error { return fmt.Errorf("disk I/O error") }
-func (d *deleteFailRefreshStore) Sweep() error          { return d.inner.Sweep() }
+func (d *deleteFailRefreshStore) RevokeJTI(jti string, exp time.Time) error {
+	return d.inner.RevokeJTI(jti, exp)
+}
+func (d *deleteFailRefreshStore) IsJTIRevoked(jti string) bool { return d.inner.IsJTIRevoked(jti) }
+func (d *deleteFailRefreshStore) Delete(_ string) error        { return fmt.Errorf("disk I/O error") }
+func (d *deleteFailRefreshStore) Sweep() error                 { return d.inner.Sweep() }
 
 // TestTokenRefreshDeleteFailed503 verifies that when the refresh token store
 // fails to delete the token during rotation (ErrRefreshTokenDeleteFailed),
@@ -1512,7 +1516,7 @@ func TestTokenRefreshDeleteFailed503(t *testing.T) {
 		Scopes:       "repo,user",
 	})
 
-	inner := &memRefreshTokenStore{entries: make(map[string]memRTEntry)}
+	inner := &memRefreshTokenStore{entries: make(map[string]memRTEntry), revokedJTI: make(map[string]time.Time)}
 	failStore := &deleteFailRefreshStore{inner: inner}
 	_ = inner.Save("test-rt", "test-at", "http://localhost:8080/mcp", "fid-test", time.Now().Add(time.Hour))
 
@@ -3195,6 +3199,247 @@ func TestBuiltinTokenFlowIssuesGatewayJWT(t *testing.T) {
 	}
 }
 
+// issueBuiltinTokens drives the full authorize -> callback -> token exchange
+// flow in builtin mode and returns the issued gateway JWT (access_token) and
+// opaque refresh_token. subject is the identity the mock GitHub provider
+// resolves the flow to.
+func issueBuiltinTokens(t *testing.T, h *Handler, subject string) (accessToken, refreshToken string) {
+	t.Helper()
+	verifier := "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+	challenge := pkceChallenge(verifier)
+	state := "state-" + subject
+	const redirectURI = "http://localhost/cb"
+
+	authReq := httptest.NewRequest(http.MethodGet,
+		"/authorize?response_type=code&state="+state+"&redirect_uri="+url.QueryEscape(redirectURI)+
+			"&code_challenge="+challenge+"&code_challenge_method=S256", nil)
+	h.Authorize(httptest.NewRecorder(), authReq)
+
+	cbReq := httptest.NewRequest(http.MethodGet, "/callback?code=gh-code&state="+state, nil)
+	cbRec := httptest.NewRecorder()
+	h.Callback(cbRec, cbReq)
+	if cbRec.Code != http.StatusFound {
+		t.Fatalf("callback: got %d; body=%s", cbRec.Code, cbRec.Body.String())
+	}
+	redirectURL, err := url.Parse(cbRec.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse callback redirect: %v", err)
+	}
+	internalCode := redirectURL.Query().Get("code")
+
+	tokenBody := "grant_type=authorization_code" +
+		"&redirect_uri=" + url.QueryEscape(redirectURI) +
+		"&code=" + url.QueryEscape(internalCode) +
+		"&code_verifier=" + url.QueryEscape(verifier)
+	tokenReq := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(tokenBody))
+	tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	tokenRec := httptest.NewRecorder()
+	h.Token(tokenRec, tokenReq)
+	if tokenRec.Code != http.StatusOK {
+		t.Fatalf("token: got %d; body=%s", tokenRec.Code, tokenRec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(tokenRec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode token response: %v", err)
+	}
+	accessToken, _ = resp["access_token"].(string)
+	refreshToken, _ = resp["refresh_token"].(string)
+	if accessToken == "" || refreshToken == "" {
+		t.Fatalf("token response missing access_token/refresh_token: %#v", resp)
+	}
+	return accessToken, refreshToken
+}
+
+// revokeRequest issues a POST /revoke with the given token and optional hint
+// and returns the recorder for assertions.
+func revokeRequest(h *Handler, token, hint string) *httptest.ResponseRecorder {
+	body := "token=" + url.QueryEscape(token)
+	if hint != "" {
+		body += "&token_type_hint=" + url.QueryEscape(hint)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/revoke", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.Revoke(rec, req)
+	return rec
+}
+
+func TestRevokeMissingTokenReturns400(t *testing.T) {
+	h := newTestHandler(t)
+	rec := revokeRequest(h, "", "")
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status: got %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+// TestRevokeBuiltinAccessTokenRejectsCacheMiss verifies that revoking a
+// gateway JWT (builtin mode) via token_type_hint=access_token causes a
+// subsequent ValidateToken cache-miss verification to fail, even though the
+// JWT's own exp claim has not yet passed.
+func TestRevokeBuiltinAccessTokenRejectsCacheMiss(t *testing.T) {
+	h := newBuiltinTestHandler(t,
+		func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{AccessToken: "gh-tok"}, nil
+		},
+		func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Subject: "alice"}, nil
+		},
+	)
+	accessToken, _ := issueBuiltinTokens(t, h, "alice")
+
+	rec := revokeRequest(h, accessToken, "access_token")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("revoke: got %d; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Force a cache miss: strip the cache entry the token exchange created,
+	// simulating a request that arrives after the in-memory cache entry has
+	// been evicted (e.g. a different process, or after eviction) — the jti
+	// denylist, not the cache, is what must reject it.
+	h.store.InvalidateCachedToken(accessToken)
+
+	if _, _, err := h.ValidateToken(context.Background(), accessToken, ""); err == nil {
+		t.Error("ValidateToken: expected error for revoked JWT on cache-miss path, got nil")
+	}
+}
+
+// TestRevokeBuiltinAccessTokenRejectsCacheHit verifies the cache-hit path
+// also honours the denylist: a token that was cached (e.g. by a prior
+// request) before being revoked must not keep validating for the remainder
+// of its cache TTL.
+func TestRevokeBuiltinAccessTokenRejectsCacheHit(t *testing.T) {
+	h := newBuiltinTestHandler(t,
+		func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{AccessToken: "gh-tok"}, nil
+		},
+		func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Subject: "alice"}, nil
+		},
+	)
+	accessToken, _ := issueBuiltinTokens(t, h, "alice")
+
+	// Prime the cache (cache-hit path) before revoking.
+	if _, _, err := h.ValidateToken(context.Background(), accessToken, ""); err != nil {
+		t.Fatalf("priming ValidateToken: %v", err)
+	}
+
+	rec := revokeRequest(h, accessToken, "access_token")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("revoke: got %d; body=%s", rec.Code, rec.Body.String())
+	}
+
+	if _, _, err := h.ValidateToken(context.Background(), accessToken, ""); err == nil {
+		t.Error("ValidateToken: expected error for revoked JWT on cache-hit path, got nil")
+	}
+}
+
+// TestRevokeRefreshTokenCascadesFamilyAndCurrentAccessToken verifies that
+// revoking a refresh token (a) blocks future rotation of its family and (b)
+// immediately denylists the jti of the access token currently associated
+// with that family, rather than leaving it valid until its own exp.
+func TestRevokeRefreshTokenCascadesFamilyAndCurrentAccessToken(t *testing.T) {
+	h := newBuiltinTestHandler(t,
+		func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{AccessToken: "gh-tok"}, nil
+		},
+		func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Subject: "alice"}, nil
+		},
+	)
+	accessToken, refreshToken := issueBuiltinTokens(t, h, "alice")
+
+	rec := revokeRequest(h, refreshToken, "refresh_token")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("revoke: got %d; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// (a) the refresh token itself can no longer be used for rotation.
+	refreshBody := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(refreshToken)
+	refreshReq := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(refreshBody))
+	refreshReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	refreshRec := httptest.NewRecorder()
+	h.Token(refreshRec, refreshReq)
+	if refreshRec.Code == http.StatusOK {
+		t.Errorf("refresh grant with revoked refresh_token unexpectedly succeeded: %s", refreshRec.Body.String())
+	}
+
+	// (b) the access token issued alongside it is also immediately rejected,
+	// not just when it would eventually be rotated.
+	h.store.InvalidateCachedToken(accessToken)
+	if _, _, err := h.ValidateToken(context.Background(), accessToken, ""); err == nil {
+		t.Error("ValidateToken: expected error for access token cascaded from refresh token revocation")
+	}
+}
+
+// TestRevokeIdempotentAndUnknownTokens verifies RFC 7009 §2.2: revoking an
+// unknown, already-expired, or already-revoked token is not an error — the
+// endpoint always responds 200 so a caller cannot use it to probe validity.
+func TestRevokeIdempotentAndUnknownTokens(t *testing.T) {
+	h := newBuiltinTestHandler(t,
+		func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{AccessToken: "gh-tok"}, nil
+		},
+		func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Subject: "alice"}, nil
+		},
+	)
+	accessToken, _ := issueBuiltinTokens(t, h, "alice")
+
+	if rec := revokeRequest(h, "totally-unknown-opaque-token", ""); rec.Code != http.StatusOK {
+		t.Errorf("revoke unknown token: got %d, want 200", rec.Code)
+	}
+	if rec := revokeRequest(h, "not.a.jwt", ""); rec.Code != http.StatusOK {
+		t.Errorf("revoke malformed token: got %d, want 200", rec.Code)
+	}
+	// Double revoke of the same valid token must also succeed both times.
+	if rec := revokeRequest(h, accessToken, "access_token"); rec.Code != http.StatusOK {
+		t.Errorf("first revoke: got %d, want 200", rec.Code)
+	}
+	if rec := revokeRequest(h, accessToken, "access_token"); rec.Code != http.StatusOK {
+		t.Errorf("second (duplicate) revoke: got %d, want 200", rec.Code)
+	}
+}
+
+// TestRevokeNonBuiltinModeInvalidatesCache verifies that in non-builtin mode
+// (cache key = provider access token), /revoke removes the cached entry so a
+// subsequent request re-validates against the upstream provider rather than
+// trusting a stale cache hit.
+func TestRevokeNonBuiltinModeInvalidatesCache(t *testing.T) {
+	h := newTestHandler(t)
+	h.store.CacheToken("gh-access-token", "carol", "http://localhost:8080/mcp")
+	if _, ok := h.store.LookupToken("gh-access-token"); !ok {
+		t.Fatal("setup: expected cache hit before revoke")
+	}
+
+	rec := revokeRequest(h, "gh-access-token", "access_token")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("revoke: got %d; body=%s", rec.Code, rec.Body.String())
+	}
+
+	if _, ok := h.store.LookupToken("gh-access-token"); ok {
+		t.Error("expected cache entry to be removed after /revoke")
+	}
+}
+
+// TestDiscoveryIncludesRevocationEndpoint verifies RFC 8414 discovery
+// advertises the revocation_endpoint so clients can find it.
+func TestDiscoveryIncludesRevocationEndpoint(t *testing.T) {
+	h := newTestHandler(t)
+	req := httptest.NewRequest(http.MethodGet, "/.well-known/oauth-authorization-server", nil)
+	rec := httptest.NewRecorder()
+	h.Discovery(rec, req)
+
+	var doc map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&doc); err != nil {
+		t.Fatalf("decode discovery doc: %v", err)
+	}
+	want := h.cfg.BaseURL + "/revoke"
+	if got, _ := doc["revocation_endpoint"].(string); got != want {
+		t.Errorf("revocation_endpoint: got %q, want %q", got, want)
+	}
+}
+
 func TestBuiltinGitHubAccessTokenNotLeaked(t *testing.T) {
 	const ghAccessToken = "SUPER_SECRET_GITHUB_TOKEN"
 	h := newBuiltinTestHandler(t,
@@ -4327,7 +4572,7 @@ func TestValidateToken_BuiltinModeDoesNotRotateOnCacheHit(t *testing.T) {
 		t.Fatalf("NewHandler: %v", err)
 	}
 
-	jwt, err := h.generateGatewayAccessToken("kevin", "http://localhost:8080")
+	jwt, _, err := h.generateGatewayAccessToken("kevin", "http://localhost:8080")
 	if err != nil {
 		t.Fatalf("generateGatewayAccessToken: %v", err)
 	}

@@ -26,6 +26,13 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- RFC 7009 OAuth 2.0 Token Revocation (`POST /revoke`) を実装 ([#192](https://github.com/scottlz0310/mcp-gateway/issues/192))
+  - `token` + 任意 `token_type_hint`（`access_token`/`refresh_token`）を受け付け、hint に関わらず両方の失効経路を試行する。未知・期限切れ・二重失効のトークンでも常に `200 OK` を返す（RFC 7009 §2.2）
+  - refresh token の失効は既存の RFC 6819 family 失効（`RevokeFamily`）を再利用し、ファミリー全体を無効化する
+  - builtin mode（`OAUTH_PROVIDER=builtin`）の gateway JWT は、`jti` クレームによる失効 denylist を新設して即時失効に対応。JWT 検証はステートレスなため、TokenStore からのキャッシュ削除だけでは有効期限（デフォルト 90 日）まで生き続けてしまう問題を解消した。denylist は `RefreshTokenStore` の SQLite DB（`tokens.json.refresh.db`）に相乗りし、既存の Sweep サイクルで自然に失効エントリを掃除する
+  - refresh token の失効時は、紐づく現行アクセストークン（gateway JWT）の `jti` も即座に denylist へ登録し、将来のローテーションだけでなく既発行トークンも即時失効させる
+  - `.well-known/oauth-authorization-server` の discovery メタデータに `revocation_endpoint` を追加
+  - non-builtin mode（GitHub トークンを直接使用）ではゲートウェイ側のローカルキャッシュのみ失効させる。GitHub 側のトークン自体の失効 API 呼び出しはスコープ外（別 issue で検討）
 - `Mcp-Session-Id` 双方向透過の回帰テストと診断ログ・トラブルシュート手順を追加 ([#182](https://github.com/scottlz0310/mcp-gateway/issues/182))
   - `proxy request` / `proxy response` ログに `mcp_session_id_present` フィールドを追加（セッション ID の実値はログに出力しない）
   - `handler_test.go` に request・response 双方向透過の回帰テスト追加

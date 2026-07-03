@@ -330,6 +330,7 @@ func (h *Handler) Discovery(w http.ResponseWriter, r *http.Request) {
 		"token_endpoint":                   h.cfg.BaseURL + "/token",
 		"registration_endpoint":            h.cfg.BaseURL + "/register",
 		"device_authorization_endpoint":    h.cfg.BaseURL + "/device_authorization",
+		"revocation_endpoint":              h.cfg.BaseURL + "/revoke",
 		"response_types_supported":         []string{"code"},
 		"grant_types_supported":            []string{"authorization_code", "urn:ietf:params:oauth:grant-type:device_code", "refresh_token"},
 		"code_challenge_methods_supported": []string{"S256"},
@@ -595,7 +596,7 @@ func (h *Handler) tokenAuthCode(w http.ResponseWriter, r *http.Request) {
 		// server-side, indexed under the JWT, so that EnsureFreshAccessTokenForSubject
 		// (Phase B delegated access) can still hand it to authorized background
 		// workers. See scottlz0310/mcp-gateway#188.
-		gatewayToken, genErr := h.generateGatewayAccessToken(result.Subject, result.Audience)
+		gatewayToken, jti, genErr := h.generateGatewayAccessToken(result.Subject, result.Audience)
 		if genErr != nil {
 			h.auditFailure("token_exchange", "server_error", "gateway access token generation failed", genErr, http.StatusInternalServerError, "")
 			slog.Error("gateway access token generation failed", "err", genErr)
@@ -605,6 +606,7 @@ func (h *Handler) tokenAuthCode(w http.ResponseWriter, r *http.Request) {
 		h.store.CacheToken(gatewayToken, result.Subject, result.Audience)
 		h.store.RecordProviderAccessToken(gatewayToken, result.AccessToken)
 		h.store.SaveTokenNonce(gatewayToken, result.Nonce)
+		h.store.SaveTokenJti(gatewayToken, jti)
 		familyID, fidErr := generateCode()
 		if fidErr != nil {
 			slog.Warn("failed to generate refresh token family ID", "err", fidErr)
@@ -685,9 +687,10 @@ func (h *Handler) tokenDeviceGrant(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		token := completed.AccessToken
+		var jti string
 		if h.isBuiltinMode() {
 			var genErr error
-			token, genErr = h.generateGatewayAccessToken(completed.Subject, completed.Audience)
+			token, jti, genErr = h.generateGatewayAccessToken(completed.Subject, completed.Audience)
 			if genErr != nil {
 				h.auditFailure("token_exchange", "server_error", "device grant token generation failed", genErr, http.StatusInternalServerError, "")
 				slog.Error("device grant token generation failed", "err", genErr)
@@ -702,6 +705,7 @@ func (h *Handler) tokenDeviceGrant(w http.ResponseWriter, r *http.Request) {
 			// EnsureFreshAccessTokenForSubject can still hand it to
 			// authorized background workers.
 			h.store.RecordProviderAccessToken(token, completed.AccessToken)
+			h.store.SaveTokenJti(token, jti)
 		}
 		h.persistProviderRefresh(completed.AccessToken, completed.ProviderRefreshToken, completed.ProviderAccessExpiry)
 		familyID, fidErr := generateCode()
@@ -838,15 +842,18 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 
 	if h.isBuiltinMode() {
 		// builtin mode: verify the existing gateway JWT locally to extract subject,
-		// then issue a new gateway JWT. GitHub API is not consulted.
-		sub, _, jwtErr := h.verifyGatewayJWT(accessToken)
+		// then issue a new gateway JWT. GitHub API is not consulted. Revocation
+		// of the old access token's jti (POST /revoke, token_type_hint=access_token)
+		// is intentionally not checked here: per RFC 7009, revoking an access
+		// token does not invalidate its refresh token grant.
+		sub, _, _, jwtErr := h.verifyGatewayJWT(accessToken)
 		if jwtErr != nil {
 			h.auditFailure("refresh", "invalid_grant", "refresh token gateway JWT invalid", jwtErr, http.StatusBadRequest, tokenFingerprint(accessToken))
 			slog.Warn("refresh rejected: gateway JWT invalid", "err", jwtErr)
 			oauthError(w, "invalid_grant", "underlying token no longer valid", http.StatusBadRequest)
 			return
 		}
-		newGatewayToken, genErr := h.generateGatewayAccessToken(sub, audience)
+		newGatewayToken, newJti, genErr := h.generateGatewayAccessToken(sub, audience)
 		if genErr != nil {
 			h.auditFailure("refresh", "server_error", "gateway token generation failed during refresh", genErr, http.StatusInternalServerError, tokenFingerprint(accessToken))
 			slog.Error("gateway access token generation failed during refresh", "err", genErr)
@@ -859,6 +866,7 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 			h.store.RecordProviderAccessToken(newGatewayToken, providerAccessToken)
 		}
 		h.store.SaveTokenNonce(newGatewayToken, nonce)
+		h.store.SaveTokenJti(newGatewayToken, newJti)
 		// Propagate the same familyID so the token lineage remains traceable.
 		newRT, rtErr := h.store.CreateRefreshToken(newGatewayToken, audience, familyID, h.refreshTokenTTL())
 		if rtErr != nil {
@@ -1127,6 +1135,16 @@ func (h *Handler) ValidateToken(ctx context.Context, token, audience string) (su
 	audience = normalizeAudience(audience)
 	record, cached := h.store.LookupToken(token)
 	if cached {
+		// builtin mode: a cache hit must still be rejected if the JWT's jti was
+		// added to the revocation denylist after it was cached (POST /revoke).
+		// Without this check, a revoked JWT would keep validating until the
+		// cache TTL expires (up to ExpiresIn, default 90 days).
+		if h.isBuiltinMode() && record.Jti != "" && h.store.IsJTIRevoked(record.Jti) {
+			h.store.InvalidateCachedToken(token)
+			revokedErr := fmt.Errorf("gateway JWT has been revoked")
+			h.auditFailure("identity_resolution", "invalid_token", "gateway JWT revoked", revokedErr, http.StatusUnauthorized, tokenFingerprint(token))
+			return "", "", revokedErr
+		}
 		if err := h.validateAudience(token, record, audience); err != nil {
 			return "", "", err
 		}
@@ -1166,10 +1184,15 @@ func (h *Handler) ValidateToken(ctx context.Context, token, audience string) (su
 	// record on cache miss; validateAudience(token, TokenRecord{}, audience) would
 	// erroneously reject valid tokens when TokenAudienceStrict is enabled.
 	if h.isBuiltinMode() {
-		sub, tokenAud, jwtErr := h.verifyGatewayJWT(token)
+		sub, tokenAud, jti, jwtErr := h.verifyGatewayJWT(token)
 		if jwtErr != nil {
 			h.auditFailure("identity_resolution", "invalid_token", "gateway JWT verification failed", jwtErr, http.StatusUnauthorized, tokenFingerprint(token))
 			return "", "", jwtErr
+		}
+		if jti != "" && h.store.IsJTIRevoked(jti) {
+			revokedErr := fmt.Errorf("gateway JWT has been revoked")
+			h.auditFailure("identity_resolution", "invalid_token", "gateway JWT revoked", revokedErr, http.StatusUnauthorized, tokenFingerprint(token))
+			return "", "", revokedErr
 		}
 		// Validate that the JWT audience matches the requested resource.
 		// normalizeAudience("") returns "" which means any audience is accepted.
@@ -1184,6 +1207,7 @@ func (h *Handler) ValidateToken(ctx context.Context, token, audience string) (su
 			cacheAudience = audience
 		}
 		h.store.CacheToken(token, sub, cacheAudience)
+		h.store.SaveTokenJti(token, jti)
 		h.auditSuccess("identity_resolution", "gateway JWT verified", http.StatusOK)
 		return sub, "", nil
 	}
@@ -1815,6 +1839,86 @@ func (h *Handler) UserInfo(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(doc)
 }
 
+// Revoke implements RFC 7009 OAuth 2.0 Token Revocation for POST /revoke.
+//
+// token_type_hint is accepted but not load-bearing: per RFC 7009 §2.1, a hint
+// that does not match the token's actual type must not cause the server to
+// skip the correct revocation path, so both the refresh-token and
+// access-token paths are always attempted regardless of the hint. Presenting
+// an unknown, already-expired, or already-revoked token is not an error (RFC
+// 7009 §2.2) — the endpoint always responds 200 with an empty body, so a
+// caller cannot use it to probe whether a token is currently valid.
+func (h *Handler) Revoke(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	if err := r.ParseForm(); err != nil {
+		h.auditFailure("revoke", "invalid_request", "revoke request body rejected", err, http.StatusBadRequest, "")
+		oauthError(w, "invalid_request", "malformed request body", http.StatusBadRequest)
+		return
+	}
+	token := r.FormValue("token")
+	if token == "" {
+		h.auditFailure("revoke", "invalid_request", "revoke request missing token", nil, http.StatusBadRequest, "")
+		oauthError(w, "invalid_request", "missing token", http.StatusBadRequest)
+		return
+	}
+
+	revokedSomething := false
+
+	// Refresh-token path. LookupAnyRefreshToken finds both active and
+	// soft-revoked (already-rotated) entries so a client presenting a token
+	// it no longer holds the "current" copy of still reaches its familyID.
+	if accessToken, _, familyID, _, _, ok := h.store.LookupAnyRefreshToken(token); ok {
+		revokedSomething = true
+		if familyID != "" {
+			if err := h.store.RevokeRefreshTokenFamily(familyID); err != nil {
+				slog.Warn("revoke: refresh token family revocation failed", "err", err)
+			}
+		}
+		// RevokeRefreshTokenFamily only blocks *future* rotations — the
+		// gateway JWT already issued for this family remains valid
+		// (stateless) until its own exp unless separately denylisted here.
+		if h.isBuiltinMode() && accessToken != "" {
+			h.revokeGatewayJWTIfValid(accessToken)
+		}
+	}
+
+	// Access-token path.
+	if h.isBuiltinMode() {
+		if h.revokeGatewayJWTIfValid(token) {
+			revokedSomething = true
+		}
+	} else if _, ok := h.store.LookupToken(token); ok {
+		h.store.InvalidateCachedToken(token)
+		revokedSomething = true
+	}
+
+	if revokedSomething {
+		h.auditSuccess("revoke", "token revoked", http.StatusOK)
+	} else {
+		h.auditSuccess("revoke", "revoke request for unknown or already-invalid token", http.StatusOK)
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+}
+
+// revokeGatewayJWTIfValid adds token's jti to the revocation denylist and
+// invalidates its cache entry, but only if token is a well-formed,
+// signature-valid, not-yet-expired gateway JWT. Returns false (no-op) for a
+// malformed or already-expired token: an expired token needs no denylist
+// entry since verifyGatewayJWT's own exp check already rejects it, and this
+// keeps the denylist bounded to tokens that would otherwise still validate.
+func (h *Handler) revokeGatewayJWTIfValid(token string) bool {
+	claims, err := h.parseGatewayJWTClaims(token)
+	if err != nil || claims.Jti == "" || claims.Exp <= 0 || time.Now().Unix() > claims.Exp {
+		return false
+	}
+	if err := h.store.RevokeJTI(claims.Jti, time.Unix(claims.Exp, 0)); err != nil {
+		slog.Warn("revoke: jti denylist write failed", "err", err)
+	}
+	h.store.InvalidateCachedToken(token)
+	return true
+}
+
 // isBuiltinMode reports whether the handler operates in builtin mode, where
 // the gateway issues its own RS256 JWTs instead of forwarding provider tokens.
 func (h *Handler) isBuiltinMode() bool {
@@ -1824,9 +1928,11 @@ func (h *Handler) isBuiltinMode() bool {
 // generateGatewayAccessToken creates a signed RS256 JWT suitable for use as
 // the client-facing access_token in builtin mode. Unlike generateIDToken it
 // uses h.cfg.ExpiresIn for the expiry so the lifetime matches the token store TTL.
-func (h *Handler) generateGatewayAccessToken(subject, audience string) (string, error) {
+// It also returns the jti claim so the caller can persist it (TokenRecord.Jti)
+// for cache-hit revocation checks (see Store.SaveTokenJti).
+func (h *Handler) generateGatewayAccessToken(subject, audience string) (token, jti string, err error) {
 	if h.privateKey == nil {
-		return "", fmt.Errorf("private key is nil")
+		return "", "", fmt.Errorf("private key is nil")
 	}
 	header := map[string]string{
 		"alg": "RS256",
@@ -1835,7 +1941,7 @@ func (h *Handler) generateGatewayAccessToken(subject, audience string) (string, 
 	}
 	headerBytes, err := json.Marshal(header)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	headerB64 := base64.RawURLEncoding.EncodeToString(headerBytes)
 
@@ -1846,19 +1952,20 @@ func (h *Handler) generateGatewayAccessToken(subject, audience string) (string, 
 	}
 	jtiBytes := make([]byte, 16)
 	if _, err := rand.Read(jtiBytes); err != nil {
-		return "", fmt.Errorf("generating JWT ID: %w", err)
+		return "", "", fmt.Errorf("generating JWT ID: %w", err)
 	}
+	jti = base64.RawURLEncoding.EncodeToString(jtiBytes)
 	payload := map[string]any{
 		"iss": h.cfg.BaseURL,
 		"sub": subject,
 		"aud": audience,
 		"iat": now.Unix(),
 		"exp": now.Add(expiresIn).Unix(),
-		"jti": base64.RawURLEncoding.EncodeToString(jtiBytes),
+		"jti": jti,
 	}
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	payloadB64 := base64.RawURLEncoding.EncodeToString(payloadBytes)
 
@@ -1869,67 +1976,93 @@ func (h *Handler) generateGatewayAccessToken(subject, audience string) (string, 
 
 	sigBytes, err := rsa.SignPKCS1v15(rand.Reader, h.privateKey, crypto.SHA256, hashed)
 	if err != nil {
-		return "", fmt.Errorf("signing gateway access token: %w", err)
+		return "", "", fmt.Errorf("signing gateway access token: %w", err)
 	}
-	return signingInput + "." + base64.RawURLEncoding.EncodeToString(sigBytes), nil
+	return signingInput + "." + base64.RawURLEncoding.EncodeToString(sigBytes), jti, nil
 }
 
-// verifyGatewayJWT verifies a gateway-issued RS256 JWT and returns the subject
-// and audience claims. It validates alg, signature, exp (required), and sub.
-// Audience matching against the request resource is the caller's responsibility.
-func (h *Handler) verifyGatewayJWT(token string) (subject, audience string, err error) {
+// gatewayJWTClaims holds the claims of a gateway-issued RS256 JWT after
+// signature verification.
+type gatewayJWTClaims struct {
+	Sub string
+	Aud string
+	Jti string
+	Exp int64
+}
+
+// parseGatewayJWTClaims verifies the signature and alg of a gateway-issued
+// RS256 JWT and returns its claims, WITHOUT enforcing exp. Used by both
+// verifyGatewayJWT (which adds the exp check) and the /revoke handler, which
+// must accept an already-expired token as a no-op rather than an error (RFC
+// 7009 §2.2) — enforcing exp here would make that distinction impossible.
+func (h *Handler) parseGatewayJWTClaims(token string) (gatewayJWTClaims, error) {
 	parts := strings.SplitN(token, ".", 3)
 	if len(parts) != 3 {
-		return "", "", fmt.Errorf("malformed JWT: expected 3 parts")
+		return gatewayJWTClaims{}, fmt.Errorf("malformed JWT: expected 3 parts")
 	}
 
 	// Validate header: alg must be RS256.
 	headerBytes, err := base64.RawURLEncoding.DecodeString(parts[0])
 	if err != nil {
-		return "", "", fmt.Errorf("JWT header decode: %w", err)
+		return gatewayJWTClaims{}, fmt.Errorf("JWT header decode: %w", err)
 	}
 	var header struct {
 		Alg string `json:"alg"`
 	}
 	if err := json.Unmarshal(headerBytes, &header); err != nil {
-		return "", "", fmt.Errorf("JWT header parse: %w", err)
+		return gatewayJWTClaims{}, fmt.Errorf("JWT header parse: %w", err)
 	}
 	if header.Alg != "RS256" {
-		return "", "", fmt.Errorf("JWT alg must be RS256, got %q", header.Alg)
+		return gatewayJWTClaims{}, fmt.Errorf("JWT alg must be RS256, got %q", header.Alg)
 	}
 
 	signingInput := parts[0] + "." + parts[1]
 	sigBytes, err := base64.RawURLEncoding.DecodeString(parts[2])
 	if err != nil {
-		return "", "", fmt.Errorf("JWT signature decode: %w", err)
+		return gatewayJWTClaims{}, fmt.Errorf("JWT signature decode: %w", err)
 	}
 	hasher := sha256.New()
 	hasher.Write([]byte(signingInput))
 	hashed := hasher.Sum(nil)
 	if err := rsa.VerifyPKCS1v15(&h.privateKey.PublicKey, crypto.SHA256, hashed, sigBytes); err != nil {
-		return "", "", fmt.Errorf("JWT signature invalid: %w", err)
+		return gatewayJWTClaims{}, fmt.Errorf("JWT signature invalid: %w", err)
 	}
 
 	payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return "", "", fmt.Errorf("JWT payload decode: %w", err)
+		return gatewayJWTClaims{}, fmt.Errorf("JWT payload decode: %w", err)
 	}
 	var claims struct {
 		Sub string `json:"sub"`
 		Aud string `json:"aud"`
+		Jti string `json:"jti"`
 		Exp int64  `json:"exp"`
 	}
 	if err := json.Unmarshal(payloadBytes, &claims); err != nil {
-		return "", "", fmt.Errorf("JWT payload parse: %w", err)
+		return gatewayJWTClaims{}, fmt.Errorf("JWT payload parse: %w", err)
 	}
 	if claims.Sub == "" {
-		return "", "", fmt.Errorf("JWT missing sub claim")
+		return gatewayJWTClaims{}, fmt.Errorf("JWT missing sub claim")
+	}
+	return gatewayJWTClaims{Sub: claims.Sub, Aud: claims.Aud, Jti: claims.Jti, Exp: claims.Exp}, nil
+}
+
+// verifyGatewayJWT verifies a gateway-issued RS256 JWT and returns the
+// subject, audience, and jti claims. It validates alg, signature, exp
+// (required), and sub. Audience matching against the request resource is the
+// caller's responsibility. Revocation (jti denylist) is checked by the caller
+// (ValidateToken), not here, since this function has no access to the
+// revocation store.
+func (h *Handler) verifyGatewayJWT(token string) (subject, audience, jti string, err error) {
+	claims, err := h.parseGatewayJWTClaims(token)
+	if err != nil {
+		return "", "", "", err
 	}
 	// exp is required in gateway-issued JWTs; absence or zero is rejected.
 	if claims.Exp <= 0 || time.Now().Unix() > claims.Exp {
-		return "", "", fmt.Errorf("JWT expired or missing exp claim")
+		return "", "", "", fmt.Errorf("JWT expired or missing exp claim")
 	}
-	return claims.Sub, claims.Aud, nil
+	return claims.Sub, claims.Aud, claims.Jti, nil
 }
 
 // generateIDToken creates a signed RS256 JWT for the given subject.

@@ -37,6 +37,12 @@ import (
 // §3.1.3.7). It is propagated to id_token on refresh (OIDC Core §12.2) so
 // that the nonce binding survives token rotation. Empty when no nonce was
 // requested.
+//
+// Jti is the JWT ID claim of the gateway-issued access token (builtin mode
+// only). It is cached alongside the token record so that a cache-hit
+// ValidateToken call can check the entry against the revocation denylist
+// (RevokeJTI/IsJTIRevoked) without re-parsing the raw token. Empty for
+// non-builtin mode and for JWTs issued before this field existed.
 type TokenRecord struct {
 	Subject                   string
 	Audiences                 []string
@@ -46,6 +52,7 @@ type TokenRecord struct {
 	ProviderAccessExpiry      time.Time
 	RotationPermanentlyFailed bool
 	Nonce                     string
+	Jti                       string
 }
 
 // HasAudience reports whether the token record is scoped to audience.
@@ -84,6 +91,11 @@ type TokenStore interface {
 	// already exist; if absent or expired the call is a no-op. An empty
 	// nonce clears any previously stored value.
 	SaveNonce(token, nonce string) error
+	// SaveJti attaches the JWT ID claim (builtin mode) to an existing entry so
+	// cache-hit ValidateToken calls can check it against the revocation
+	// denylist. The entry must already exist; if absent or expired the call
+	// is a no-op.
+	SaveJti(token, jti string) error
 	// MarkRotationFailed marks token as having a permanent rotation failure.
 	// The entry must already exist; if it is absent or expired the call is a
 	// no-op. For file-backed stores the flag is flushed to disk immediately so
@@ -112,6 +124,7 @@ type memEntry struct {
 	providerAccessExpiry      time.Time
 	rotationPermanentlyFailed bool
 	nonce                     string
+	jti                       string
 }
 
 type memTokenStore struct {
@@ -191,6 +204,7 @@ func (m *memTokenStore) Lookup(token string) (TokenRecord, bool) {
 		ProviderAccessExpiry:      e.providerAccessExpiry,
 		RotationPermanentlyFailed: e.rotationPermanentlyFailed,
 		Nonce:                     e.nonce,
+		Jti:                       e.jti,
 	}, true
 }
 
@@ -203,6 +217,19 @@ func (m *memTokenStore) SaveNonce(token, nonce string) error {
 		return nil
 	}
 	entry.nonce = nonce
+	m.entries[key] = entry
+	return nil
+}
+
+func (m *memTokenStore) SaveJti(token, jti string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := tokenKey(token)
+	entry, ok := m.entries[key]
+	if !ok || time.Now().After(entry.expiresAt) {
+		return nil
+	}
+	entry.jti = jti
 	m.entries[key] = entry
 	return nil
 }
@@ -260,6 +287,7 @@ type fileEntry struct {
 	ProviderAccessExpiry time.Time `json:"pae,omitempty"`
 	RotationFailed       bool      `json:"rf,omitempty"`
 	Nonce                string    `json:"n,omitempty"`
+	Jti                  string    `json:"jti,omitempty"`
 }
 
 type fileTokenStore struct {
@@ -409,6 +437,7 @@ func (f *fileTokenStore) Lookup(token string) (TokenRecord, bool) {
 		ProviderAccessExpiry:      e.ProviderAccessExpiry,
 		RotationPermanentlyFailed: e.RotationFailed,
 		Nonce:                     e.Nonce,
+		Jti:                       e.Jti,
 	}, true
 }
 
@@ -422,6 +451,24 @@ func (f *fileTokenStore) SaveNonce(token, nonce string) error {
 	}
 	previous := entry
 	entry.Nonce = nonce
+	f.entries[key] = entry
+	if err := f.flush(); err != nil {
+		f.entries[key] = previous
+		return err
+	}
+	return nil
+}
+
+func (f *fileTokenStore) SaveJti(token, jti string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := tokenKey(token)
+	entry, ok := f.entries[key]
+	if !ok || time.Now().After(entry.ExpiresAt) {
+		return nil
+	}
+	previous := entry
+	entry.Jti = jti
 	f.entries[key] = entry
 	if err := f.flush(); err != nil {
 		f.entries[key] = previous
@@ -584,6 +631,16 @@ type RefreshTokenStore interface {
 	// value even for soft-revoked (already-rotated) entries so it can be read
 	// after ReserveRefreshToken, mirroring LookupNonce.
 	LookupProviderAccessToken(refreshToken string) string
+	// RevokeJTI adds the JWT ID (jti claim) of a gateway-issued access token
+	// (builtin mode) to the revocation denylist until expiresAt, which should
+	// be the token's own exp claim so the entry is naturally swept once the
+	// JWT would have expired anyway. Used by POST /revoke (RFC 7009) so that a
+	// revoked JWT is rejected even though JWT verification is otherwise
+	// stateless.
+	RevokeJTI(jti string, expiresAt time.Time) error
+	// IsJTIRevoked reports whether jti is present in the (non-expired)
+	// revocation denylist.
+	IsJTIRevoked(jti string) bool
 	// Sweep removes all expired entries. Called periodically by the Store janitor.
 	Sweep() error
 }
@@ -601,14 +658,18 @@ type memRTEntry struct {
 }
 
 type memRefreshTokenStore struct {
-	mu      sync.RWMutex
-	entries map[string]memRTEntry // key: tokenKey(rawRefreshToken)
+	mu         sync.RWMutex
+	entries    map[string]memRTEntry // key: tokenKey(rawRefreshToken)
+	revokedJTI map[string]time.Time  // key: jti, value: expiresAt
 }
 
 // NewMemRefreshTokenStore returns an in-memory RefreshTokenStore.
 // All data is lost when the process exits.
 func NewMemRefreshTokenStore() RefreshTokenStore {
-	return &memRefreshTokenStore{entries: make(map[string]memRTEntry)}
+	return &memRefreshTokenStore{
+		entries:    make(map[string]memRTEntry),
+		revokedJTI: make(map[string]time.Time),
+	}
 }
 
 func (m *memRefreshTokenStore) Save(refreshToken, accessToken, audience, familyID string, expiresAt time.Time) error {
@@ -721,6 +782,23 @@ func (m *memRefreshTokenStore) Delete(refreshToken string) error {
 	return nil
 }
 
+func (m *memRefreshTokenStore) RevokeJTI(jti string, expiresAt time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.revokedJTI[jti] = expiresAt
+	return nil
+}
+
+func (m *memRefreshTokenStore) IsJTIRevoked(jti string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	expiresAt, ok := m.revokedJTI[jti]
+	if !ok {
+		return false
+	}
+	return time.Now().Before(expiresAt)
+}
+
 func (m *memRefreshTokenStore) Sweep() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -728,6 +806,11 @@ func (m *memRefreshTokenStore) Sweep() error {
 	for k, v := range m.entries {
 		if now.After(v.expiresAt) {
 			delete(m.entries, k)
+		}
+	}
+	for jti, expiresAt := range m.revokedJTI {
+		if now.After(expiresAt) {
+			delete(m.revokedJTI, jti)
 		}
 	}
 	return nil
@@ -753,6 +836,13 @@ type fileRefreshTokenStore struct {
 	mu      sync.RWMutex
 	path    string
 	entries map[string]fileRTEntry // key: tokenKey(rawRefreshToken)
+	// revokedJTI is intentionally in-memory only (not persisted to path).
+	// This legacy file-backed implementation is only exercised directly by
+	// its own contract tests; the live NewHandler path migrates it to
+	// sqliteRefreshTokenStore at startup (see tokenstore_sqlite_migrate.go)
+	// before any /revoke traffic can occur, so a durable denylist here is
+	// unreachable in production.
+	revokedJTI map[string]time.Time
 }
 
 // NewFileRefreshTokenStore returns a file-backed RefreshTokenStore that loads
@@ -761,8 +851,9 @@ type fileRefreshTokenStore struct {
 // If the file does not yet exist, an empty store is returned without error.
 func NewFileRefreshTokenStore(path string) (RefreshTokenStore, error) {
 	s := &fileRefreshTokenStore{
-		path:    path,
-		entries: make(map[string]fileRTEntry),
+		path:       path,
+		entries:    make(map[string]fileRTEntry),
+		revokedJTI: make(map[string]time.Time),
 	}
 	if err := s.load(); err != nil {
 		if !os.IsNotExist(err) {
@@ -952,9 +1043,32 @@ func (f *fileRefreshTokenStore) Delete(refreshToken string) error {
 	return nil
 }
 
+func (f *fileRefreshTokenStore) RevokeJTI(jti string, expiresAt time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.revokedJTI[jti] = expiresAt
+	return nil
+}
+
+func (f *fileRefreshTokenStore) IsJTIRevoked(jti string) bool {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	expiresAt, ok := f.revokedJTI[jti]
+	if !ok {
+		return false
+	}
+	return time.Now().Before(expiresAt)
+}
+
 func (f *fileRefreshTokenStore) Sweep() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	now := time.Now()
+	for jti, expiresAt := range f.revokedJTI {
+		if now.After(expiresAt) {
+			delete(f.revokedJTI, jti)
+		}
+	}
 	if changed := f.sweepLocked(); !changed {
 		return nil
 	}

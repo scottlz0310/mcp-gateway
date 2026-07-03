@@ -23,6 +23,16 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
 );
 CREATE INDEX IF NOT EXISTS idx_rt_family  ON refresh_tokens (family_id) WHERE revoked = 0;
 CREATE INDEX IF NOT EXISTS idx_rt_expires ON refresh_tokens (expires_at);
+
+-- revoked_jti is the denylist for gateway-issued access tokens (builtin
+-- mode). expires_at mirrors the token's own exp claim so entries are
+-- naturally swept once the JWT would have expired anyway, bounding the
+-- table to the set of revoked-but-not-yet-expired tokens.
+CREATE TABLE IF NOT EXISTS revoked_jti (
+	jti        TEXT    PRIMARY KEY,
+	expires_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_revoked_jti_expires ON revoked_jti (expires_at);
 `
 
 type sqliteRefreshTokenStore struct {
@@ -182,9 +192,36 @@ func (s *sqliteRefreshTokenStore) Delete(refreshToken string) error {
 	return nil
 }
 
+func (s *sqliteRefreshTokenStore) RevokeJTI(jti string, expiresAt time.Time) error {
+	_, err := s.db.Exec(
+		`INSERT OR REPLACE INTO revoked_jti (jti, expires_at) VALUES (?, ?)`,
+		jti, expiresAt.Unix(),
+	)
+	if err != nil {
+		return fmt.Errorf("revoking jti: %w", err)
+	}
+	return nil
+}
+
+func (s *sqliteRefreshTokenStore) IsJTIRevoked(jti string) bool {
+	var expiresAt int64
+	err := s.db.QueryRow(
+		`SELECT expires_at FROM revoked_jti WHERE jti = ? AND expires_at > ?`,
+		jti, time.Now().Unix(),
+	).Scan(&expiresAt)
+	return err == nil
+}
+
 func (s *sqliteRefreshTokenStore) Sweep() error {
 	_, err := s.sweepNow()
-	return err
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`DELETE FROM revoked_jti WHERE expires_at <= ?`, time.Now().Unix())
+	if err != nil {
+		return fmt.Errorf("sweeping expired revoked jti entries: %w", err)
+	}
+	return nil
 }
 
 func (s *sqliteRefreshTokenStore) sweepNow() (int64, error) {

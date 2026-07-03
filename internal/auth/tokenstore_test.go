@@ -125,6 +125,37 @@ func testTokenStoreContract(t *testing.T, ts TokenStore) {
 	if _, ok := ts.Lookup("no-such-token"); ok {
 		t.Error("SaveProviderAccessToken must not create an entry for an unknown token")
 	}
+
+	// SaveJti attaches the JWT ID to an existing entry; Lookup returns it.
+	if err := ts.Save("tok-jti", "grace", nil, time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("Save tok-jti: %v", err)
+	}
+	if err := ts.SaveJti("tok-jti", "jti-abc123"); err != nil {
+		t.Fatalf("SaveJti: %v", err)
+	}
+	recJti, okJti := ts.Lookup("tok-jti")
+	if !okJti {
+		t.Fatal("Lookup tok-jti: expected hit after SaveJti")
+	}
+	if recJti.Jti != "jti-abc123" {
+		t.Errorf("SaveJti: Jti got %q, want %q", recJti.Jti, "jti-abc123")
+	}
+
+	// SaveJti on absent token is a no-op (no error, no entry created).
+	if err := ts.SaveJti("no-such-token", "jti-ghost"); err != nil {
+		t.Fatalf("SaveJti on absent token returned error: %v", err)
+	}
+	if _, ok := ts.Lookup("no-such-token"); ok {
+		t.Error("SaveJti must not create an entry for an unknown token")
+	}
+
+	// SaveJti on expired token is a no-op (no error).
+	if err := ts.Save("tok-expired-jti", "heidi", nil, time.Now().Add(-time.Second)); err != nil {
+		t.Fatalf("Save expired jti token: %v", err)
+	}
+	if err := ts.SaveJti("tok-expired-jti", "jti-xyz"); err != nil {
+		t.Fatalf("SaveJti on expired token returned error: %v", err)
+	}
 }
 
 // ── memTokenStore ─────────────────────────────────────────────────────────────
@@ -657,6 +688,34 @@ func testRefreshTokenStoreContract(t *testing.T, rts RefreshTokenStore) {
 	if got := rts.LookupProviderAccessToken("rt-pat-revoked"); got != "gho_rev1" {
 		t.Errorf("LookupProviderAccessToken after Revoke: got %q, want %q (soft-revoked entries must remain readable)", got, "gho_rev1")
 	}
+
+	// IsJTIRevoked is false before RevokeJTI.
+	if rts.IsJTIRevoked("jti-1") {
+		t.Error("IsJTIRevoked: expected false before RevokeJTI")
+	}
+	// RevokeJTI adds an entry that IsJTIRevoked then reports as revoked.
+	if err := rts.RevokeJTI("jti-1", time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("RevokeJTI: %v", err)
+	}
+	if !rts.IsJTIRevoked("jti-1") {
+		t.Error("IsJTIRevoked: expected true after RevokeJTI")
+	}
+	// A jti revoked with an already-past expiresAt is not reported as revoked
+	// (mirrors natural expiry — the entry is inert even before Sweep runs).
+	if err := rts.RevokeJTI("jti-expired", time.Now().Add(-time.Second)); err != nil {
+		t.Fatalf("RevokeJTI (expired): %v", err)
+	}
+	if rts.IsJTIRevoked("jti-expired") {
+		t.Error("IsJTIRevoked: expected false for a jti revoked with a past expiresAt")
+	}
+	// Sweep must not error with revoked jti entries present (some already expired).
+	if err := rts.Sweep(); err != nil {
+		t.Fatalf("Sweep with revoked jti entries: %v", err)
+	}
+	// The still-valid jti survives Sweep.
+	if !rts.IsJTIRevoked("jti-1") {
+		t.Error("IsJTIRevoked: jti-1 should survive Sweep (not yet expired)")
+	}
 }
 
 // ── memRefreshTokenStore ──────────────────────────────────────────────────────
@@ -874,6 +933,8 @@ func (f *alwaysFailRefreshStore) SaveNonce(_, _ string) error               { re
 func (f *alwaysFailRefreshStore) LookupNonce(_ string) string               { return "" }
 func (f *alwaysFailRefreshStore) SaveProviderAccessToken(_, _ string) error { return nil }
 func (f *alwaysFailRefreshStore) LookupProviderAccessToken(_ string) string { return "" }
+func (f *alwaysFailRefreshStore) RevokeJTI(_ string, _ time.Time) error     { return nil }
+func (f *alwaysFailRefreshStore) IsJTIRevoked(_ string) bool                { return false }
 func (f *alwaysFailRefreshStore) Delete(_ string) error                     { return errInjectedStoreFailure }
 func (f *alwaysFailRefreshStore) Sweep() error                              { return nil }
 
