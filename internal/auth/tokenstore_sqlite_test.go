@@ -246,6 +246,44 @@ func TestMigrateFileRefreshTokenStore(t *testing.T) {
 	}
 }
 
+// TestMigrateFileRefreshTokenStoreBackfillsFamilyPointer verifies that a
+// legacy family which had already rotated once (an old revoked row plus a
+// current non-revoked row for the same family_id) resolves to its current
+// access token via RevokeFamily immediately after migration — legacy rows
+// are inserted directly into refresh_tokens, bypassing Save, so
+// family_current_access_token would otherwise stay empty for them
+// (thread-owl review round 3, PR #195).
+func TestMigrateFileRefreshTokenStoreBackfillsFamilyPointer(t *testing.T) {
+	dir := t.TempDir()
+	legacyPath := filepath.Join(dir, "tokens.json.refresh")
+
+	exp := time.Now().Add(time.Hour)
+	entries := map[string]fileRTEntry{
+		tokenKey("rt-legacy-old"):     {AccessToken: "at-legacy-old", Audience: "aud", FamilyID: "fid-legacy", ExpiresAt: exp, Revoked: true},
+		tokenKey("rt-legacy-current"): {AccessToken: "at-legacy-current", Audience: "aud", FamilyID: "fid-legacy", ExpiresAt: exp},
+	}
+	data, _ := json.Marshal(entries)
+	if err := os.WriteFile(legacyPath, data, 0o600); err != nil {
+		t.Fatalf("writing legacy file: %v", err)
+	}
+
+	dst, err := NewSQLiteRefreshTokenStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewSQLiteRefreshTokenStore: %v", err)
+	}
+	if err := migrateFileRefreshTokenStore(legacyPath, dst); err != nil {
+		t.Fatalf("migrateFileRefreshTokenStore: %v", err)
+	}
+
+	current, err := dst.RevokeFamily("fid-legacy")
+	if err != nil {
+		t.Fatalf("RevokeFamily: %v", err)
+	}
+	if current != "at-legacy-current" {
+		t.Errorf("RevokeFamily after migration: got %q, want %q (the non-revoked legacy row, not the stale one)", current, "at-legacy-current")
+	}
+}
+
 // TestMigrateFileRefreshTokenStoreNoFile verifies that migration is a no-op
 // when the legacy file does not exist.
 func TestMigrateFileRefreshTokenStoreNoFile(t *testing.T) {
@@ -423,5 +461,67 @@ func TestSQLiteRefreshTokenStoreConcurrentRotationVsRevoke(t *testing.T) {
 	}
 	if pointerAfter != currentAccessToken {
 		t.Errorf("family_current_access_token after RevokeFamily: got %q, want unchanged %q", pointerAfter, currentAccessToken)
+	}
+}
+
+// TestSQLiteRefreshTokenStoreBackfillsFamilyPointerOnReopen verifies that
+// reopening a database whose refresh_tokens rows predate the
+// family_current_access_token feature (inserted directly, bypassing Save)
+// backfills the pointer from the existing non-revoked row — otherwise a
+// family that had already rotated before an upgrade would resolve to no
+// current access token (or handler.go's stale fallback) on the first POST
+// /revoke after upgrading (thread-owl review round 3, PR #195).
+func TestSQLiteRefreshTokenStoreBackfillsFamilyPointerOnReopen(t *testing.T) {
+	path := tempSQLitePath(t)
+
+	rts1, err := NewSQLiteRefreshTokenStore(path)
+	if err != nil {
+		t.Fatalf("open 1: %v", err)
+	}
+	sq1 := rts1.(*sqliteRefreshTokenStore)
+
+	// Simulate rows that predate the pointer feature: insert directly into
+	// refresh_tokens, bypassing Save (which would have populated
+	// family_current_access_token on its own).
+	exp := time.Now().Add(time.Hour).Unix()
+	if _, err := sq1.db.Exec(
+		`INSERT INTO refresh_tokens (token_hash, access_token, audience, family_id, expires_at, revoked) VALUES (?, ?, ?, ?, ?, 1)`,
+		tokenKey("rt-legacy-old"), "at-legacy-old", "aud", "fid-legacy", exp,
+	); err != nil {
+		t.Fatalf("seed old row: %v", err)
+	}
+	if _, err := sq1.db.Exec(
+		`INSERT INTO refresh_tokens (token_hash, access_token, audience, family_id, expires_at, revoked) VALUES (?, ?, ?, ?, ?, 0)`,
+		tokenKey("rt-legacy-current"), "at-legacy-current", "aud", "fid-legacy", exp,
+	); err != nil {
+		t.Fatalf("seed current row: %v", err)
+	}
+	var count int
+	if err := sq1.db.QueryRow(
+		`SELECT COUNT(*) FROM family_current_access_token WHERE family_id = ?`, "fid-legacy",
+	).Scan(&count); err != nil {
+		t.Fatalf("querying pointer count: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("setup: expected no pointer before reopen, got %d", count)
+	}
+	if err := sq1.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// Reopen: NewSQLiteRefreshTokenStore must backfill the pointer from the
+	// pre-existing non-revoked row.
+	rts2, err := NewSQLiteRefreshTokenStore(path)
+	if err != nil {
+		t.Fatalf("open 2: %v", err)
+	}
+	closeSQLiteStore(t, rts2)
+
+	current, err := rts2.RevokeFamily("fid-legacy")
+	if err != nil {
+		t.Fatalf("RevokeFamily: %v", err)
+	}
+	if current != "at-legacy-current" {
+		t.Errorf("RevokeFamily after backfill-on-reopen: got %q, want %q", current, "at-legacy-current")
 	}
 }

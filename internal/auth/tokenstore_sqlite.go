@@ -67,6 +67,49 @@ type sqliteRefreshTokenStore struct {
 	db *sql.DB
 }
 
+// sqlExecer is satisfied by both *sql.DB and *sql.Tx, letting
+// backfillFamilyCurrentAccessToken run either as a standalone statement
+// (startup) or inside an existing transaction (legacy file migration).
+type sqlExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+// backfillFamilyCurrentAccessTokenSQL populates family_current_access_token
+// for any family that has non-revoked, non-expired refresh_tokens rows but
+// no pointer entry yet — i.e. rows that predate this feature (an existing
+// database reopened after upgrade) or that were just written directly by
+// migrateFileRefreshTokenStore (which inserts into refresh_tokens without
+// going through Save, so it never populates the pointer table on its own).
+// INSERT OR IGNORE is a no-op for a family that already has a pointer, so
+// this never clobbers state Save has correctly been maintaining.
+//
+// Per family, the backfilled row is the non-revoked one with the latest
+// expires_at. Under correct operation at most one non-revoked row exists per
+// family at a time (rotation soft-revokes the predecessor before creating
+// the successor), so this is unambiguous; the MAX(expires_at) tie-break only
+// matters for anomalous pre-existing data, where it is a reasonable
+// heuristic (each rotation extends expires_at to a fresh TTL, so the
+// non-revoked row with the furthest-out expiry is the most recently rotated
+// one).
+const backfillFamilyCurrentAccessTokenSQL = `
+INSERT OR IGNORE INTO family_current_access_token (family_id, access_token, expires_at)
+SELECT r.family_id, r.access_token, r.expires_at
+FROM refresh_tokens r
+WHERE r.revoked = 0 AND r.family_id != '' AND r.expires_at > ?
+  AND r.expires_at = (
+    SELECT MAX(r2.expires_at) FROM refresh_tokens r2
+    WHERE r2.family_id = r.family_id AND r2.revoked = 0
+  )
+`
+
+func backfillFamilyCurrentAccessToken(ex sqlExecer) error {
+	_, err := ex.Exec(backfillFamilyCurrentAccessTokenSQL, time.Now().Unix())
+	if err != nil {
+		return fmt.Errorf("backfilling family_current_access_token: %w", err)
+	}
+	return nil
+}
+
 // NewSQLiteRefreshTokenStore returns a SQLite-backed RefreshTokenStore.
 // path may be ":memory:" for in-process testing.
 func NewSQLiteRefreshTokenStore(path string) (RefreshTokenStore, error) {
@@ -87,6 +130,14 @@ func NewSQLiteRefreshTokenStore(path string) (RefreshTokenStore, error) {
 	// intentionally ignore).
 	_, _ = db.Exec(`ALTER TABLE refresh_tokens ADD COLUMN nonce TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE refresh_tokens ADD COLUMN provider_access_token TEXT NOT NULL DEFAULT ''`)
+	// Backfill family_current_access_token for a database that predates this
+	// feature — otherwise a family whose only pointer-eligible row exists
+	// from before the upgrade would resolve to no current access token on
+	// the first POST /revoke after upgrading (see backfillFamilyCurrentAccessTokenSQL).
+	if err := backfillFamilyCurrentAccessToken(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("initialising SQLite refresh token store: %w", err)
+	}
 	if path != ":memory:" {
 		if err := os.Chmod(path, 0o600); err != nil && !os.IsNotExist(err) {
 			slog.Warn("SQLite refresh token store chmod failed", "path", path, "err", err)
