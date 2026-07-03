@@ -239,6 +239,7 @@ func (e *errTokenStore) SaveProviderAccessToken(token, providerAccessToken strin
 }
 func (e *errTokenStore) Lookup(token string) (TokenRecord, bool) { return e.mem.Lookup(token) }
 func (e *errTokenStore) SaveNonce(token, nonce string) error     { return e.mem.SaveNonce(token, nonce) }
+func (e *errTokenStore) SaveJti(token, jti string) error         { return e.mem.SaveJti(token, jti) }
 func (e *errTokenStore) MarkRotationFailed(_ string) error       { return nil }
 func (e *errTokenStore) Delete(_ string) error                   { return fmt.Errorf("injected delete error") }
 func (e *errTokenStore) Sweep() error                            { return e.mem.Sweep() }

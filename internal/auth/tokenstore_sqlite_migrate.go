@@ -70,6 +70,15 @@ func migrateFileRefreshTokenStore(path string, dst RefreshTokenStore) error {
 		}
 		imported++
 	}
+	// migrated rows are inserted directly into refresh_tokens, bypassing
+	// Save, so family_current_access_token is never populated for them on
+	// its own — backfill within the same transaction so a family that had
+	// already rotated in the legacy store resolves to its current access
+	// token on the very first POST /revoke after migration.
+	if err := backfillFamilyCurrentAccessToken(tx); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("backfilling migrated family pointers: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("committing migration transaction: %w", err)
 	}

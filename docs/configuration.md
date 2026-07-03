@@ -378,6 +378,7 @@ MCP_GATEWAY_TRUSTED_PROXIES=127.0.0.1/32,10.0.0.0/8
 | `/callback` | GET | GitHub OAuth コールバック。 |
 | `/device_authorization` | POST | Device Authorization Grant エンドポイント（RFC 8628）。 |
 | `/token` | POST | authorization code + PKCE・device code・refresh token grant 用トークンエンドポイント。 |
+| `/revoke` | POST | RFC 7009 トークン失効エンドポイント。`token` + 任意 `token_type_hint`（`access_token`/`refresh_token`）を受け付ける。refresh token の失効はファミリー全体（RFC 6819 reuse detection と同じ仕組み）と、builtin mode ではそのファミリーに紐づく現行アクセストークン（gateway JWT）の即時失効も行う。未知・期限切れ・二重失効のトークンでも常に 200 を返す（RFC 7009 §2.2）。 |
 | `/register` | POST | RFC 7591 形式の動的クライアント登録。 |
 | `/jwks` | GET | JSON Web Key Set（gateway が OIDC Provider として動作する場合）。 |
 | `/userinfo` | GET | OIDC UserInfo エンドポイント。 |

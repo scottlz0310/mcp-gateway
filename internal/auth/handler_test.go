@@ -1488,18 +1488,24 @@ func (d *deleteFailRefreshStore) Lookup(rt string) (string, string, string, time
 func (d *deleteFailRefreshStore) LookupAny(rt string) (string, string, string, time.Time, bool, bool) {
 	return d.inner.LookupAny(rt)
 }
-func (d *deleteFailRefreshStore) Revoke(_ string) error         { return fmt.Errorf("disk I/O error") }
-func (d *deleteFailRefreshStore) RevokeFamily(fid string) error { return d.inner.RevokeFamily(fid) }
-func (d *deleteFailRefreshStore) SaveNonce(rt, n string) error  { return d.inner.SaveNonce(rt, n) }
-func (d *deleteFailRefreshStore) LookupNonce(rt string) string  { return d.inner.LookupNonce(rt) }
+func (d *deleteFailRefreshStore) Revoke(_ string) error { return fmt.Errorf("disk I/O error") }
+func (d *deleteFailRefreshStore) RevokeFamily(fid string) (string, error) {
+	return d.inner.RevokeFamily(fid)
+}
+func (d *deleteFailRefreshStore) SaveNonce(rt, n string) error { return d.inner.SaveNonce(rt, n) }
+func (d *deleteFailRefreshStore) LookupNonce(rt string) string { return d.inner.LookupNonce(rt) }
 func (d *deleteFailRefreshStore) SaveProviderAccessToken(rt, pat string) error {
 	return d.inner.SaveProviderAccessToken(rt, pat)
 }
 func (d *deleteFailRefreshStore) LookupProviderAccessToken(rt string) string {
 	return d.inner.LookupProviderAccessToken(rt)
 }
-func (d *deleteFailRefreshStore) Delete(_ string) error { return fmt.Errorf("disk I/O error") }
-func (d *deleteFailRefreshStore) Sweep() error          { return d.inner.Sweep() }
+func (d *deleteFailRefreshStore) RevokeJTI(jti string, exp time.Time) error {
+	return d.inner.RevokeJTI(jti, exp)
+}
+func (d *deleteFailRefreshStore) IsJTIRevoked(jti string) bool { return d.inner.IsJTIRevoked(jti) }
+func (d *deleteFailRefreshStore) Delete(_ string) error        { return fmt.Errorf("disk I/O error") }
+func (d *deleteFailRefreshStore) Sweep() error                 { return d.inner.Sweep() }
 
 // TestTokenRefreshDeleteFailed503 verifies that when the refresh token store
 // fails to delete the token during rotation (ErrRefreshTokenDeleteFailed),
@@ -1512,7 +1518,12 @@ func TestTokenRefreshDeleteFailed503(t *testing.T) {
 		Scopes:       "repo,user",
 	})
 
-	inner := &memRefreshTokenStore{entries: make(map[string]memRTEntry)}
+	inner := &memRefreshTokenStore{
+		entries:                  make(map[string]memRTEntry),
+		revokedJTI:               make(map[string]time.Time),
+		revokedFamilies:          make(map[string]struct{}),
+		familyCurrentAccessToken: make(map[string]memFamilyPointer),
+	}
 	failStore := &deleteFailRefreshStore{inner: inner}
 	_ = inner.Save("test-rt", "test-at", "http://localhost:8080/mcp", "fid-test", time.Now().Add(time.Hour))
 
@@ -3195,6 +3206,541 @@ func TestBuiltinTokenFlowIssuesGatewayJWT(t *testing.T) {
 	}
 }
 
+// issueBuiltinTokens drives the full authorize -> callback -> token exchange
+// flow in builtin mode and returns the issued gateway JWT (access_token) and
+// opaque refresh_token. subject is the identity the mock GitHub provider
+// resolves the flow to.
+func issueBuiltinTokens(t *testing.T, h *Handler, subject string) (accessToken, refreshToken string) {
+	t.Helper()
+	verifier := "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+	challenge := pkceChallenge(verifier)
+	state := "state-" + subject
+	const redirectURI = "http://localhost/cb"
+
+	authReq := httptest.NewRequest(http.MethodGet,
+		"/authorize?response_type=code&state="+state+"&redirect_uri="+url.QueryEscape(redirectURI)+
+			"&code_challenge="+challenge+"&code_challenge_method=S256", nil)
+	h.Authorize(httptest.NewRecorder(), authReq)
+
+	cbReq := httptest.NewRequest(http.MethodGet, "/callback?code=gh-code&state="+state, nil)
+	cbRec := httptest.NewRecorder()
+	h.Callback(cbRec, cbReq)
+	if cbRec.Code != http.StatusFound {
+		t.Fatalf("callback: got %d; body=%s", cbRec.Code, cbRec.Body.String())
+	}
+	redirectURL, err := url.Parse(cbRec.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse callback redirect: %v", err)
+	}
+	internalCode := redirectURL.Query().Get("code")
+
+	tokenBody := "grant_type=authorization_code" +
+		"&redirect_uri=" + url.QueryEscape(redirectURI) +
+		"&code=" + url.QueryEscape(internalCode) +
+		"&code_verifier=" + url.QueryEscape(verifier)
+	tokenReq := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(tokenBody))
+	tokenReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	tokenRec := httptest.NewRecorder()
+	h.Token(tokenRec, tokenReq)
+	if tokenRec.Code != http.StatusOK {
+		t.Fatalf("token: got %d; body=%s", tokenRec.Code, tokenRec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(tokenRec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode token response: %v", err)
+	}
+	accessToken, _ = resp["access_token"].(string)
+	refreshToken, _ = resp["refresh_token"].(string)
+	if accessToken == "" || refreshToken == "" {
+		t.Fatalf("token response missing access_token/refresh_token: %#v", resp)
+	}
+	return accessToken, refreshToken
+}
+
+// revokeRequest issues a POST /revoke with the given token and optional hint
+// and returns the recorder for assertions.
+func revokeRequest(h *Handler, token, hint string) *httptest.ResponseRecorder {
+	body := "token=" + url.QueryEscape(token)
+	if hint != "" {
+		body += "&token_type_hint=" + url.QueryEscape(hint)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/revoke", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.Revoke(rec, req)
+	return rec
+}
+
+func TestRevokeMissingTokenReturns400(t *testing.T) {
+	h := newTestHandler(t)
+	rec := revokeRequest(h, "", "")
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status: got %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+// TestRevokeBuiltinAccessTokenRejectsCacheMiss verifies that revoking a
+// gateway JWT (builtin mode) via token_type_hint=access_token causes a
+// subsequent ValidateToken cache-miss verification to fail, even though the
+// JWT's own exp claim has not yet passed.
+func TestRevokeBuiltinAccessTokenRejectsCacheMiss(t *testing.T) {
+	h := newBuiltinTestHandler(t,
+		func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{AccessToken: "gh-tok"}, nil
+		},
+		func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Subject: "alice"}, nil
+		},
+	)
+	accessToken, _ := issueBuiltinTokens(t, h, "alice")
+
+	rec := revokeRequest(h, accessToken, "access_token")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("revoke: got %d; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Force a cache miss: strip the cache entry the token exchange created,
+	// simulating a request that arrives after the in-memory cache entry has
+	// been evicted (e.g. a different process, or after eviction) — the jti
+	// denylist, not the cache, is what must reject it.
+	h.store.InvalidateCachedToken(accessToken)
+
+	if _, _, err := h.ValidateToken(context.Background(), accessToken, ""); err == nil {
+		t.Error("ValidateToken: expected error for revoked JWT on cache-miss path, got nil")
+	}
+}
+
+// TestRevokeBuiltinAccessTokenRejectsCacheHit verifies the cache-hit path
+// also honours the denylist: a token that was cached (e.g. by a prior
+// request) before being revoked must not keep validating for the remainder
+// of its cache TTL.
+func TestRevokeBuiltinAccessTokenRejectsCacheHit(t *testing.T) {
+	h := newBuiltinTestHandler(t,
+		func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{AccessToken: "gh-tok"}, nil
+		},
+		func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Subject: "alice"}, nil
+		},
+	)
+	accessToken, _ := issueBuiltinTokens(t, h, "alice")
+
+	// Prime the cache (cache-hit path) before revoking.
+	if _, _, err := h.ValidateToken(context.Background(), accessToken, ""); err != nil {
+		t.Fatalf("priming ValidateToken: %v", err)
+	}
+
+	rec := revokeRequest(h, accessToken, "access_token")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("revoke: got %d; body=%s", rec.Code, rec.Body.String())
+	}
+
+	if _, _, err := h.ValidateToken(context.Background(), accessToken, ""); err == nil {
+		t.Error("ValidateToken: expected error for revoked JWT on cache-hit path, got nil")
+	}
+}
+
+// TestRevokeRefreshTokenCascadesFamilyAndCurrentAccessToken verifies that
+// revoking a refresh token (a) blocks future rotation of its family and (b)
+// immediately denylists the jti of the access token currently associated
+// with that family, rather than leaving it valid until its own exp.
+func TestRevokeRefreshTokenCascadesFamilyAndCurrentAccessToken(t *testing.T) {
+	h := newBuiltinTestHandler(t,
+		func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{AccessToken: "gh-tok"}, nil
+		},
+		func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Subject: "alice"}, nil
+		},
+	)
+	accessToken, refreshToken := issueBuiltinTokens(t, h, "alice")
+
+	rec := revokeRequest(h, refreshToken, "refresh_token")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("revoke: got %d; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// (a) the refresh token itself can no longer be used for rotation.
+	refreshBody := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(refreshToken)
+	refreshReq := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(refreshBody))
+	refreshReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	refreshRec := httptest.NewRecorder()
+	h.Token(refreshRec, refreshReq)
+	if refreshRec.Code == http.StatusOK {
+		t.Errorf("refresh grant with revoked refresh_token unexpectedly succeeded: %s", refreshRec.Body.String())
+	}
+
+	// (b) the access token issued alongside it is also immediately rejected,
+	// not just when it would eventually be rotated.
+	h.store.InvalidateCachedToken(accessToken)
+	if _, _, err := h.ValidateToken(context.Background(), accessToken, ""); err == nil {
+		t.Error("ValidateToken: expected error for access token cascaded from refresh token revocation")
+	}
+}
+
+// TestRevokeIdempotentAndUnknownTokens verifies RFC 7009 §2.2: revoking an
+// unknown, already-expired, or already-revoked token is not an error — the
+// endpoint always responds 200 so a caller cannot use it to probe validity.
+func TestRevokeIdempotentAndUnknownTokens(t *testing.T) {
+	h := newBuiltinTestHandler(t,
+		func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{AccessToken: "gh-tok"}, nil
+		},
+		func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Subject: "alice"}, nil
+		},
+	)
+	accessToken, _ := issueBuiltinTokens(t, h, "alice")
+
+	if rec := revokeRequest(h, "totally-unknown-opaque-token", ""); rec.Code != http.StatusOK {
+		t.Errorf("revoke unknown token: got %d, want 200", rec.Code)
+	}
+	if rec := revokeRequest(h, "not.a.jwt", ""); rec.Code != http.StatusOK {
+		t.Errorf("revoke malformed token: got %d, want 200", rec.Code)
+	}
+	// Double revoke of the same valid token must also succeed both times.
+	if rec := revokeRequest(h, accessToken, "access_token"); rec.Code != http.StatusOK {
+		t.Errorf("first revoke: got %d, want 200", rec.Code)
+	}
+	if rec := revokeRequest(h, accessToken, "access_token"); rec.Code != http.StatusOK {
+		t.Errorf("second (duplicate) revoke: got %d, want 200", rec.Code)
+	}
+}
+
+// TestRevokeRefreshTokenWithEmptyFamilyIDStillRevokesToken verifies that a
+// refresh token issued with familyID == "" (the best-effort fallback in
+// tokenAuthCode/tokenDeviceGrant when family-ID generation fails) is still
+// individually invalidated by /revoke. Before this fix, /revoke only called
+// RevokeRefreshTokenFamily, which is a no-op for an empty familyID, leaving
+// the presented token itself usable after a 200 response (thread-owl review,
+// PR #195).
+func TestRevokeRefreshTokenWithEmptyFamilyIDStillRevokesToken(t *testing.T) {
+	h := newBuiltinTestHandler(t,
+		func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{AccessToken: "gh-tok"}, nil
+		},
+		func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Subject: "alice"}, nil
+		},
+	)
+	accessToken, _ := issueBuiltinTokens(t, h, "alice")
+	// Simulate the familyID-generation-failure fallback directly: create a
+	// second refresh token for the same access token with familyID = "".
+	rt, err := h.store.CreateRefreshToken(accessToken, "", "", h.refreshTokenTTL())
+	if err != nil {
+		t.Fatalf("CreateRefreshToken: %v", err)
+	}
+
+	rec := revokeRequest(h, rt, "refresh_token")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("revoke: got %d; body=%s", rec.Code, rec.Body.String())
+	}
+
+	refreshBody := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(rt)
+	refreshReq := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(refreshBody))
+	refreshReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	refreshRec := httptest.NewRecorder()
+	h.Token(refreshRec, refreshReq)
+	if refreshRec.Code == http.StatusOK {
+		t.Errorf("refresh grant with revoked (empty-familyID) refresh_token unexpectedly succeeded: %s", refreshRec.Body.String())
+	}
+}
+
+// TestRevokeStaleRefreshTokenCascadesToCurrentAccessToken verifies that
+// revoking an already-rotated (stale) refresh token still finds and denylists
+// the CURRENT access token for that family, not just the older JWT recorded
+// on the stale token's own row. Before this fix, LookupAnyRefreshToken's
+// accessToken field pointed at the predecessor JWT minted before rotation,
+// so the live JWT actually in use remained valid (thread-owl review, PR #195).
+func TestRevokeStaleRefreshTokenCascadesToCurrentAccessToken(t *testing.T) {
+	h := newBuiltinTestHandler(t,
+		func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{AccessToken: "gh-tok"}, nil
+		},
+		func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Subject: "alice"}, nil
+		},
+	)
+	_, refreshToken1 := issueBuiltinTokens(t, h, "alice")
+
+	// Rotate once: refreshToken1 becomes stale, and a new access/refresh
+	// token pair is issued in the same family.
+	refreshBody := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(refreshToken1)
+	refreshReq := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(refreshBody))
+	refreshReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	refreshRec := httptest.NewRecorder()
+	h.Token(refreshRec, refreshReq)
+	if refreshRec.Code != http.StatusOK {
+		t.Fatalf("rotation: got %d; body=%s", refreshRec.Code, refreshRec.Body.String())
+	}
+	var refreshResp map[string]any
+	if err := json.NewDecoder(refreshRec.Body).Decode(&refreshResp); err != nil {
+		t.Fatalf("decode rotation response: %v", err)
+	}
+	accessToken2, _ := refreshResp["access_token"].(string)
+	if accessToken2 == "" {
+		t.Fatal("rotation response missing access_token")
+	}
+
+	// Revoke the STALE (pre-rotation) refresh token.
+	rec := revokeRequest(h, refreshToken1, "refresh_token")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("revoke: got %d; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// The CURRENT access token (accessToken2), not just the original one,
+	// must now be rejected.
+	h.store.InvalidateCachedToken(accessToken2)
+	if _, _, err := h.ValidateToken(context.Background(), accessToken2, ""); err == nil {
+		t.Error("ValidateToken: expected error for current access token cascaded from a stale refresh token revocation")
+	}
+}
+
+// TestRevokeStaleRefreshTokenFindsCurrentAccessTokenDuringConcurrentReservation
+// pins the exact race thread-owl flagged in the second review round: a row
+// scan for "the non-revoked row in this family" finds nothing during the
+// narrow window where a concurrent rotation has reserved (soft-revoked) the
+// current refresh token but has not yet committed its replacement row. The
+// family_current_access_token pointer must still resolve to the access token
+// actually in the client's hands (accessToken2), not the stale
+// predecessor (accessToken1) and not "" (thread-owl review, PR #195).
+func TestRevokeStaleRefreshTokenFindsCurrentAccessTokenDuringConcurrentReservation(t *testing.T) {
+	h := newBuiltinTestHandler(t,
+		func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{AccessToken: "gh-tok"}, nil
+		},
+		func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Subject: "alice"}, nil
+		},
+	)
+	_, refreshToken1 := issueBuiltinTokens(t, h, "alice")
+
+	// Rotation 1, via the normal HTTP path: refreshToken1 -> accessToken2/refreshToken2.
+	refreshBody := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(refreshToken1)
+	refreshReq := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(refreshBody))
+	refreshReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	refreshRec := httptest.NewRecorder()
+	h.Token(refreshRec, refreshReq)
+	if refreshRec.Code != http.StatusOK {
+		t.Fatalf("rotation 1: got %d; body=%s", refreshRec.Code, refreshRec.Body.String())
+	}
+	var resp1 map[string]any
+	if err := json.NewDecoder(refreshRec.Body).Decode(&resp1); err != nil {
+		t.Fatalf("decode rotation 1 response: %v", err)
+	}
+	accessToken2, _ := resp1["access_token"].(string)
+	refreshToken2, _ := resp1["refresh_token"].(string)
+	if accessToken2 == "" || refreshToken2 == "" {
+		t.Fatalf("rotation 1 response missing tokens: %#v", resp1)
+	}
+
+	// Simulate rotation 2 currently in flight: refreshToken2 has been
+	// reserved (soft-revoked) but its replacement row has not been created
+	// yet. ReserveRefreshToken is exactly what tokenRefresh calls internally
+	// before minting the next access/refresh token pair.
+	if _, _, _, _, err := h.store.ReserveRefreshToken(refreshToken2); err != nil {
+		t.Fatalf("ReserveRefreshToken: %v", err)
+	}
+
+	// Revoke the now-stale refreshToken1 while rotation 2 is mid-flight.
+	rec := revokeRequest(h, refreshToken1, "refresh_token")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("revoke: got %d; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// accessToken2 — the token actually held by the client at this point —
+	// must be rejected, even though no non-revoked refresh_tokens row
+	// exists for the family right now.
+	h.store.InvalidateCachedToken(accessToken2)
+	if _, _, err := h.ValidateToken(context.Background(), accessToken2, ""); err == nil {
+		t.Error("ValidateToken: expected error for accessToken2 despite the concurrent reservation window")
+	}
+}
+
+// recordingTokenStore wraps a TokenStore, recording every token passed to
+// Save so a test can capture a provisional token minted mid-request without
+// the handler ever returning it.
+type recordingTokenStore struct {
+	TokenStore
+	mu    sync.Mutex
+	saved []string
+}
+
+func (r *recordingTokenStore) Save(token, subject string, audiences []string, expiresAt time.Time) error {
+	r.mu.Lock()
+	r.saved = append(r.saved, token)
+	r.mu.Unlock()
+	return r.TokenStore.Save(token, subject, audiences, expiresAt)
+}
+
+func (r *recordingTokenStore) lastSaved() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.saved) == 0 {
+		return ""
+	}
+	return r.saved[len(r.saved)-1]
+}
+
+// revokeFamilyOnFirstSave wraps a RefreshTokenStore and, on the first Save
+// call carrying a non-empty familyID, first revokes that family on the
+// underlying store before delegating — deterministically simulating a
+// concurrent POST /revoke whose RevokeFamily transaction commits at the
+// exact instant a rotation's own Save (guarded against the same tombstone)
+// is about to run. This reproduces the race window from a single goroutine,
+// without depending on real scheduling.
+type revokeFamilyOnFirstSave struct {
+	RefreshTokenStore
+	fired bool
+}
+
+func (r *revokeFamilyOnFirstSave) Save(refreshToken, accessToken, audience, familyID string, expiresAt time.Time) error {
+	if !r.fired && familyID != "" {
+		r.fired = true
+		if _, err := r.RevokeFamily(familyID); err != nil {
+			panic(fmt.Sprintf("test setup: RevokeFamily: %v", err))
+		}
+	}
+	return r.RefreshTokenStore.Save(refreshToken, accessToken, audience, familyID, expiresAt)
+}
+
+// TestRevokeConcurrentRotationDoesNotLeakProvisionalToken pins the second
+// finding from thread-owl's review: when a rotation's CreateRefreshToken
+// fails because its family was concurrently revoked, the gateway JWT already
+// cached (with its provider access token and subject-index entry) before
+// that failure must not survive — otherwise it remains reachable via
+// EnsureFreshAccessTokenForSubject (Phase B delegated access) even though
+// the client never received it and /revoke was supposed to cut off access
+// (thread-owl review, PR #195).
+func TestRevokeConcurrentRotationDoesNotLeakProvisionalToken(t *testing.T) {
+	h := newBuiltinTestHandler(t,
+		func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{AccessToken: "gh-tok"}, nil
+		},
+		func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Subject: "alice"}, nil
+		},
+	)
+	_, refreshToken1 := issueBuiltinTokens(t, h, "alice")
+
+	// Swap in a recording TokenStore (to capture the provisional token) and
+	// a RefreshTokenStore that revokes refreshToken1's family the instant
+	// the rotation below tries to Save its replacement row — simulating a
+	// concurrent /revoke landing in the middle of this rotation. The
+	// underlying refresh-token store is preserved as-is (it already holds
+	// refreshToken1). The OAuth session/PKCE bookkeeping used only during
+	// Authorize->Callback->Token is no longer needed at this point.
+	rec := &recordingTokenStore{TokenStore: NewMemTokenStore()}
+	wrappedRefresh := &revokeFamilyOnFirstSave{RefreshTokenStore: h.store.refreshStore}
+	h.store = NewStore(10*time.Minute, 90*24*time.Hour, rec, WithRefreshTokenStore(wrappedRefresh))
+
+	// Attempt rotation via refreshToken1. ReserveRefreshToken succeeds
+	// normally (the family is not yet tombstoned), but by the time
+	// CreateRefreshToken tries to Save the new row, revokeFamilyOnFirstSave
+	// has already tombstoned the family — exactly the outcome a real
+	// concurrent /revoke call racing this rotation would produce.
+	refreshBody := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(refreshToken1)
+	refreshReq := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(refreshBody))
+	refreshReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	refreshRec := httptest.NewRecorder()
+	h.Token(refreshRec, refreshReq)
+	if refreshRec.Code != http.StatusBadRequest {
+		t.Fatalf("rotation racing a concurrent revoke: got %d, want 400; body=%s", refreshRec.Code, refreshRec.Body.String())
+	}
+	if !wrappedRefresh.fired {
+		t.Fatal("setup: expected the concurrent-revoke hook to have fired")
+	}
+
+	provisional := rec.lastSaved()
+	if provisional == "" {
+		t.Fatal("setup: expected a provisional token to have been generated and Saved")
+	}
+	if _, ok := h.store.LookupToken(provisional); ok {
+		t.Error("provisional gateway JWT must be invalidated after CreateRefreshToken fails due to a concurrently revoked family")
+	}
+}
+
+// revokeJTIFailStore wraps a RefreshTokenStore, delegating everything except
+// RevokeJTI, which always fails — simulating a denylist write failure (e.g.
+// SQLite read-only/locked/corrupt) to verify /revoke does not report success
+// when the security property it promises could not actually be persisted.
+type revokeJTIFailStore struct {
+	RefreshTokenStore
+}
+
+func (r *revokeJTIFailStore) RevokeJTI(_ string, _ time.Time) error {
+	return fmt.Errorf("simulated jti denylist write failure")
+}
+
+// TestRevokeStoreWriteFailurePropagatesAsServerError verifies that a failed
+// RevokeJTI write is surfaced as 500 server_error rather than 200 — silently
+// reporting success would leave the JWT re-validating after the next cache
+// eviction (thread-owl review, PR #195).
+func TestRevokeStoreWriteFailurePropagatesAsServerError(t *testing.T) {
+	h := newBuiltinTestHandler(t,
+		func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{AccessToken: "gh-tok"}, nil
+		},
+		func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Subject: "alice"}, nil
+		},
+	)
+	accessToken, _ := issueBuiltinTokens(t, h, "alice")
+
+	// Swap in a RefreshTokenStore whose RevokeJTI always fails, simulating a
+	// denylist write failure discovered only once /revoke is called. The
+	// OAuth session/PKCE bookkeeping used only during Authorize->Callback->
+	// Token is no longer needed at this point, so replacing the whole store
+	// (rather than mutating it in place, which Store does not expose) is safe.
+	h.store = NewStore(10*time.Minute, 90*24*time.Hour, NewMemTokenStore(),
+		WithRefreshTokenStore(&revokeJTIFailStore{RefreshTokenStore: NewMemRefreshTokenStore()}))
+
+	rec := revokeRequest(h, accessToken, "access_token")
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("revoke with failing denylist write: got %d, want 500; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestRevokeNonBuiltinModeInvalidatesCache verifies that in non-builtin mode
+// (cache key = provider access token), /revoke removes the cached entry so a
+// subsequent request re-validates against the upstream provider rather than
+// trusting a stale cache hit.
+func TestRevokeNonBuiltinModeInvalidatesCache(t *testing.T) {
+	h := newTestHandler(t)
+	h.store.CacheToken("gh-access-token", "carol", "http://localhost:8080/mcp")
+	if _, ok := h.store.LookupToken("gh-access-token"); !ok {
+		t.Fatal("setup: expected cache hit before revoke")
+	}
+
+	rec := revokeRequest(h, "gh-access-token", "access_token")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("revoke: got %d; body=%s", rec.Code, rec.Body.String())
+	}
+
+	if _, ok := h.store.LookupToken("gh-access-token"); ok {
+		t.Error("expected cache entry to be removed after /revoke")
+	}
+}
+
+// TestDiscoveryIncludesRevocationEndpoint verifies RFC 8414 discovery
+// advertises the revocation_endpoint so clients can find it.
+func TestDiscoveryIncludesRevocationEndpoint(t *testing.T) {
+	h := newTestHandler(t)
+	req := httptest.NewRequest(http.MethodGet, "/.well-known/oauth-authorization-server", nil)
+	rec := httptest.NewRecorder()
+	h.Discovery(rec, req)
+
+	var doc map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&doc); err != nil {
+		t.Fatalf("decode discovery doc: %v", err)
+	}
+	want := h.cfg.BaseURL + "/revoke"
+	if got, _ := doc["revocation_endpoint"].(string); got != want {
+		t.Errorf("revocation_endpoint: got %q, want %q", got, want)
+	}
+}
+
 func TestBuiltinGitHubAccessTokenNotLeaked(t *testing.T) {
 	const ghAccessToken = "SUPER_SECRET_GITHUB_TOKEN"
 	h := newBuiltinTestHandler(t,
@@ -4327,7 +4873,7 @@ func TestValidateToken_BuiltinModeDoesNotRotateOnCacheHit(t *testing.T) {
 		t.Fatalf("NewHandler: %v", err)
 	}
 
-	jwt, err := h.generateGatewayAccessToken("kevin", "http://localhost:8080")
+	jwt, _, err := h.generateGatewayAccessToken("kevin", "http://localhost:8080")
 	if err != nil {
 		t.Fatalf("generateGatewayAccessToken: %v", err)
 	}

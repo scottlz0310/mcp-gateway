@@ -465,7 +465,7 @@ func (s *Store) ReserveRefreshToken(refreshToken string) (accessToken, audience,
 			slog.Warn("refresh token reuse detected — revoking token family",
 				"family_id", revokedFID,
 			)
-			_ = s.refreshStore.RevokeFamily(revokedFID)
+			_, _ = s.refreshStore.RevokeFamily(revokedFID)
 		}
 		return "", "", "", time.Time{}, fmt.Errorf("refresh token not found or expired")
 	}
@@ -744,6 +744,15 @@ func (s *Store) SaveTokenNonce(token, nonce string) {
 	}
 }
 
+// SaveTokenJti attaches the JWT ID claim (builtin mode) to an existing token
+// entry so a subsequent cache-hit ValidateToken call can check it against the
+// revocation denylist without re-parsing the raw token.
+func (s *Store) SaveTokenJti(token, jti string) {
+	if err := s.tokens.SaveJti(token, jti); err != nil {
+		slog.Warn("token store jti save failed", "err", err)
+	}
+}
+
 // SaveRefreshTokenNonce attaches the OIDC nonce to a refresh-token entry so
 // the nonce survives past the access-token TTL and can be retrieved during
 // token refresh (OIDC Core §12.2). No-op when entry is absent or expired.
@@ -779,6 +788,48 @@ func (s *Store) SaveRefreshTokenProviderAccessToken(refreshToken, providerAccess
 // value remains readable during the rotation, mirroring LookupRefreshTokenNonce.
 func (s *Store) LookupRefreshTokenProviderAccessToken(refreshToken string) string {
 	return s.refreshStore.LookupProviderAccessToken(refreshToken)
+}
+
+// LookupAnyRefreshToken looks up refreshToken including soft-revoked
+// (already-rotated) entries that have not yet expired. Used by POST /revoke
+// (RFC 7009) to resolve token_type_hint=refresh_token: an already-rotated
+// token must still resolve its familyID so the whole lineage can be revoked.
+func (s *Store) LookupAnyRefreshToken(refreshToken string) (accessToken, audience, familyID string, expiresAt time.Time, revoked, ok bool) {
+	return s.refreshStore.LookupAny(refreshToken)
+}
+
+// RevokeSingleRefreshToken marks refreshToken itself as revoked, independent
+// of familyID. Used by POST /revoke so the presented token is always
+// individually invalidated even in the rare case familyID is empty (family-ID
+// generation failed at issuance time, so RevokeRefreshTokenFamily would
+// otherwise be the only revocation attempted and — being a no-op for an
+// empty familyID — would leave the token usable).
+func (s *Store) RevokeSingleRefreshToken(refreshToken string) error {
+	return s.refreshStore.Revoke(refreshToken)
+}
+
+// RevokeRefreshTokenFamily marks every non-revoked refresh token belonging to
+// familyID as revoked, and returns the family's current access token as
+// observed atomically within the same operation (see
+// RefreshTokenStore.RevokeFamily's doc comment for why a separate
+// lookup-then-revoke sequence would have its own race window). Used by both
+// reuse detection (ReserveRefreshToken, return value discarded) and POST
+// /revoke, which denylists the returned access token.
+func (s *Store) RevokeRefreshTokenFamily(familyID string) (currentAccessToken string, err error) {
+	return s.refreshStore.RevokeFamily(familyID)
+}
+
+// RevokeJTI adds jti to the revocation denylist until expiresAt (the JWT's
+// own exp claim). Used by POST /revoke so a gateway-issued access token
+// (builtin mode) is rejected even though JWT verification is otherwise
+// stateless.
+func (s *Store) RevokeJTI(jti string, expiresAt time.Time) error {
+	return s.refreshStore.RevokeJTI(jti, expiresAt)
+}
+
+// IsJTIRevoked reports whether jti is present in the revocation denylist.
+func (s *Store) IsJTIRevoked(jti string) bool {
+	return s.refreshStore.IsJTIRevoked(jti)
 }
 
 // ClearProviderRefresh drops the provider refresh metadata for token (sets

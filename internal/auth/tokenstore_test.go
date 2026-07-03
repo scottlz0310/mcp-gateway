@@ -125,6 +125,37 @@ func testTokenStoreContract(t *testing.T, ts TokenStore) {
 	if _, ok := ts.Lookup("no-such-token"); ok {
 		t.Error("SaveProviderAccessToken must not create an entry for an unknown token")
 	}
+
+	// SaveJti attaches the JWT ID to an existing entry; Lookup returns it.
+	if err := ts.Save("tok-jti", "grace", nil, time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("Save tok-jti: %v", err)
+	}
+	if err := ts.SaveJti("tok-jti", "jti-abc123"); err != nil {
+		t.Fatalf("SaveJti: %v", err)
+	}
+	recJti, okJti := ts.Lookup("tok-jti")
+	if !okJti {
+		t.Fatal("Lookup tok-jti: expected hit after SaveJti")
+	}
+	if recJti.Jti != "jti-abc123" {
+		t.Errorf("SaveJti: Jti got %q, want %q", recJti.Jti, "jti-abc123")
+	}
+
+	// SaveJti on absent token is a no-op (no error, no entry created).
+	if err := ts.SaveJti("no-such-token", "jti-ghost"); err != nil {
+		t.Fatalf("SaveJti on absent token returned error: %v", err)
+	}
+	if _, ok := ts.Lookup("no-such-token"); ok {
+		t.Error("SaveJti must not create an entry for an unknown token")
+	}
+
+	// SaveJti on expired token is a no-op (no error).
+	if err := ts.Save("tok-expired-jti", "heidi", nil, time.Now().Add(-time.Second)); err != nil {
+		t.Fatalf("Save expired jti token: %v", err)
+	}
+	if err := ts.SaveJti("tok-expired-jti", "jti-xyz"); err != nil {
+		t.Fatalf("SaveJti on expired token returned error: %v", err)
+	}
 }
 
 // ── memTokenStore ─────────────────────────────────────────────────────────────
@@ -657,6 +688,92 @@ func testRefreshTokenStoreContract(t *testing.T, rts RefreshTokenStore) {
 	if got := rts.LookupProviderAccessToken("rt-pat-revoked"); got != "gho_rev1" {
 		t.Errorf("LookupProviderAccessToken after Revoke: got %q, want %q (soft-revoked entries must remain readable)", got, "gho_rev1")
 	}
+
+	// IsJTIRevoked is false before RevokeJTI.
+	if rts.IsJTIRevoked("jti-1") {
+		t.Error("IsJTIRevoked: expected false before RevokeJTI")
+	}
+	// RevokeJTI adds an entry that IsJTIRevoked then reports as revoked.
+	if err := rts.RevokeJTI("jti-1", time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("RevokeJTI: %v", err)
+	}
+	if !rts.IsJTIRevoked("jti-1") {
+		t.Error("IsJTIRevoked: expected true after RevokeJTI")
+	}
+	// A jti revoked with an already-past expiresAt is not reported as revoked
+	// (mirrors natural expiry — the entry is inert even before Sweep runs).
+	if err := rts.RevokeJTI("jti-expired", time.Now().Add(-time.Second)); err != nil {
+		t.Fatalf("RevokeJTI (expired): %v", err)
+	}
+	if rts.IsJTIRevoked("jti-expired") {
+		t.Error("IsJTIRevoked: expected false for a jti revoked with a past expiresAt")
+	}
+	// Sweep must not error with revoked jti entries present (some already expired).
+	if err := rts.Sweep(); err != nil {
+		t.Fatalf("Sweep with revoked jti entries: %v", err)
+	}
+	// The still-valid jti survives Sweep.
+	if !rts.IsJTIRevoked("jti-1") {
+		t.Error("IsJTIRevoked: jti-1 should survive Sweep (not yet expired)")
+	}
+
+	// RevokeFamily returns the family's current access token pointer — the
+	// value most recently written by Save for that family — even though the
+	// row backing it was never itself revoked before this call. Unlike a
+	// row-scan for "non-revoked", the pointer is unaffected by an older
+	// sibling's revoked flag: it always reflects the latest Save.
+	if err := rts.Save("rt-fam-old", "at-fam-old", "aud", "fid-fam", time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("Save rt-fam-old: %v", err)
+	}
+	if err := rts.Revoke("rt-fam-old"); err != nil {
+		t.Fatalf("Revoke rt-fam-old: %v", err)
+	}
+	if err := rts.Save("rt-fam-new", "at-fam-new", "aud", "fid-fam", time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("Save rt-fam-new: %v", err)
+	}
+	if got, err := rts.RevokeFamily("fid-fam"); err != nil || got != "at-fam-new" {
+		t.Errorf("RevokeFamily: got (%q, %v), want (%q, nil)", got, err, "at-fam-new")
+	}
+	// No pointer for a family that was never Saved -> ("", nil).
+	if got, err := rts.RevokeFamily("fid-no-such-family"); err != nil || got != "" {
+		t.Errorf("RevokeFamily on unknown family: got (%q, %v), want (\"\", nil)", got, err)
+	}
+	// Empty familyID is a permanent no-op: never tombstoned, never has a
+	// pointer (Save never associates a row with "").
+	if got, err := rts.RevokeFamily(""); err != nil || got != "" {
+		t.Errorf("RevokeFamily(\"\"): got (%q, %v), want (\"\", nil)", got, err)
+	}
+	if err := rts.Save("rt-no-family", "at", "aud", "", time.Now().Add(time.Hour)); err != nil {
+		t.Errorf("Save with empty familyID: got err=%v, want nil", err)
+	}
+
+	// RevokeFamily tombstones familyID: a subsequent Save for a *different*
+	// refresh token in the same family must be rejected with
+	// ErrRefreshTokenFamilyRevoked, closing the race where a rotation
+	// in-flight when /revoke runs would otherwise resurrect the family with
+	// a fresh, non-revoked row (thread-owl review, PR #195).
+	if err := rts.Save("rt-tomb-1", "at-tomb-1", "aud", "fid-tomb", time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("Save rt-tomb-1: %v", err)
+	}
+	if _, err := rts.RevokeFamily("fid-tomb"); err != nil {
+		t.Fatalf("RevokeFamily: %v", err)
+	}
+	if err := rts.Save("rt-tomb-2", "at-tomb-2", "aud", "fid-tomb", time.Now().Add(time.Hour)); !errors.Is(err, ErrRefreshTokenFamilyRevoked) {
+		t.Errorf("Save into revoked family: got err=%v, want ErrRefreshTokenFamilyRevoked", err)
+	}
+	// The blocked Save must not have written a row.
+	if _, _, _, _, ok := rts.Lookup("rt-tomb-2"); ok {
+		t.Error("Save into revoked family must not create a row despite returning an error")
+	}
+	// RevokeFamily on a familyID with no existing rows still tombstones it
+	// (a rotation could otherwise race the very first Save for a brand-new
+	// family and slip in before any row exists to revoke).
+	if _, err := rts.RevokeFamily("fid-tomb-empty"); err != nil {
+		t.Fatalf("RevokeFamily (no rows): %v", err)
+	}
+	if err := rts.Save("rt-tomb-empty", "at", "aud", "fid-tomb-empty", time.Now().Add(time.Hour)); !errors.Is(err, ErrRefreshTokenFamilyRevoked) {
+		t.Errorf("Save into family revoked before any row existed: got err=%v, want ErrRefreshTokenFamilyRevoked", err)
+	}
 }
 
 // ── memRefreshTokenStore ──────────────────────────────────────────────────────
@@ -868,12 +985,16 @@ func (f *alwaysFailRefreshStore) Lookup(_ string) (string, string, string, time.
 func (f *alwaysFailRefreshStore) LookupAny(_ string) (string, string, string, time.Time, bool, bool) {
 	return "", "", "", time.Time{}, false, false
 }
-func (f *alwaysFailRefreshStore) Revoke(_ string) error                     { return nil }
-func (f *alwaysFailRefreshStore) RevokeFamily(_ string) error               { return nil }
+func (f *alwaysFailRefreshStore) Revoke(_ string) error { return nil }
+func (f *alwaysFailRefreshStore) RevokeFamily(_ string) (string, error) {
+	return "", nil
+}
 func (f *alwaysFailRefreshStore) SaveNonce(_, _ string) error               { return nil }
 func (f *alwaysFailRefreshStore) LookupNonce(_ string) string               { return "" }
 func (f *alwaysFailRefreshStore) SaveProviderAccessToken(_, _ string) error { return nil }
 func (f *alwaysFailRefreshStore) LookupProviderAccessToken(_ string) string { return "" }
+func (f *alwaysFailRefreshStore) RevokeJTI(_ string, _ time.Time) error     { return nil }
+func (f *alwaysFailRefreshStore) IsJTIRevoked(_ string) bool                { return false }
 func (f *alwaysFailRefreshStore) Delete(_ string) error                     { return errInjectedStoreFailure }
 func (f *alwaysFailRefreshStore) Sweep() error                              { return nil }
 
@@ -908,7 +1029,7 @@ func testRefreshTokenStoreReuseDetection(t *testing.T, rts RefreshTokenStore) {
 	}
 
 	// Save a token then revoke the family — rt-b must become inaccessible via Lookup.
-	if err := rts.RevokeFamily("fid-one"); err != nil {
+	if _, err := rts.RevokeFamily("fid-one"); err != nil {
 		t.Fatalf("RevokeFamily: %v", err)
 	}
 	if _, _, _, _, ok := rts.Lookup("rt-b"); ok {
@@ -951,7 +1072,7 @@ func TestFileRefreshTokenStoreRevokedPersists(t *testing.T) {
 	if err := rts1.Save("rt-rv", "at-rv", "aud", "fid-rv", exp); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	if err := rts1.RevokeFamily("fid-rv"); err != nil {
+	if _, err := rts1.RevokeFamily("fid-rv"); err != nil {
 		t.Fatalf("RevokeFamily: %v", err)
 	}
 
