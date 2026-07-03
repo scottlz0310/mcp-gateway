@@ -169,7 +169,7 @@ func TestSQLiteRefreshTokenStoreRevokedPersists(t *testing.T) {
 	if err := rts1.Save("rt-rv", "at-rv", "aud", "fid-rv", exp); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	if err := rts1.RevokeFamily("fid-rv"); err != nil {
+	if _, err := rts1.RevokeFamily("fid-rv"); err != nil {
 		t.Fatalf("RevokeFamily: %v", err)
 	}
 	rts1.(*sqliteRefreshTokenStore).Close() //nolint — close before reopening
@@ -348,8 +348,9 @@ func TestSQLiteRefreshTokenStoreIsJTIRevokedFailsClosedOnDBError(t *testing.T) {
 // TestSQLiteRefreshTokenStoreConcurrentRotationVsRevoke stress-tests the
 // atomicity between Save (rotation) and RevokeFamily (POST /revoke) for the
 // same family, racing many goroutines against a single family to catch any
-// interleaving that would let a rotation slip a fresh, non-revoked row past
-// a concurrent revocation (thread-owl review, PR #195).
+// interleaving that would let a rotation slip a fresh, non-revoked row (or
+// an unaccounted-for family_current_access_token pointer value) past a
+// concurrent revocation (thread-owl review, PR #195).
 func TestSQLiteRefreshTokenStoreConcurrentRotationVsRevoke(t *testing.T) {
 	rts, err := NewSQLiteRefreshTokenStore(":memory:")
 	if err != nil {
@@ -359,14 +360,22 @@ func TestSQLiteRefreshTokenStoreConcurrentRotationVsRevoke(t *testing.T) {
 	t.Cleanup(func() { _ = sq.Close() })
 
 	const familyID = "fid-race"
+	const seedAccessToken = "at-race-0"
 	exp := time.Now().Add(time.Hour)
-	if err := rts.Save("rt-race-0", "at-race-0", "aud", familyID, exp); err != nil {
+	if err := rts.Save("rt-race-0", seedAccessToken, "aud", familyID, exp); err != nil {
 		t.Fatalf("seed Save: %v", err)
 	}
 
 	const attempts = 200
 	revokeStart := make(chan struct{})
 	saveResults := make([]error, attempts)
+	// Each attempt writes a distinct access token so a successful Save can be
+	// unambiguously identified by value alone (rather than by index, which a
+	// racing goroutine cannot correlate to RevokeFamily's returned pointer).
+	accessTokens := make([]string, attempts)
+	for i := range attempts {
+		accessTokens[i] = fmt.Sprintf("at-race-%d", i+1)
+	}
 
 	done := make(chan struct{})
 	go func() {
@@ -374,29 +383,45 @@ func TestSQLiteRefreshTokenStoreConcurrentRotationVsRevoke(t *testing.T) {
 		<-revokeStart
 		for i := range attempts {
 			rt := fmt.Sprintf("rt-race-%d", i+1)
-			saveResults[i] = rts.Save(rt, "at-race-n", "aud", familyID, exp)
+			saveResults[i] = rts.Save(rt, accessTokens[i], "aud", familyID, exp)
 		}
 	}()
 
 	close(revokeStart)
-	if err := rts.RevokeFamily(familyID); err != nil {
+	currentAccessToken, err := rts.RevokeFamily(familyID)
+	if err != nil {
 		t.Fatalf("RevokeFamily: %v", err)
 	}
 	<-done
 
-	// Every successful Save must have produced a row that RevokeFamily's own
-	// UPDATE would have caught (i.e. it is now revoked) — the invariant this
-	// test protects is "no active, non-revoked row survives a completed
-	// RevokeFamily call for its family", not any particular split between
-	// successful and rejected Saves (that split is a legitimate race outcome
-	// depending on scheduling).
-	active, ok := rts.LookupActiveByFamily(familyID)
-	if ok {
-		t.Errorf("LookupActiveByFamily after RevokeFamily: got active row %q, want none", active)
-	}
+	// RevokeFamily's returned pointer must correspond to a write that
+	// actually happened — either the seed or one of the Saves that reported
+	// success — never an unknown or torn value.
+	validValues := map[string]bool{seedAccessToken: true}
 	for i, err := range saveResults {
-		if err != nil && !errors.Is(err, ErrRefreshTokenFamilyRevoked) {
+		if err == nil {
+			validValues[accessTokens[i]] = true
+		} else if !errors.Is(err, ErrRefreshTokenFamilyRevoked) {
 			t.Errorf("Save[%d]: unexpected error %v", i, err)
 		}
+	}
+	if currentAccessToken == "" || !validValues[currentAccessToken] {
+		t.Errorf("RevokeFamily: returned currentAccessToken %q, want one of the seed or successfully-saved values", currentAccessToken)
+	}
+
+	// Once RevokeFamily has returned, the tombstone must stick: no further
+	// Save for this family can succeed, so the pointer can never advance
+	// past whatever RevokeFamily observed.
+	if err := rts.Save("rt-race-post", "at-race-post", "aud", familyID, exp); !errors.Is(err, ErrRefreshTokenFamilyRevoked) {
+		t.Errorf("Save after RevokeFamily returned: got err=%v, want ErrRefreshTokenFamilyRevoked", err)
+	}
+	var pointerAfter string
+	if err := sq.db.QueryRow(
+		`SELECT access_token FROM family_current_access_token WHERE family_id = ?`, familyID,
+	).Scan(&pointerAfter); err != nil {
+		t.Fatalf("querying family_current_access_token: %v", err)
+	}
+	if pointerAfter != currentAccessToken {
+		t.Errorf("family_current_access_token after RevokeFamily: got %q, want unchanged %q", pointerAfter, currentAccessToken)
 	}
 }

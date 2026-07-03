@@ -870,6 +870,17 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 		// Propagate the same familyID so the token lineage remains traceable.
 		newRT, rtErr := h.store.CreateRefreshToken(newGatewayToken, audience, familyID, h.refreshTokenTTL())
 		if rtErr != nil {
+			// newGatewayToken was already cached (with its provider access
+			// token, nonce, and jti, and indexed under sub) above, but the
+			// client is about to receive an error response and will never see
+			// it. Left as-is, the orphaned TokenRecord would remain reachable
+			// via EnsureFreshAccessTokenForSubject (Phase B delegated access),
+			// which resolves subjects via the subject index regardless of
+			// whether the token was ever handed to a client — silently
+			// keeping delegated access (including the live provider access
+			// token) alive after a concurrent /revoke. Invalidate it in both
+			// branches below so no unpublished record survives this failure.
+			h.store.InvalidateCachedToken(newGatewayToken)
 			if errors.Is(rtErr, ErrRefreshTokenFamilyRevoked) {
 				// The family was revoked (POST /revoke) concurrently with this
 				// rotation. RestoreRefreshToken below is a no-op for the same
@@ -1899,17 +1910,21 @@ func (h *Handler) Revoke(w http.ResponseWriter, r *http.Request) {
 		if err := h.store.RevokeSingleRefreshToken(token); err != nil {
 			storeErr = errors.Join(storeErr, fmt.Errorf("revoking refresh token: %w", err))
 		}
-		// Resolve the family's currently active access token BEFORE
-		// RevokeRefreshTokenFamily marks every row revoked: if the presented
-		// token is a stale, already-rotated predecessor, its own accessToken
-		// field points at an earlier JWT, not the one actually in use today.
+		// currentAccessToken falls back to the presented token's own row
+		// value, used only when familyID is empty (no family-level pointer
+		// to consult). When familyID is non-empty, RevokeRefreshTokenFamily's
+		// return value is the sole source of truth: it is read atomically
+		// with the tombstone write (see its doc comment), which a separate
+		// "look up the active row, then revoke the family" sequence cannot
+		// guarantee — a rotation's Save could otherwise commit a newer
+		// access token between those two steps and never get denylisted.
 		currentAccessToken := accessToken
 		if familyID != "" {
-			if active, ok := h.store.LookupActiveRefreshTokenAccessToken(familyID); ok {
-				currentAccessToken = active
-			}
-			if err := h.store.RevokeRefreshTokenFamily(familyID); err != nil {
+			active, err := h.store.RevokeRefreshTokenFamily(familyID)
+			if err != nil {
 				storeErr = errors.Join(storeErr, fmt.Errorf("revoking refresh token family: %w", err))
+			} else if active != "" {
+				currentAccessToken = active
 			}
 		}
 		// RevokeRefreshTokenFamily only blocks *future* rotations — the

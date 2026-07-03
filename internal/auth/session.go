@@ -465,7 +465,7 @@ func (s *Store) ReserveRefreshToken(refreshToken string) (accessToken, audience,
 			slog.Warn("refresh token reuse detected — revoking token family",
 				"family_id", revokedFID,
 			)
-			_ = s.refreshStore.RevokeFamily(revokedFID)
+			_, _ = s.refreshStore.RevokeFamily(revokedFID)
 		}
 		return "", "", "", time.Time{}, fmt.Errorf("refresh token not found or expired")
 	}
@@ -798,15 +798,6 @@ func (s *Store) LookupAnyRefreshToken(refreshToken string) (accessToken, audienc
 	return s.refreshStore.LookupAny(refreshToken)
 }
 
-// LookupActiveRefreshTokenAccessToken returns the access token of the
-// current (non-revoked, non-expired) refresh-token row for familyID, or
-// ("", false) when none exists. Used by POST /revoke to find the access
-// token actually in use today even when the presented refresh token is a
-// stale, already-rotated predecessor.
-func (s *Store) LookupActiveRefreshTokenAccessToken(familyID string) (accessToken string, ok bool) {
-	return s.refreshStore.LookupActiveByFamily(familyID)
-}
-
 // RevokeSingleRefreshToken marks refreshToken itself as revoked, independent
 // of familyID. Used by POST /revoke so the presented token is always
 // individually invalidated even in the rare case familyID is empty (family-ID
@@ -818,9 +809,13 @@ func (s *Store) RevokeSingleRefreshToken(refreshToken string) error {
 }
 
 // RevokeRefreshTokenFamily marks every non-revoked refresh token belonging to
-// familyID as revoked, invalidating the entire token lineage. Used by both
-// reuse detection (ReserveRefreshToken) and POST /revoke.
-func (s *Store) RevokeRefreshTokenFamily(familyID string) error {
+// familyID as revoked, and returns the family's current access token as
+// observed atomically within the same operation (see
+// RefreshTokenStore.RevokeFamily's doc comment for why a separate
+// lookup-then-revoke sequence would have its own race window). Used by both
+// reuse detection (ReserveRefreshToken, return value discarded) and POST
+// /revoke, which denylists the returned access token.
+func (s *Store) RevokeRefreshTokenFamily(familyID string) (currentAccessToken string, err error) {
 	return s.refreshStore.RevokeFamily(familyID)
 }
 

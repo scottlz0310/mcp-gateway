@@ -1488,13 +1488,12 @@ func (d *deleteFailRefreshStore) Lookup(rt string) (string, string, string, time
 func (d *deleteFailRefreshStore) LookupAny(rt string) (string, string, string, time.Time, bool, bool) {
 	return d.inner.LookupAny(rt)
 }
-func (d *deleteFailRefreshStore) LookupActiveByFamily(fid string) (string, bool) {
-	return d.inner.LookupActiveByFamily(fid)
+func (d *deleteFailRefreshStore) Revoke(_ string) error { return fmt.Errorf("disk I/O error") }
+func (d *deleteFailRefreshStore) RevokeFamily(fid string) (string, error) {
+	return d.inner.RevokeFamily(fid)
 }
-func (d *deleteFailRefreshStore) Revoke(_ string) error         { return fmt.Errorf("disk I/O error") }
-func (d *deleteFailRefreshStore) RevokeFamily(fid string) error { return d.inner.RevokeFamily(fid) }
-func (d *deleteFailRefreshStore) SaveNonce(rt, n string) error  { return d.inner.SaveNonce(rt, n) }
-func (d *deleteFailRefreshStore) LookupNonce(rt string) string  { return d.inner.LookupNonce(rt) }
+func (d *deleteFailRefreshStore) SaveNonce(rt, n string) error { return d.inner.SaveNonce(rt, n) }
+func (d *deleteFailRefreshStore) LookupNonce(rt string) string { return d.inner.LookupNonce(rt) }
 func (d *deleteFailRefreshStore) SaveProviderAccessToken(rt, pat string) error {
 	return d.inner.SaveProviderAccessToken(rt, pat)
 }
@@ -1519,7 +1518,12 @@ func TestTokenRefreshDeleteFailed503(t *testing.T) {
 		Scopes:       "repo,user",
 	})
 
-	inner := &memRefreshTokenStore{entries: make(map[string]memRTEntry), revokedJTI: make(map[string]time.Time)}
+	inner := &memRefreshTokenStore{
+		entries:                  make(map[string]memRTEntry),
+		revokedJTI:               make(map[string]time.Time),
+		revokedFamilies:          make(map[string]struct{}),
+		familyCurrentAccessToken: make(map[string]memFamilyPointer),
+	}
 	failStore := &deleteFailRefreshStore{inner: inner}
 	_ = inner.Save("test-rt", "test-at", "http://localhost:8080/mcp", "fid-test", time.Now().Add(time.Hour))
 
@@ -3490,6 +3494,170 @@ func TestRevokeStaleRefreshTokenCascadesToCurrentAccessToken(t *testing.T) {
 	h.store.InvalidateCachedToken(accessToken2)
 	if _, _, err := h.ValidateToken(context.Background(), accessToken2, ""); err == nil {
 		t.Error("ValidateToken: expected error for current access token cascaded from a stale refresh token revocation")
+	}
+}
+
+// TestRevokeStaleRefreshTokenFindsCurrentAccessTokenDuringConcurrentReservation
+// pins the exact race thread-owl flagged in the second review round: a row
+// scan for "the non-revoked row in this family" finds nothing during the
+// narrow window where a concurrent rotation has reserved (soft-revoked) the
+// current refresh token but has not yet committed its replacement row. The
+// family_current_access_token pointer must still resolve to the access token
+// actually in the client's hands (accessToken2), not the stale
+// predecessor (accessToken1) and not "" (thread-owl review, PR #195).
+func TestRevokeStaleRefreshTokenFindsCurrentAccessTokenDuringConcurrentReservation(t *testing.T) {
+	h := newBuiltinTestHandler(t,
+		func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{AccessToken: "gh-tok"}, nil
+		},
+		func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Subject: "alice"}, nil
+		},
+	)
+	_, refreshToken1 := issueBuiltinTokens(t, h, "alice")
+
+	// Rotation 1, via the normal HTTP path: refreshToken1 -> accessToken2/refreshToken2.
+	refreshBody := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(refreshToken1)
+	refreshReq := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(refreshBody))
+	refreshReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	refreshRec := httptest.NewRecorder()
+	h.Token(refreshRec, refreshReq)
+	if refreshRec.Code != http.StatusOK {
+		t.Fatalf("rotation 1: got %d; body=%s", refreshRec.Code, refreshRec.Body.String())
+	}
+	var resp1 map[string]any
+	if err := json.NewDecoder(refreshRec.Body).Decode(&resp1); err != nil {
+		t.Fatalf("decode rotation 1 response: %v", err)
+	}
+	accessToken2, _ := resp1["access_token"].(string)
+	refreshToken2, _ := resp1["refresh_token"].(string)
+	if accessToken2 == "" || refreshToken2 == "" {
+		t.Fatalf("rotation 1 response missing tokens: %#v", resp1)
+	}
+
+	// Simulate rotation 2 currently in flight: refreshToken2 has been
+	// reserved (soft-revoked) but its replacement row has not been created
+	// yet. ReserveRefreshToken is exactly what tokenRefresh calls internally
+	// before minting the next access/refresh token pair.
+	if _, _, _, _, err := h.store.ReserveRefreshToken(refreshToken2); err != nil {
+		t.Fatalf("ReserveRefreshToken: %v", err)
+	}
+
+	// Revoke the now-stale refreshToken1 while rotation 2 is mid-flight.
+	rec := revokeRequest(h, refreshToken1, "refresh_token")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("revoke: got %d; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// accessToken2 — the token actually held by the client at this point —
+	// must be rejected, even though no non-revoked refresh_tokens row
+	// exists for the family right now.
+	h.store.InvalidateCachedToken(accessToken2)
+	if _, _, err := h.ValidateToken(context.Background(), accessToken2, ""); err == nil {
+		t.Error("ValidateToken: expected error for accessToken2 despite the concurrent reservation window")
+	}
+}
+
+// recordingTokenStore wraps a TokenStore, recording every token passed to
+// Save so a test can capture a provisional token minted mid-request without
+// the handler ever returning it.
+type recordingTokenStore struct {
+	TokenStore
+	mu    sync.Mutex
+	saved []string
+}
+
+func (r *recordingTokenStore) Save(token, subject string, audiences []string, expiresAt time.Time) error {
+	r.mu.Lock()
+	r.saved = append(r.saved, token)
+	r.mu.Unlock()
+	return r.TokenStore.Save(token, subject, audiences, expiresAt)
+}
+
+func (r *recordingTokenStore) lastSaved() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.saved) == 0 {
+		return ""
+	}
+	return r.saved[len(r.saved)-1]
+}
+
+// revokeFamilyOnFirstSave wraps a RefreshTokenStore and, on the first Save
+// call carrying a non-empty familyID, first revokes that family on the
+// underlying store before delegating — deterministically simulating a
+// concurrent POST /revoke whose RevokeFamily transaction commits at the
+// exact instant a rotation's own Save (guarded against the same tombstone)
+// is about to run. This reproduces the race window from a single goroutine,
+// without depending on real scheduling.
+type revokeFamilyOnFirstSave struct {
+	RefreshTokenStore
+	fired bool
+}
+
+func (r *revokeFamilyOnFirstSave) Save(refreshToken, accessToken, audience, familyID string, expiresAt time.Time) error {
+	if !r.fired && familyID != "" {
+		r.fired = true
+		if _, err := r.RevokeFamily(familyID); err != nil {
+			panic(fmt.Sprintf("test setup: RevokeFamily: %v", err))
+		}
+	}
+	return r.RefreshTokenStore.Save(refreshToken, accessToken, audience, familyID, expiresAt)
+}
+
+// TestRevokeConcurrentRotationDoesNotLeakProvisionalToken pins the second
+// finding from thread-owl's review: when a rotation's CreateRefreshToken
+// fails because its family was concurrently revoked, the gateway JWT already
+// cached (with its provider access token and subject-index entry) before
+// that failure must not survive — otherwise it remains reachable via
+// EnsureFreshAccessTokenForSubject (Phase B delegated access) even though
+// the client never received it and /revoke was supposed to cut off access
+// (thread-owl review, PR #195).
+func TestRevokeConcurrentRotationDoesNotLeakProvisionalToken(t *testing.T) {
+	h := newBuiltinTestHandler(t,
+		func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{AccessToken: "gh-tok"}, nil
+		},
+		func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Subject: "alice"}, nil
+		},
+	)
+	_, refreshToken1 := issueBuiltinTokens(t, h, "alice")
+
+	// Swap in a recording TokenStore (to capture the provisional token) and
+	// a RefreshTokenStore that revokes refreshToken1's family the instant
+	// the rotation below tries to Save its replacement row — simulating a
+	// concurrent /revoke landing in the middle of this rotation. The
+	// underlying refresh-token store is preserved as-is (it already holds
+	// refreshToken1). The OAuth session/PKCE bookkeeping used only during
+	// Authorize->Callback->Token is no longer needed at this point.
+	rec := &recordingTokenStore{TokenStore: NewMemTokenStore()}
+	wrappedRefresh := &revokeFamilyOnFirstSave{RefreshTokenStore: h.store.refreshStore}
+	h.store = NewStore(10*time.Minute, 90*24*time.Hour, rec, WithRefreshTokenStore(wrappedRefresh))
+
+	// Attempt rotation via refreshToken1. ReserveRefreshToken succeeds
+	// normally (the family is not yet tombstoned), but by the time
+	// CreateRefreshToken tries to Save the new row, revokeFamilyOnFirstSave
+	// has already tombstoned the family — exactly the outcome a real
+	// concurrent /revoke call racing this rotation would produce.
+	refreshBody := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(refreshToken1)
+	refreshReq := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(refreshBody))
+	refreshReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	refreshRec := httptest.NewRecorder()
+	h.Token(refreshRec, refreshReq)
+	if refreshRec.Code != http.StatusBadRequest {
+		t.Fatalf("rotation racing a concurrent revoke: got %d, want 400; body=%s", refreshRec.Code, refreshRec.Body.String())
+	}
+	if !wrappedRefresh.fired {
+		t.Fatal("setup: expected the concurrent-revoke hook to have fired")
+	}
+
+	provisional := rec.lastSaved()
+	if provisional == "" {
+		t.Fatal("setup: expected a provisional token to have been generated and Saved")
+	}
+	if _, ok := h.store.LookupToken(provisional); ok {
+		t.Error("provisional gateway JWT must be invalidated after CreateRefreshToken fails due to a concurrently revoked family")
 	}
 }
 
