@@ -1555,6 +1555,9 @@ func (d *deleteFailRefreshStore) SaveProviderRefresh(rt, prt string, exp time.Ti
 func (d *deleteFailRefreshStore) LookupProviderRefresh(rt string) (string, time.Time) {
 	return d.inner.LookupProviderRefresh(rt)
 }
+func (d *deleteFailRefreshStore) UpdateProviderTokensByAccessToken(at, pat, prt string, exp time.Time) error {
+	return d.inner.UpdateProviderTokensByAccessToken(at, pat, prt, exp)
+}
 func (d *deleteFailRefreshStore) RevokeJTI(jti string, exp time.Time) error {
 	return d.inner.RevokeJTI(jti, exp)
 }

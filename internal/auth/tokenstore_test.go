@@ -709,6 +709,37 @@ func testRefreshTokenStoreContract(t *testing.T, rts RefreshTokenStore) {
 	if got, gotExp := rts.LookupProviderRefresh("no-such-rt"); got != "" || !gotExp.IsZero() {
 		t.Errorf("LookupProviderRefresh on absent: got (%q, %v), want (\"\", zero)", got, gotExp)
 	}
+	// provider refresh token が空なら、非ゼロの expiry が残っていても未設定として扱う。
+	if err := rts.Save("rt-prt-empty", "access-tok-prt-empty", "", "fid-prt-empty", time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("Save rt-prt-empty: %v", err)
+	}
+	if err := rts.SaveProviderRefresh("rt-prt-empty", "", prExpiry); err != nil {
+		t.Fatalf("SaveProviderRefresh empty: %v", err)
+	}
+	if got, gotExp := rts.LookupProviderRefresh("rt-prt-empty"); got != "" || !gotExp.IsZero() {
+		t.Errorf("LookupProviderRefresh on unset metadata: got (%q, %v), want (\"\", zero)", got, gotExp)
+	}
+	// builtin delegated rotation は gateway JWT に紐づく active refresh-token entry を
+	// 更新し、後続の gateway refresh による旧 provider token 世代の復元を防ぐ。
+	if err := rts.Save("rt-prt-active", "gateway-jwt", "", "fid-prt-active", time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("Save rt-prt-active: %v", err)
+	}
+	if err := rts.SaveProviderAccessToken("rt-prt-active", "gho_old"); err != nil {
+		t.Fatalf("SaveProviderAccessToken rt-prt-active: %v", err)
+	}
+	if err := rts.SaveProviderRefresh("rt-prt-active", "ghr_old", prExpiry); err != nil {
+		t.Fatalf("SaveProviderRefresh rt-prt-active: %v", err)
+	}
+	rotatedExpiry := time.Now().Add(12 * time.Hour).Truncate(time.Second)
+	if err := rts.UpdateProviderTokensByAccessToken("gateway-jwt", "gho_new", "ghr_new", rotatedExpiry); err != nil {
+		t.Fatalf("UpdateProviderTokensByAccessToken: %v", err)
+	}
+	if got := rts.LookupProviderAccessToken("rt-prt-active"); got != "gho_new" {
+		t.Errorf("provider access token after update: got %q, want %q", got, "gho_new")
+	}
+	if got, gotExp := rts.LookupProviderRefresh("rt-prt-active"); got != "ghr_new" || !gotExp.Equal(rotatedExpiry) {
+		t.Errorf("provider refresh metadata after update: got (%q, %v), want (%q, %v)", got, gotExp, "ghr_new", rotatedExpiry)
+	}
 	// SaveProviderRefresh on absent token is a no-op (no error).
 	if err := rts.SaveProviderRefresh("no-such-rt", "ghr_ghost", prExpiry); err != nil {
 		t.Fatalf("SaveProviderRefresh on absent returned error: %v", err)
@@ -1039,10 +1070,13 @@ func (f *alwaysFailRefreshStore) SaveProviderRefresh(_, _ string, _ time.Time) e
 func (f *alwaysFailRefreshStore) LookupProviderRefresh(_ string) (string, time.Time) {
 	return "", time.Time{}
 }
-func (f *alwaysFailRefreshStore) RevokeJTI(_ string, _ time.Time) error     { return nil }
-func (f *alwaysFailRefreshStore) IsJTIRevoked(_ string) bool                { return false }
-func (f *alwaysFailRefreshStore) Delete(_ string) error                     { return errInjectedStoreFailure }
-func (f *alwaysFailRefreshStore) Sweep() error                              { return nil }
+func (f *alwaysFailRefreshStore) UpdateProviderTokensByAccessToken(_, _, _ string, _ time.Time) error {
+	return nil
+}
+func (f *alwaysFailRefreshStore) RevokeJTI(_ string, _ time.Time) error { return nil }
+func (f *alwaysFailRefreshStore) IsJTIRevoked(_ string) bool            { return false }
+func (f *alwaysFailRefreshStore) Delete(_ string) error                 { return errInjectedStoreFailure }
+func (f *alwaysFailRefreshStore) Sweep() error                          { return nil }
 
 // testRefreshTokenStoreReuseDetection exercises LookupAny and RevokeFamily on
 // the given RefreshTokenStore.  It is shared across in-memory and file-backed

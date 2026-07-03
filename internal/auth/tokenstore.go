@@ -689,6 +689,9 @@ type RefreshTokenStore interface {
 	// entries so it can be read after ReserveRefreshToken, mirroring
 	// LookupProviderAccessToken.
 	LookupProviderRefresh(refreshToken string) (providerRefreshToken string, providerAccessExpiry time.Time)
+	// UpdateProviderTokensByAccessToken は accessToken に紐づく未失効・未 revoke の
+	// refresh-token entry を更新し、gateway JWT と provider token の世代を揃える。
+	UpdateProviderTokensByAccessToken(accessToken, providerAccessToken, providerRefreshToken string, providerAccessExpiry time.Time) error
 	// RevokeJTI adds the JWT ID (jti claim) of a gateway-issued access token
 	// (builtin mode) to the revocation denylist until expiresAt, which should
 	// be the token's own exp claim so the entry is naturally swept once the
@@ -893,10 +896,26 @@ func (m *memRefreshTokenStore) LookupProviderRefresh(refreshToken string) (strin
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	e, ok := m.entries[tokenKey(refreshToken)]
-	if !ok || time.Now().After(e.expiresAt) {
+	if !ok || time.Now().After(e.expiresAt) || e.providerRefreshToken == "" {
 		return "", time.Time{}
 	}
 	return e.providerRefreshToken, e.providerAccessExpiry
+}
+
+func (m *memRefreshTokenStore) UpdateProviderTokensByAccessToken(accessToken, providerAccessToken, providerRefreshToken string, providerAccessExpiry time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Now()
+	for key, entry := range m.entries {
+		if entry.revoked || now.After(entry.expiresAt) || entry.accessToken != accessToken {
+			continue
+		}
+		entry.providerAccessToken = providerAccessToken
+		entry.providerRefreshToken = providerRefreshToken
+		entry.providerAccessExpiry = providerAccessExpiry
+		m.entries[key] = entry
+	}
+	return nil
 }
 
 func (m *memRefreshTokenStore) Delete(refreshToken string) error {
@@ -1209,10 +1228,37 @@ func (f *fileRefreshTokenStore) LookupProviderRefresh(refreshToken string) (stri
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	e, ok := f.entries[tokenKey(refreshToken)]
-	if !ok || time.Now().After(e.ExpiresAt) {
+	if !ok || time.Now().After(e.ExpiresAt) || e.ProviderRefreshToken == "" {
 		return "", time.Time{}
 	}
 	return e.ProviderRefreshToken, e.ProviderAccessExpiry
+}
+
+func (f *fileRefreshTokenStore) UpdateProviderTokensByAccessToken(accessToken, providerAccessToken, providerRefreshToken string, providerAccessExpiry time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	now := time.Now()
+	previous := make(map[string]fileRTEntry)
+	for key, entry := range f.entries {
+		if entry.Revoked || now.After(entry.ExpiresAt) || entry.AccessToken != accessToken {
+			continue
+		}
+		previous[key] = entry
+		entry.ProviderAccessToken = providerAccessToken
+		entry.ProviderRefreshToken = providerRefreshToken
+		entry.ProviderAccessExpiry = providerAccessExpiry
+		f.entries[key] = entry
+	}
+	if len(previous) == 0 {
+		return nil
+	}
+	if err := f.flush(); err != nil {
+		for key, entry := range previous {
+			f.entries[key] = entry
+		}
+		return err
+	}
+	return nil
 }
 
 func (f *fileRefreshTokenStore) Delete(refreshToken string) error {

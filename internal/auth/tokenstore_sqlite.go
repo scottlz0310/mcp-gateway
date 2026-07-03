@@ -413,10 +413,23 @@ func (s *sqliteRefreshTokenStore) LookupProviderRefresh(refreshToken string) (st
 		`SELECT provider_refresh_token, provider_access_expiry FROM refresh_tokens WHERE token_hash = ? AND expires_at > ?`,
 		tokenKey(refreshToken), time.Now().Unix(),
 	).Scan(&providerRefreshToken, &providerAccessExpiryUnix)
-	if err != nil {
+	if err != nil || providerRefreshToken == "" {
 		return "", time.Time{}
 	}
 	return providerRefreshToken, timeFromUnixOrZero(providerAccessExpiryUnix)
+}
+
+func (s *sqliteRefreshTokenStore) UpdateProviderTokensByAccessToken(accessToken, providerAccessToken, providerRefreshToken string, providerAccessExpiry time.Time) error {
+	_, err := s.db.Exec(
+		`UPDATE refresh_tokens
+		 SET provider_access_token = ?, provider_refresh_token = ?, provider_access_expiry = ?
+		 WHERE access_token = ? AND revoked = 0 AND expires_at > ?`,
+		providerAccessToken, providerRefreshToken, unixOrZero(providerAccessExpiry), accessToken, time.Now().Unix(),
+	)
+	if err != nil {
+		return fmt.Errorf("updating refresh token provider metadata by access token: %w", err)
+	}
+	return nil
 }
 
 func (s *sqliteRefreshTokenStore) Delete(refreshToken string) error {

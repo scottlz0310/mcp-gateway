@@ -4,7 +4,12 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -650,6 +655,92 @@ func TestEnsureFreshAccessTokenForSubject_BuiltinRotationSucceeds(t *testing.T) 
 	}
 	if rec.ProviderRefreshToken != "ghr_rotated" {
 		t.Errorf("record.ProviderRefreshToken: got %q, want %q", rec.ProviderRefreshToken, "ghr_rotated")
+	}
+}
+
+// TestEnsureFreshAccessTokenForSubject_BuiltinRotationSurvivesGatewayRefresh は、
+// delegated rotation 後の provider token 世代が gateway refresh token にも反映され、
+// gateway refresh grant 後の delegated access が失効済み世代へ戻らないことを検証する。
+func TestEnsureFreshAccessTokenForSubject_BuiltinRotationSurvivesGatewayRefresh(t *testing.T) {
+	var observedRefreshTokens []string
+	h := newDelegatedBuiltinRotationTestHandler(t, "gho_original", "ghr_original", 30*time.Second,
+		func(_ context.Context, rt string) (provider.TokenResponse, error) {
+			observedRefreshTokens = append(observedRefreshTokens, rt)
+			switch rt {
+			case "ghr_original":
+				return provider.TokenResponse{
+					AccessToken:          "gho_rotated_1",
+					RefreshToken:         "ghr_rotated_1",
+					AccessTokenExpiresIn: 30 * time.Second,
+				}, nil
+			case "ghr_rotated_1":
+				return provider.TokenResponse{
+					AccessToken:          "gho_rotated_2",
+					RefreshToken:         "ghr_rotated_2",
+					AccessTokenExpiresIn: 8 * time.Hour,
+				}, nil
+			default:
+				return provider.TokenResponse{}, errors.New("bad_refresh_token")
+			}
+		})
+	tokenResp, firstJWT := runBuiltinFullFlow(t, h, "alice")
+	refreshToken, _ := tokenResp["refresh_token"].(string)
+	if refreshToken == "" {
+		t.Fatal("initial token response missing refresh_token")
+	}
+
+	firstResult, err := h.EnsureFreshAccessTokenForSubject(context.Background(), "alice")
+	if err != nil {
+		t.Fatalf("first delegated rotation: %v", err)
+	}
+	if firstResult.AccessToken != "gho_rotated_1" {
+		t.Fatalf("first delegated rotation access token: got %q, want %q", firstResult.AccessToken, "gho_rotated_1")
+	}
+
+	refreshBody := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(refreshToken)
+	refreshReq := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(refreshBody))
+	refreshReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	refreshRec := httptest.NewRecorder()
+	h.Token(refreshRec, refreshReq)
+	if refreshRec.Code != http.StatusOK {
+		t.Fatalf("gateway refresh grant: got %d; body=%s", refreshRec.Code, refreshRec.Body.String())
+	}
+	var refreshResp map[string]any
+	if err := json.NewDecoder(refreshRec.Body).Decode(&refreshResp); err != nil {
+		t.Fatalf("decode gateway refresh response: %v", err)
+	}
+	secondJWT, _ := refreshResp["access_token"].(string)
+	secondRefreshToken, _ := refreshResp["refresh_token"].(string)
+	if secondJWT == "" || secondRefreshToken == "" {
+		t.Fatalf("gateway refresh response missing tokens: access=%t refresh=%t", secondJWT != "", secondRefreshToken != "")
+	}
+	secondRecord, ok := h.store.LookupToken(secondJWT)
+	if !ok {
+		t.Fatal("gateway refresh grant did not cache the new JWT")
+	}
+	if secondRecord.ProviderAccessToken != "gho_rotated_1" || secondRecord.ProviderRefreshToken != "ghr_rotated_1" {
+		t.Fatalf("gateway refresh restored stale provider generation: access=%q refresh=%q",
+			secondRecord.ProviderAccessToken, secondRecord.ProviderRefreshToken)
+	}
+	if got := h.store.LookupRefreshTokenProviderAccessToken(secondRefreshToken); got != "gho_rotated_1" {
+		t.Fatalf("new refresh-token entry provider access token: got %q, want %q", got, "gho_rotated_1")
+	}
+	if got, _ := h.store.LookupRefreshTokenProviderRefresh(secondRefreshToken); got != "ghr_rotated_1" {
+		t.Fatalf("new refresh-token entry provider refresh token: got %q, want %q", got, "ghr_rotated_1")
+	}
+
+	// 同一 subject の旧 JWT と新 JWT は同じ provider expiry を持つため、
+	// 新 JWT の復元値を検証する前にクライアントが更新済みとみなして旧 JWT を除外する。
+	h.InvalidateCachedToken(firstJWT)
+	secondResult, err := h.EnsureFreshAccessTokenForSubject(context.Background(), "alice")
+	if err != nil {
+		t.Fatalf("delegated access after gateway refresh: %v", err)
+	}
+	if secondResult.AccessToken != "gho_rotated_2" {
+		t.Fatalf("delegated access after gateway refresh: got %q, want %q", secondResult.AccessToken, "gho_rotated_2")
+	}
+	if len(observedRefreshTokens) != 2 || observedRefreshTokens[0] != "ghr_original" || observedRefreshTokens[1] != "ghr_rotated_1" {
+		t.Fatalf("provider refresh sequence: got %v, want [ghr_original ghr_rotated_1]", observedRefreshTokens)
 	}
 }
 

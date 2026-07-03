@@ -1621,6 +1621,17 @@ func (h *Handler) runBuiltinRotation(ctx context.Context, token string) rotation
 		newRefresh = record.ProviderRefreshToken
 	}
 	newAccessExpiry := providerAccessExpiry(tokens.AccessTokenExpiresIn)
+	// gateway refresh token は JWT の TokenStore entry より長く残るため、JWT record より先に
+	// refresh-token entry を更新し、後続の gateway refresh による失効済み世代の復元を防ぐ。
+	if err := h.store.UpdateRefreshTokenProviderTokens(token, tokens.AccessToken, newRefresh, newAccessExpiry); err != nil {
+		h.auditFailure("rotation", "store_error", "rotated provider token metadata could not be persisted", err, 0, tokenFingerprint(token))
+		slog.Error("builtin rotation refresh token metadata update failed",
+			"jwt_hash", tokenFingerprint(token),
+			"err", err,
+		)
+		h.store.MarkRotationPermanentlyFailed(token)
+		return rotationResult{}
+	}
 	// Unlike runGitHubRotation, the cache key (the gateway JWT) never
 	// changes: update the existing entry's provider fields in place.
 	h.store.RecordProviderAccessToken(token, tokens.AccessToken)

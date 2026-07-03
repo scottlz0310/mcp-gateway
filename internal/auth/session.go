@@ -811,6 +811,16 @@ func (s *Store) LookupRefreshTokenProviderRefresh(refreshToken string) (string, 
 	return s.refreshStore.LookupProviderRefresh(refreshToken)
 }
 
+// UpdateRefreshTokenProviderTokens は accessToken に紐づく active refresh-token entry の
+// provider metadata を更新する。builtin rotation の成功を返す前に、file/SQLite を含む
+// RefreshTokenStore が3つの provider field をまとめて永続化する。
+func (s *Store) UpdateRefreshTokenProviderTokens(accessToken, providerAccessToken, providerRefreshToken string, providerAccessExpiry time.Time) error {
+	if err := s.refreshStore.UpdateProviderTokensByAccessToken(accessToken, providerAccessToken, providerRefreshToken, providerAccessExpiry); err != nil {
+		return fmt.Errorf("updating refresh token provider metadata: %w", err)
+	}
+	return nil
+}
+
 // LookupAnyRefreshToken looks up refreshToken including soft-revoked
 // (already-rotated) entries that have not yet expired. Used by POST /revoke
 // (RFC 7009) to resolve token_type_hint=refresh_token: an already-rotated
