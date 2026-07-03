@@ -5,6 +5,8 @@
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-03
+
 ### セキュリティ
 
 - 全 `slog` call site を対象としたトークン値のログ漏洩監査を完了（#24 Phase 4 の残タスク）。意図的かつ文書化済みの setup mode ワンタイムトークン提示を除き、トークン・シークレットの生値はどこにもログ出力されないことを確認した。（[#193](https://github.com/scottlz0310/mcp-gateway/issues/193)）
@@ -30,6 +32,23 @@
   - `RefreshTokenStore.SaveProviderRefresh` / `LookupProviderRefresh`（`ProviderRefreshToken` + `ProviderAccessExpiry`）を新設（mem・file・SQLite の3実装）。`tokenAuthCode` / `tokenDeviceGrant` / `tokenRefresh` の builtin 分岐でこれらを使い、rotation に必要なメタデータをアクセストークン TokenStore エントリの sweep 後も refresh token 経由で引き継げるようにした（既存の `ProviderAccessToken` と同じパターン）
   - delegated rotation と gateway refresh を refresh-token family 単位で直列化し、rotation 成功時は current JWT と active refresh-token entry を同じ provider token 世代へ更新する。永久失敗時は family 全体を revoke し、失効済み metadata から新しい lineage が復活しないようにした
   - `tokenDeviceGrant` の builtin 分岐が誤ったキー（`completed.AccessToken`、非 builtin mode 用のキー）で provider refresh metadata を保存していたため実質 no-op になっていたバグを修正し、正しいキー（gateway JWT）で保存するようにした
+- RFC 7009 OAuth 2.0 Token Revocation（`POST /revoke`）を実装（[#192](https://github.com/scottlz0310/mcp-gateway/issues/192)）
+  - `token` + 任意 `token_type_hint`（`access_token`/`refresh_token`）を受け付け、hint に関わらず両方の失効経路を試行する。未知・期限切れ・二重失効のトークンでも常に `200 OK` を返す（RFC 7009 §2.2）
+  - refresh token の失効は既存の RFC 6819 family 失効（`RevokeFamily`）を再利用し、ファミリー全体を無効化する
+  - builtin mode（`OAUTH_PROVIDER=builtin`）の gateway JWT は、`jti` クレームによる失効 denylist を新設して即時失効に対応。JWT 検証はステートレスなため、TokenStore からのキャッシュ削除だけでは有効期限（デフォルト 90 日）まで生き続けてしまう問題を解消した。denylist は `RefreshTokenStore` の SQLite DB（`tokens.json.refresh.db`）に相乗りし、既存の Sweep サイクルで自然に失効エントリを掃除する
+  - refresh token の失効時は、紐づく現行アクセストークン（gateway JWT）の `jti` も即座に denylist へ登録し、将来のローテーションだけでなく既発行トークンも即時失効させる
+  - `.well-known/oauth-authorization-server` の discovery メタデータに `revocation_endpoint` を追加
+  - non-builtin mode（GitHub トークンを直接使用）ではゲートウェイ側のローカルキャッシュのみ失効させる。GitHub 側のトークン自体の失効 API 呼び出しはスコープ外（別 issue で検討）
+- `Mcp-Session-Id` 双方向透過の回帰テストと診断ログ・トラブルシュート手順を追加（[#182](https://github.com/scottlz0310/mcp-gateway/issues/182)）
+  - `proxy request` / `proxy response` ログに `mcp_session_id_present` フィールドを追加（セッション ID の実値はログに出力しない）
+  - `handler_test.go` に request・response 双方向透過の回帰テスト追加
+  - `docs/operations.md` に正しい MCP 初期化シーケンス・切り分け手順・gateway/upstream エラー判別方法を追加
+- 新ルートオプション `upstream_provider_token=true` を追加し、review-raven 等の upstream へ gateway JWT ではなく該当 subject の provider アクセストークン（builtin mode: GitHub アクセストークン）を注入できるようにした（[#186](https://github.com/scottlz0310/mcp-gateway/issues/186)）
+  - `EnsureFreshAccessTokenForSubject` でサブジェクトの provider アクセストークンを解決し、`ProviderTokenSource` インターフェース経由で proxy へ注入する `NewProviderTokenMiddleware` を新設
+  - `upstream_oauth` / `upstream_bearer_token_env` / `auth=none` との同時指定を fail-closed で拒否
+  - provider token が未解決・失効・rotation failure の場合は `401` + `WWW-Authenticate` でフェールクローズ
+  - upstream `401` 時は provider token 委任経路のみを対象とし、gateway JWT の validation cache を誤って失効させないようにした
+  - `docs/configuration.md` に `upstream_provider_token` オプションと「プロバイダートークン委任」セクションを追加
 
 ### 変更
 
@@ -366,7 +385,8 @@
 - `auth.Handler` から GitHub 固有の HTTP 通信を排除し、`provider.Provider` への委譲に変更。
 - `middleware` のコンテキストキーを `github_login` → `authenticated_user` に rename（内部実装のみ、外部互換維持）。
 
-[Unreleased]: https://github.com/scottlz0310/mcp-gateway/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/scottlz0310/mcp-gateway/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/scottlz0310/mcp-gateway/compare/v0.5.1...v0.5.2
