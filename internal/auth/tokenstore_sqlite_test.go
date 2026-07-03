@@ -26,6 +26,14 @@ func tempSQLitePath(t *testing.T) string {
 // meant to provide. Skipped on Windows where permission bits are not
 // enforced (see the isWindows() pattern used by the other *FilePermissions
 // tests in this package).
+//
+// Whether -wal/-shm exist at all by the time openSQLiteTokenDB returns is a
+// SQLite-driver/platform implementation detail (observed: present on
+// Windows, absent on Linux CI for a freshly-created, otherwise-empty
+// database — thread-owl re-review, PR #196 run 28655143021), matching the
+// chmod loop's own best-effort contract (os.IsNotExist is not an error). So
+// this only asserts the permission on side files that do exist; the main
+// database file is always expected to exist and be checked unconditionally.
 func TestOpenSQLiteTokenDBChmodsWALSideFiles(t *testing.T) {
 	if isWindows() {
 		t.Skip("file permission bits not enforced on Windows")
@@ -37,10 +45,22 @@ func TestOpenSQLiteTokenDBChmodsWALSideFiles(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 
-	for _, suffix := range []string{"", "-wal", "-shm"} {
+	info, statErr := os.Stat(path)
+	if statErr != nil {
+		t.Fatalf("stat %q: %v", path, statErr)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("%s: mode = %o, want 0600", path, perm)
+	}
+
+	for _, suffix := range []string{"-wal", "-shm"} {
 		p := path + suffix
 		info, statErr := os.Stat(p)
 		if statErr != nil {
+			if os.IsNotExist(statErr) {
+				t.Logf("%s: not materialised by this SQLite build/platform at this point; skipping permission check", p)
+				continue
+			}
 			t.Fatalf("stat %q: %v", p, statErr)
 		}
 		if perm := info.Mode().Perm(); perm != 0o600 {
