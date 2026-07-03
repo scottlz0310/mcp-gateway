@@ -470,6 +470,8 @@ gateway:
 
 ローテーションはそれをトリガーしたリクエストに束縛されます。古いトークンでの進行中の upstream 操作は中断されません。`review-raven` の watch goroutine（issue #70）は watch 開始時にキャプチャしたトークンのみを参照します。Phase A は後続リクエストがローテーション済みトークンを使用するようにしますが、バックグラウンドワーカーに遡及的にパッチを当てません。
 
+**builtin mode（`OAUTH_PROVIDER=builtin`）でのローテーション:** クライアントに渡すアクセストークンはゲートウェイ署名の JWT であり、GitHub アクセストークン自体ではないため、上記の動作（`ValidateToken` がキャッシュヒット時にローテーションする）はそのままでは builtin mode に適用できません。代わりに、`EnsureFreshAccessTokenForSubject`（Phase B delegated access、`upstream_provider_token=true` ルートおよび `/internal/v1/whoami` が使用）を呼び出した際にのみローテーションを試行します。ローテーション成功時はキャッシュキー（JWT）自体は変更されず、紐づく GitHub アクセストークン/リフレッシュトークン/有効期限のみが同じ JWT の記録内で更新されます。`ValidateToken`（JWT の検証のみ）はローテーションを一切試行しません — JWT 検証と provider トークンのローテーションは独立した関心事であり、ローテーションが必要になるのは delegated access が GitHub アクセストークンを実際に使う場面のみのためです。ローテーション失敗時の扱いは非 builtin mode と同様です（一時的失敗はメタデータを保持して次回リトライ、永続的失敗はメタデータをクリアして以後 `ErrSubjectNotFound` を返す）。
+
 ### 制限事項
 
 - `MCP_GATEWAY_TOKEN_STORE_PATH` が未設定の場合、ゲートウェイ再起動時にリフレッシュトークンが失われます。再起動をまたいでローテーションを継続するにはトークン状態をディスクに永続化してください。

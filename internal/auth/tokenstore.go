@@ -675,6 +675,28 @@ type RefreshTokenStore interface {
 	// value even for soft-revoked (already-rotated) entries so it can be read
 	// after ReserveRefreshToken, mirroring LookupNonce.
 	LookupProviderAccessToken(refreshToken string) string
+	// SaveProviderRefresh attaches the upstream provider's refresh token and
+	// access-token expiry to an existing refresh-token entry, mirroring
+	// SaveProviderAccessToken. This lets builtin mode (scottlz0310/mcp-gateway#190)
+	// recover the metadata needed to attempt rotation even after the
+	// access-token TokenStore entry (a gateway JWT) has been swept — refresh
+	// tokens carry a 30-day grace period beyond the access token TTL. No-op
+	// when entry is absent or expired.
+	SaveProviderRefresh(refreshToken, providerRefreshToken string, providerAccessExpiry time.Time) error
+	// LookupProviderRefresh returns the provider refresh token and access-token
+	// expiry stored for refreshToken, or ("", zero time) when absent, expired,
+	// or never set. Returns the value even for soft-revoked (already-rotated)
+	// entries so it can be read after ReserveRefreshToken, mirroring
+	// LookupProviderAccessToken.
+	LookupProviderRefresh(refreshToken string) (providerRefreshToken string, providerAccessExpiry time.Time)
+	// LookupFamilyByAccessToken は soft-revoke 済みの predecessor も含め、
+	// accessToken に紐づく未失効の refresh-token family と、その family の
+	// current access token を返す。family がなければ両方とも空文字列を返す。
+	LookupFamilyByAccessToken(accessToken string) (familyID, currentAccessToken string)
+	// UpdateProviderTokensByAccessToken は accessToken を含む未失効 family の active
+	// entry を更新する。gateway refresh が family pointer を新しい JWT へ更新済みでも、
+	// family を追跡することで provider metadata の世代を揃える。
+	UpdateProviderTokensByAccessToken(accessToken, providerAccessToken, providerRefreshToken string, providerAccessExpiry time.Time) error
 	// RevokeJTI adds the JWT ID (jti claim) of a gateway-issued access token
 	// (builtin mode) to the revocation denylist until expiresAt, which should
 	// be the token's own exp claim so the entry is naturally swept once the
@@ -692,13 +714,15 @@ type RefreshTokenStore interface {
 // ── in-memory RefreshTokenStore ───────────────────────────────────────────────
 
 type memRTEntry struct {
-	accessToken         string
-	audience            string
-	familyID            string
-	expiresAt           time.Time
-	revoked             bool
-	nonce               string
-	providerAccessToken string
+	accessToken          string
+	audience             string
+	familyID             string
+	expiresAt            time.Time
+	revoked              bool
+	nonce                string
+	providerAccessToken  string
+	providerRefreshToken string
+	providerAccessExpiry time.Time
 }
 
 // memFamilyPointer records the "current access token" for a family: the
@@ -859,6 +883,70 @@ func (m *memRefreshTokenStore) LookupProviderAccessToken(refreshToken string) st
 	return e.providerAccessToken
 }
 
+func (m *memRefreshTokenStore) SaveProviderRefresh(refreshToken, providerRefreshToken string, providerAccessExpiry time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := tokenKey(refreshToken)
+	e, ok := m.entries[key]
+	if !ok || time.Now().After(e.expiresAt) {
+		return nil
+	}
+	e.providerRefreshToken = providerRefreshToken
+	e.providerAccessExpiry = providerAccessExpiry
+	m.entries[key] = e
+	return nil
+}
+
+func (m *memRefreshTokenStore) LookupProviderRefresh(refreshToken string) (string, time.Time) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	e, ok := m.entries[tokenKey(refreshToken)]
+	if !ok || time.Now().After(e.expiresAt) || e.providerRefreshToken == "" {
+		return "", time.Time{}
+	}
+	return e.providerRefreshToken, e.providerAccessExpiry
+}
+
+func (m *memRefreshTokenStore) LookupFamilyByAccessToken(accessToken string) (string, string) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	now := time.Now()
+	for _, entry := range m.entries {
+		if entry.accessToken != accessToken || entry.familyID == "" || now.After(entry.expiresAt) {
+			continue
+		}
+		current := m.familyCurrentAccessToken[entry.familyID]
+		if now.After(current.expiresAt) {
+			return entry.familyID, ""
+		}
+		return entry.familyID, current.accessToken
+	}
+	return "", ""
+}
+
+func (m *memRefreshTokenStore) UpdateProviderTokensByAccessToken(accessToken, providerAccessToken, providerRefreshToken string, providerAccessExpiry time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := time.Now()
+	families := make(map[string]struct{})
+	for _, entry := range m.entries {
+		if entry.accessToken == accessToken && entry.familyID != "" && !now.After(entry.expiresAt) {
+			families[entry.familyID] = struct{}{}
+		}
+	}
+	for key, entry := range m.entries {
+		_, sameFamily := families[entry.familyID]
+		if entry.revoked || now.After(entry.expiresAt) || (entry.accessToken != accessToken && !sameFamily) {
+			continue
+		}
+		entry.providerAccessToken = providerAccessToken
+		entry.providerRefreshToken = providerRefreshToken
+		entry.providerAccessExpiry = providerAccessExpiry
+		m.entries[key] = entry
+	}
+	return nil
+}
+
 func (m *memRefreshTokenStore) Delete(refreshToken string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -912,13 +1000,15 @@ func (m *memRefreshTokenStore) Sweep() error {
 // appear in the file. The plaintext access token is stored as the value because
 // the gateway must re-present it to the upstream provider on token refresh.
 type fileRTEntry struct {
-	AccessToken         string    `json:"a"`
-	Audience            string    `json:"aud,omitempty"`
-	FamilyID            string    `json:"fid,omitempty"`
-	ExpiresAt           time.Time `json:"e"`
-	Revoked             bool      `json:"rv,omitempty"`
-	Nonce               string    `json:"n,omitempty"`
-	ProviderAccessToken string    `json:"pat,omitempty"`
+	AccessToken          string    `json:"a"`
+	Audience             string    `json:"aud,omitempty"`
+	FamilyID             string    `json:"fid,omitempty"`
+	ExpiresAt            time.Time `json:"e"`
+	Revoked              bool      `json:"rv,omitempty"`
+	Nonce                string    `json:"n,omitempty"`
+	ProviderAccessToken  string    `json:"pat,omitempty"`
+	ProviderRefreshToken string    `json:"prt,omitempty"`
+	ProviderAccessExpiry time.Time `json:"pae,omitempty"`
 }
 
 type fileRefreshTokenStore struct {
@@ -1142,6 +1232,86 @@ func (f *fileRefreshTokenStore) LookupProviderAccessToken(refreshToken string) s
 		return ""
 	}
 	return e.ProviderAccessToken
+}
+
+func (f *fileRefreshTokenStore) SaveProviderRefresh(refreshToken, providerRefreshToken string, providerAccessExpiry time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := tokenKey(refreshToken)
+	entry, ok := f.entries[key]
+	if !ok || time.Now().After(entry.ExpiresAt) {
+		return nil
+	}
+	previous := entry
+	entry.ProviderRefreshToken = providerRefreshToken
+	entry.ProviderAccessExpiry = providerAccessExpiry
+	f.entries[key] = entry
+	if err := f.flush(); err != nil {
+		f.entries[key] = previous
+		return err
+	}
+	return nil
+}
+
+func (f *fileRefreshTokenStore) LookupProviderRefresh(refreshToken string) (string, time.Time) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	e, ok := f.entries[tokenKey(refreshToken)]
+	if !ok || time.Now().After(e.ExpiresAt) || e.ProviderRefreshToken == "" {
+		return "", time.Time{}
+	}
+	return e.ProviderRefreshToken, e.ProviderAccessExpiry
+}
+
+func (f *fileRefreshTokenStore) LookupFamilyByAccessToken(accessToken string) (string, string) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	now := time.Now()
+	for _, entry := range f.entries {
+		if entry.AccessToken != accessToken || entry.FamilyID == "" || now.After(entry.ExpiresAt) {
+			continue
+		}
+		current := f.familyCurrentAccessToken[entry.FamilyID]
+		if now.After(current.expiresAt) {
+			return entry.FamilyID, ""
+		}
+		return entry.FamilyID, current.accessToken
+	}
+	return "", ""
+}
+
+func (f *fileRefreshTokenStore) UpdateProviderTokensByAccessToken(accessToken, providerAccessToken, providerRefreshToken string, providerAccessExpiry time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	now := time.Now()
+	families := make(map[string]struct{})
+	for _, entry := range f.entries {
+		if entry.AccessToken == accessToken && entry.FamilyID != "" && !now.After(entry.ExpiresAt) {
+			families[entry.FamilyID] = struct{}{}
+		}
+	}
+	previous := make(map[string]fileRTEntry)
+	for key, entry := range f.entries {
+		_, sameFamily := families[entry.FamilyID]
+		if entry.Revoked || now.After(entry.ExpiresAt) || (entry.AccessToken != accessToken && !sameFamily) {
+			continue
+		}
+		previous[key] = entry
+		entry.ProviderAccessToken = providerAccessToken
+		entry.ProviderRefreshToken = providerRefreshToken
+		entry.ProviderAccessExpiry = providerAccessExpiry
+		f.entries[key] = entry
+	}
+	if len(previous) == 0 {
+		return nil
+	}
+	if err := f.flush(); err != nil {
+		for key, entry := range previous {
+			f.entries[key] = entry
+		}
+		return err
+	}
+	return nil
 }
 
 func (f *fileRefreshTokenStore) Delete(refreshToken string) error {

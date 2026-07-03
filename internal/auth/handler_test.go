@@ -1549,6 +1549,18 @@ func (d *deleteFailRefreshStore) SaveProviderAccessToken(rt, pat string) error {
 func (d *deleteFailRefreshStore) LookupProviderAccessToken(rt string) string {
 	return d.inner.LookupProviderAccessToken(rt)
 }
+func (d *deleteFailRefreshStore) SaveProviderRefresh(rt, prt string, exp time.Time) error {
+	return d.inner.SaveProviderRefresh(rt, prt, exp)
+}
+func (d *deleteFailRefreshStore) LookupProviderRefresh(rt string) (string, time.Time) {
+	return d.inner.LookupProviderRefresh(rt)
+}
+func (d *deleteFailRefreshStore) LookupFamilyByAccessToken(at string) (string, string) {
+	return d.inner.LookupFamilyByAccessToken(at)
+}
+func (d *deleteFailRefreshStore) UpdateProviderTokensByAccessToken(at, pat, prt string, exp time.Time) error {
+	return d.inner.UpdateProviderTokensByAccessToken(at, pat, prt, exp)
+}
 func (d *deleteFailRefreshStore) RevokeJTI(jti string, exp time.Time) error {
 	return d.inner.RevokeJTI(jti, exp)
 }

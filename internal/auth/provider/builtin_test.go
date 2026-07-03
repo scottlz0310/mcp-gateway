@@ -2,7 +2,6 @@ package provider
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -80,13 +79,36 @@ func TestBuiltinExchangeCode(t *testing.T) {
 	}
 }
 
-func TestBuiltinRefreshTokenNotSupported(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+func TestBuiltinRefreshTokenDelegatesToGitHub(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/login/oauth/access_token" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("ParseForm: %v", err)
+		}
+		if got := r.FormValue("refresh_token"); got != "gh-refresh-tok" {
+			t.Errorf("refresh_token: got %q, want %q", got, "gh-refresh-tok")
+		}
+		if got := r.FormValue("grant_type"); got != "refresh_token" {
+			t.Errorf("grant_type: got %q, want %q", got, "refresh_token")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"gh-tok-new","refresh_token":"gh-refresh-new","expires_in":28800}`))
+	}))
 	defer srv.Close()
 	p := newBuiltinFromServer(t, srv)
-	_, err := p.RefreshToken(context.Background(), "some-token")
-	if !errors.Is(err, ErrRefreshNotSupported) {
-		t.Errorf("RefreshToken: expected ErrRefreshNotSupported, got %v", err)
+	resp, err := p.RefreshToken(context.Background(), "gh-refresh-tok")
+	if err != nil {
+		t.Fatalf("RefreshToken: %v", err)
+	}
+	if resp.AccessToken != "gh-tok-new" {
+		t.Errorf("AccessToken: got %q, want %q", resp.AccessToken, "gh-tok-new")
+	}
+	if resp.RefreshToken != "gh-refresh-new" {
+		t.Errorf("RefreshToken: got %q, want %q", resp.RefreshToken, "gh-refresh-new")
 	}
 }
 
