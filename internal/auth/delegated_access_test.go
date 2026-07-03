@@ -546,3 +546,190 @@ func TestEnsureFreshAccessTokenForSubject_BuiltinLegacyRecordWithoutProviderToke
 		t.Fatalf("err: got %v, want ErrSubjectNotFound (force re-auth for pre-fix JWTs)", err)
 	}
 }
+
+// ── builtin-mode rotation (scottlz0310/mcp-gateway#190) ─────────────────────
+
+// newDelegatedBuiltinRotationTestHandler builds a builtin-mode Handler with
+// GitHub refresh rotation enabled, wired to a Mock provider whose
+// ExchangeCode issues an expiring GitHub token (RefreshToken +
+// AccessTokenExpiresIn) and whose RefreshToken is refreshFunc. Tests drive
+// the full OAuth flow via runBuiltinFullFlow so that the resulting
+// TokenRecord carries real provider refresh metadata exactly as production
+// tokenAuthCode would populate it, then exercise
+// EnsureFreshAccessTokenForSubject's builtin rotation path against it.
+func newDelegatedBuiltinRotationTestHandler(t *testing.T, exchangeAccessToken, exchangeRefreshToken string, exchangeExpiresIn time.Duration, refreshFunc func(context.Context, string) (provider.TokenResponse, error)) *Handler {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate RSA key: %v", err)
+	}
+	p := &provider.Mock{
+		NameValue:     "builtin",
+		ClientIDValue: "builtin-client-id",
+		ScopesValue:   "read:user,user:email",
+		ExchangeCodeFunc: func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{
+				AccessToken:          exchangeAccessToken,
+				RefreshToken:         exchangeRefreshToken,
+				AccessTokenExpiresIn: exchangeExpiresIn,
+			}, nil
+		},
+		ValidateFunc: func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Subject: "alice"}, nil
+		},
+		RefreshTokenFunc: refreshFunc,
+	}
+	h, err := NewHandler(Config{
+		BaseURL:              "http://localhost:8080",
+		SessionTTL:           10 * time.Minute,
+		CacheTTL:             5 * time.Minute,
+		ExpiresIn:            90 * 24 * time.Hour,
+		OIDCPrivateKey:       key,
+		GitHubRefreshEnabled: true,
+		GitHubRefreshLeeway:  5 * time.Minute,
+	}, p)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	return h
+}
+
+// TestEnsureFreshAccessTokenForSubject_BuiltinRotationSucceeds verifies that
+// builtin-mode rotation refreshes the GitHub access token in place — the
+// gateway JWT's TokenRecord.ProviderAccessToken is updated — while the JWT
+// itself (the TokenStore cache key and the value the client holds) stays
+// valid and unchanged.
+func TestEnsureFreshAccessTokenForSubject_BuiltinRotationSucceeds(t *testing.T) {
+	h := newDelegatedBuiltinRotationTestHandler(t, "gho_original", "ghr_original", 30*time.Second,
+		func(_ context.Context, rt string) (provider.TokenResponse, error) {
+			if rt != "ghr_original" {
+				t.Errorf("RefreshToken called with %q, want %q", rt, "ghr_original")
+			}
+			return provider.TokenResponse{
+				AccessToken:          "gho_rotated",
+				RefreshToken:         "ghr_rotated",
+				AccessTokenExpiresIn: 8 * time.Hour,
+			}, nil
+		})
+	_, jwt := runBuiltinFullFlow(t, h, "alice")
+	if jwt == "" {
+		t.Fatal("runBuiltinFullFlow: empty access_token in token response")
+	}
+
+	res, err := h.EnsureFreshAccessTokenForSubject(context.Background(), "alice")
+	if err != nil {
+		t.Fatalf("EnsureFreshAccessTokenForSubject: %v", err)
+	}
+	if res.AccessToken != "gho_rotated" {
+		t.Errorf("access token: got %q, want rotated provider token %q", res.AccessToken, "gho_rotated")
+	}
+	if time.Until(res.ProviderAccessExpiry) < 1*time.Hour {
+		t.Errorf("rotated expiry too close: %v", res.ProviderAccessExpiry)
+	}
+
+	// The cache key (JWT) must be unchanged: the client-facing token from the
+	// OAuth flow is still valid and resolves to the same subject.
+	sub, rotated, err := h.ValidateToken(context.Background(), jwt, "")
+	if err != nil {
+		t.Fatalf("ValidateToken(jwt) after builtin rotation: %v", err)
+	}
+	if sub != "alice" {
+		t.Errorf("ValidateToken subject: got %q, want %q", sub, "alice")
+	}
+	if rotated != "" {
+		t.Errorf("ValidateToken must never surface a rotated token to the client in builtin mode, got %q", rotated)
+	}
+
+	// The record under the JWT itself must reflect the rotated provider token.
+	rec, ok := h.store.LookupToken(jwt)
+	if !ok {
+		t.Fatal("expected JWT record to still exist after rotation")
+	}
+	if rec.ProviderAccessToken != "gho_rotated" {
+		t.Errorf("record.ProviderAccessToken: got %q, want %q", rec.ProviderAccessToken, "gho_rotated")
+	}
+	if rec.ProviderRefreshToken != "ghr_rotated" {
+		t.Errorf("record.ProviderRefreshToken: got %q, want %q", rec.ProviderRefreshToken, "ghr_rotated")
+	}
+}
+
+// TestEnsureFreshAccessTokenForSubject_BuiltinRotationTransientFailure
+// verifies that a transient provider error (5xx/network) surfaces
+// ErrRotationFailed without marking the token permanently dead — the
+// metadata must remain intact so the next call can retry.
+func TestEnsureFreshAccessTokenForSubject_BuiltinRotationTransientFailure(t *testing.T) {
+	h := newDelegatedBuiltinRotationTestHandler(t, "gho_dying", "ghr_dying", 30*time.Second,
+		func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{}, &provider.UpstreamError{Err: errors.New("502 from github")}
+		})
+	_, jwt := runBuiltinFullFlow(t, h, "alice")
+
+	_, err := h.EnsureFreshAccessTokenForSubject(context.Background(), "alice")
+	if !errors.Is(err, ErrRotationFailed) {
+		t.Fatalf("err: got %v, want ErrRotationFailed", err)
+	}
+	rec, ok := h.store.LookupToken(jwt)
+	if !ok {
+		t.Fatal("expected JWT record to still exist after transient failure")
+	}
+	if rec.ProviderRefreshToken != "ghr_dying" {
+		t.Errorf("transient failure must not clear refresh metadata, got %q", rec.ProviderRefreshToken)
+	}
+}
+
+// TestEnsureFreshAccessTokenForSubject_BuiltinRotationPermanentlyFailed
+// verifies that a permanent provider rejection (bad_refresh_token) clears the
+// rotation metadata and evicts the subject index entry via
+// MarkRotationPermanentlyFailed, so a subsequent call returns
+// ErrSubjectNotFound instead of repeatedly retrying a dead refresh token or
+// handing out the now-unusable cached bearer.
+func TestEnsureFreshAccessTokenForSubject_BuiltinRotationPermanentlyFailed(t *testing.T) {
+	h := newDelegatedBuiltinRotationTestHandler(t, "gho_poisoned", "ghr_poisoned", 30*time.Second,
+		func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{}, errors.New("bad_refresh_token")
+		})
+	_, jwt := runBuiltinFullFlow(t, h, "alice")
+
+	_, err := h.EnsureFreshAccessTokenForSubject(context.Background(), "alice")
+	if !errors.Is(err, ErrRotationFailed) {
+		t.Fatalf("first call err: got %v, want ErrRotationFailed", err)
+	}
+	rec, ok := h.store.LookupToken(jwt)
+	if !ok {
+		t.Fatal("token entry should still exist (only metadata is cleared)")
+	}
+	if rec.ProviderRefreshToken != "" || !rec.ProviderAccessExpiry.IsZero() {
+		t.Errorf("expected provider refresh metadata cleared, got refresh=%q expiry=%v",
+			rec.ProviderRefreshToken, rec.ProviderAccessExpiry)
+	}
+
+	// Second call: the subject index entry was evicted, so the dead bearer is
+	// never returned again.
+	_, err = h.EnsureFreshAccessTokenForSubject(context.Background(), "alice")
+	if !errors.Is(err, ErrSubjectNotFound) {
+		t.Fatalf("second call err: got %v, want ErrSubjectNotFound", err)
+	}
+}
+
+// TestEnsureFreshAccessTokenForSubject_BuiltinCachedOutsideLeeway verifies
+// that a JWT whose provider expiry is well past the leeway window returns
+// the cached provider token as-is without invoking rotation.
+func TestEnsureFreshAccessTokenForSubject_BuiltinCachedOutsideLeeway(t *testing.T) {
+	h := newDelegatedBuiltinRotationTestHandler(t, "gho_fresh", "ghr_fresh", 1*time.Hour,
+		func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			t.Fatal("RefreshToken should not be called when expiry is outside leeway")
+			return provider.TokenResponse{}, nil
+		})
+	_, jwt := runBuiltinFullFlow(t, h, "alice")
+
+	res, err := h.EnsureFreshAccessTokenForSubject(context.Background(), "alice")
+	if err != nil {
+		t.Fatalf("EnsureFreshAccessTokenForSubject: %v", err)
+	}
+	if res.AccessToken != "gho_fresh" {
+		t.Errorf("access token: got %q, want %q", res.AccessToken, "gho_fresh")
+	}
+	if _, ok := h.store.LookupToken(jwt); !ok {
+		t.Fatal("expected JWT record to still exist")
+	}
+}

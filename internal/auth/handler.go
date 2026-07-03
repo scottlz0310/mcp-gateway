@@ -624,6 +624,11 @@ func (h *Handler) tokenAuthCode(w http.ResponseWriter, r *http.Request) {
 		h.store.RecordProviderAccessToken(gatewayToken, result.AccessToken)
 		h.store.SaveTokenNonce(gatewayToken, result.Nonce)
 		h.store.SaveTokenJti(gatewayToken, jti)
+		// Provider refresh metadata is keyed by the gateway JWT (not
+		// result.AccessToken) so that builtin-mode rotation (#190) can find it
+		// via the same cache key ValidateToken/EnsureFreshAccessTokenForSubject
+		// use to look up this entry.
+		h.persistProviderRefresh(gatewayToken, result.ProviderRefreshToken, result.ProviderAccessExpiry)
 		familyID, fidErr := generateCode()
 		if fidErr != nil {
 			slog.Warn("failed to generate refresh token family ID", "err", fidErr)
@@ -635,6 +640,9 @@ func (h *Handler) tokenAuthCode(w http.ResponseWriter, r *http.Request) {
 		}
 		h.store.SaveRefreshTokenNonce(refreshToken, result.Nonce)
 		h.store.SaveRefreshTokenProviderAccessToken(refreshToken, result.AccessToken)
+		if h.cfg.GitHubRefreshEnabled {
+			h.store.SaveRefreshTokenProviderRefresh(refreshToken, result.ProviderRefreshToken, result.ProviderAccessExpiry)
+		}
 		h.writeTokenResponse(w, gatewayToken, result.Scope, refreshToken, result.Subject, result.Nonce, result.ClientID)
 		h.auditSuccess("token_exchange", "authorization code exchange completed (builtin)", http.StatusOK)
 		return
@@ -724,7 +732,11 @@ func (h *Handler) tokenDeviceGrant(w http.ResponseWriter, r *http.Request) {
 			h.store.RecordProviderAccessToken(token, completed.AccessToken)
 			h.store.SaveTokenJti(token, jti)
 		}
-		h.persistProviderRefresh(completed.AccessToken, completed.ProviderRefreshToken, completed.ProviderAccessExpiry)
+		// token is the cache key (the gateway JWT in builtin mode, the GitHub
+		// access token itself otherwise) — using completed.AccessToken
+		// unconditionally here would silently no-op in builtin mode, since
+		// that value is never itself a TokenStore cache key (#190).
+		h.persistProviderRefresh(token, completed.ProviderRefreshToken, completed.ProviderAccessExpiry)
 		familyID, fidErr := generateCode()
 		if fidErr != nil {
 			slog.Warn("failed to generate refresh token family ID (device)", "err", fidErr)
@@ -736,6 +748,9 @@ func (h *Handler) tokenDeviceGrant(w http.ResponseWriter, r *http.Request) {
 		}
 		if h.isBuiltinMode() {
 			h.store.SaveRefreshTokenProviderAccessToken(refreshToken, completed.AccessToken)
+			if h.cfg.GitHubRefreshEnabled {
+				h.store.SaveRefreshTokenProviderRefresh(refreshToken, completed.ProviderRefreshToken, completed.ProviderAccessExpiry)
+			}
 		}
 		h.writeTokenResponse(w, token, completed.Scope, refreshToken, completed.Subject, "", completed.ClientID)
 		h.auditSuccess("token_exchange", "device token exchange completed", http.StatusOK)
@@ -813,6 +828,10 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 	// — refresh tokens carry a 30-day grace period beyond the access token
 	// TTL — so the refresh token is the only reliable place to read it from.
 	providerAccessToken := h.store.LookupRefreshTokenProviderAccessToken(rt)
+	// Likewise, recover the provider refresh token / access-token expiry
+	// (builtin mode rotation, #190) from the refresh token before it is
+	// soft-revoked, for the same reason as providerAccessToken above.
+	providerRefreshToken, providerAccessExpiry := h.store.LookupRefreshTokenProviderRefresh(rt)
 
 	// Atomically reserve (remove) the token. Concurrent callers presenting the
 	// same token will fail here, preventing double-rotation.
@@ -882,6 +901,9 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 		if providerAccessToken != "" {
 			h.store.RecordProviderAccessToken(newGatewayToken, providerAccessToken)
 		}
+		// Carry rotation metadata forward under the new gateway JWT so the
+		// next EnsureFreshAccessTokenForSubject call can still rotate (#190).
+		h.persistProviderRefresh(newGatewayToken, providerRefreshToken, providerAccessExpiry)
 		h.store.SaveTokenNonce(newGatewayToken, nonce)
 		h.store.SaveTokenJti(newGatewayToken, newJti)
 		// Propagate the same familyID so the token lineage remains traceable.
@@ -919,6 +941,9 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 		h.store.SaveRefreshTokenNonce(newRT, nonce)
 		if providerAccessToken != "" {
 			h.store.SaveRefreshTokenProviderAccessToken(newRT, providerAccessToken)
+		}
+		if h.cfg.GitHubRefreshEnabled && providerRefreshToken != "" {
+			h.store.SaveRefreshTokenProviderRefresh(newRT, providerRefreshToken, providerAccessExpiry)
 		}
 		h.writeTokenResponse(w, newGatewayToken, "", newRT, sub, nonce, r.FormValue("client_id"))
 		h.auditSuccess("refresh", "refresh token exchange completed (builtin)", http.StatusOK)
@@ -1488,6 +1513,136 @@ func (h *Handler) runGitHubRotation(ctx context.Context, token, audience string)
 	}
 }
 
+// tryBuiltinRotationWithAttempt is the builtin-mode counterpart of
+// tryGitHubRotationWithAttempt (scottlz0310/mcp-gateway#190). In builtin mode
+// the TokenStore cache key is a gateway-issued JWT, not the GitHub provider
+// token, so rotation cannot replace the cache key the way runGitHubRotation
+// does: it must update the existing entry's
+// ProviderAccessToken/ProviderRefreshToken/ProviderAccessExpiry fields in
+// place instead. Used exclusively by EnsureFreshAccessTokenForSubject —
+// ValidateToken's cache-hit branch deliberately never calls this (see its
+// comment there): JWT verification and provider-token rotation are
+// independent concerns in builtin mode, and rotation is only needed when a
+// delegated-access caller is about to use the provider token itself.
+func (h *Handler) tryBuiltinRotationWithAttempt(ctx context.Context, token string, record TokenRecord) rotationAttemptResult {
+	if !h.cfg.GitHubRefreshEnabled {
+		return rotationAttemptResult{}
+	}
+	if record.ProviderRefreshToken == "" || record.ProviderAccessExpiry.IsZero() {
+		return rotationAttemptResult{}
+	}
+	if time.Until(record.ProviderAccessExpiry) > h.githubRefreshLeeway() {
+		return rotationAttemptResult{}
+	}
+
+	// Shares the same singleflight group and key scheme as
+	// tryGitHubRotationWithAttempt: the key is derived from the gateway JWT
+	// here (rather than a provider token), but tokenKey's SHA-256 hashing
+	// keeps the two token spaces from colliding, and there is no legitimate
+	// reason for a builtin-mode rotation and a non-builtin-mode rotation to
+	// ever race on the same key.
+	sfKey := tokenKey(token)
+	v, _, _ := h.rotationGroup.Do(sfKey, func() (any, error) {
+		return h.runBuiltinRotation(ctx, token), nil
+	})
+	h.rotationGroup.Forget(sfKey)
+	res, _ := v.(rotationResult)
+	return rotationAttemptResult{rotationResult: res, attempted: true}
+}
+
+// runBuiltinRotation performs a single builtin-mode rotation attempt under
+// the singleflight leader. The caller must guarantee that the gate is on and
+// the cached expiry is within the leeway window. Mirrors runGitHubRotation's
+// error classification, but on success updates token's own record in place
+// (rotationResult.newToken echoes token unchanged) instead of caching the
+// rotated provider token under a new key.
+func (h *Handler) runBuiltinRotation(ctx context.Context, token string) rotationResult {
+	// Re-read the cache entry: a previous leader on this same key may have
+	// just completed a rotation, in which case the expiry is now outside the
+	// leeway window and there is nothing more to do.
+	record, cached := h.store.LookupToken(token)
+	if !cached {
+		return rotationResult{noOp: true}
+	}
+	if record.ProviderRefreshToken == "" || record.ProviderAccessExpiry.IsZero() {
+		// Metadata cleared (either by a previous permanent failure on this
+		// same call's first attempt, or by a concurrent permanent failure).
+		return rotationResult{}
+	}
+	if time.Until(record.ProviderAccessExpiry) > h.githubRefreshLeeway() {
+		// Concurrent rotation moved the expiry outside the leeway window.
+		return rotationResult{noOp: true}
+	}
+	tokens, err := h.provider.RefreshToken(ctx, record.ProviderRefreshToken)
+	if err != nil {
+		if errors.Is(err, provider.ErrRefreshNotSupported) {
+			h.auditFailure("rotation", "not_supported", "provider token rotation is not supported", err, 0, tokenFingerprint(token))
+			h.store.ClearProviderRefresh(token)
+			return rotationResult{}
+		}
+		var upstreamErr *provider.UpstreamError
+		if errors.As(err, &upstreamErr) {
+			h.auditFailure("rotation", "provider_error", "provider token rotation unavailable", err, 0, tokenFingerprint(token))
+			slog.Warn("rotation_failed",
+				"token_hash", tokenFingerprint(token),
+				"err", err,
+				"action", "retry_next",
+			)
+			return rotationResult{}
+		}
+		// Permanent failure (bad_refresh_token, 4xx, malformed response,
+		// etc.). MarkRotationPermanentlyFailed both clears the poisoned
+		// metadata and evicts the subject index entry so
+		// EnsureFreshAccessTokenForSubject's lenient branch never hands out
+		// this dead bearer again.
+		h.auditFailure("rotation", "provider_error", "provider token rotation rejected", err, 0, tokenFingerprint(token))
+		slog.Warn("rotation_failed",
+			"token_hash", tokenFingerprint(token),
+			"err", err,
+			"action", "metadata_cleared",
+		)
+		h.store.MarkRotationPermanentlyFailed(token)
+		return rotationResult{}
+	}
+	if tokens.AccessToken == "" {
+		h.auditFailure("rotation", "malformed_response", "provider token rotation returned no access token", nil, 0, tokenFingerprint(token))
+		slog.Warn("rotation_failed",
+			"token_hash", tokenFingerprint(token),
+			"err", "empty access_token from provider",
+			"action", "metadata_cleared",
+		)
+		h.store.MarkRotationPermanentlyFailed(token)
+		return rotationResult{}
+	}
+	newRefresh := tokens.RefreshToken
+	if newRefresh == "" {
+		// Per RFC 6749 §6 a provider MAY omit a new refresh_token, in which
+		// case the previous one remains valid.
+		newRefresh = record.ProviderRefreshToken
+	}
+	newAccessExpiry := providerAccessExpiry(tokens.AccessTokenExpiresIn)
+	// Unlike runGitHubRotation, the cache key (the gateway JWT) never
+	// changes: update the existing entry's provider fields in place.
+	h.store.RecordProviderAccessToken(token, tokens.AccessToken)
+	h.persistProviderRefresh(token, newRefresh, newAccessExpiry)
+	slog.Info("github access token rotated (builtin)",
+		"jwt_hash", tokenFingerprint(token),
+	)
+	h.recordAudit(authaudit.Event{
+		Phase:      "rotation",
+		Provider:   h.provider.Name(),
+		Result:     "success",
+		HTTPStatus: http.StatusOK,
+		Message:    "provider access token rotated (builtin)",
+		TokenHash:  tokenFingerprint(token),
+	})
+	return rotationResult{
+		newToken: token,
+		subject:  record.Subject,
+		ok:       true,
+	}
+}
+
 // InvalidateCachedToken delegates cache invalidation to the underlying store.
 func (h *Handler) InvalidateCachedToken(token string) {
 	h.store.InvalidateCachedToken(token)
@@ -1534,9 +1689,10 @@ var ErrRotationFailed = errors.New("auth: rotation failed for delegated access")
 // scottlz0310/mcp-gateway#188), and returns ErrSubjectNotFound when that
 // field is empty (e.g. a JWT issued before this field existed) rather than
 // falling through to the non-builtin logic below, which would leak the JWT.
-// Builtin mode does not yet support rotation (tracked as a follow-up); the
-// returned AccessToken/ProviderAccessExpiry reflect whatever was recorded at
-// token-issuance or refresh time.
+// Builtin mode rotates via tryBuiltinRotationWithAttempt (scottlz0310/mcp-gateway#190),
+// which updates rawToken's own record in place rather than replacing the
+// cache key — the returned AccessToken/ProviderAccessExpiry always come from
+// re-reading that record after the rotation attempt.
 //
 // Returns ErrSubjectNotFound when no cached token exists for subject (including
 // after a permanent rotation failure: MarkRotationPermanentlyFailed removes the
@@ -1562,9 +1718,52 @@ func (h *Handler) EnsureFreshAccessTokenForSubject(ctx context.Context, subject 
 		if record.ProviderAccessToken == "" {
 			return DelegatedAccessResult{}, ErrSubjectNotFound
 		}
+		rotRes := h.tryBuiltinRotationWithAttempt(ctx, rawToken, record)
+		if rotRes.ok {
+			// The cache key (rawToken, the JWT) never changes on builtin
+			// rotation — re-read the record to pick up the freshly rotated
+			// provider fields runBuiltinRotation wrote in place.
+			if newRec, newOK := h.store.LookupToken(rawToken); newOK {
+				return DelegatedAccessResult{
+					AccessToken:          newRec.ProviderAccessToken,
+					ProviderAccessExpiry: newRec.ProviderAccessExpiry,
+					Scopes:               parseScopes(h.provider.Scopes()),
+				}, nil
+			}
+			return DelegatedAccessResult{}, ErrSubjectNotFound
+		}
+		if rotRes.attempted {
+			if rotRes.noOp {
+				// Concurrent rotation already refreshed this record (or it
+				// was invalidated). Re-read and treat a still-present record
+				// as freshly rotated, mirroring the non-builtin branch below.
+				if freshRec, stillCached := h.store.LookupToken(rawToken); stillCached && freshRec.ProviderAccessToken != "" {
+					return DelegatedAccessResult{
+						AccessToken:          freshRec.ProviderAccessToken,
+						ProviderAccessExpiry: freshRec.ProviderAccessExpiry,
+						Scopes:               parseScopes(h.provider.Scopes()),
+					}, nil
+				}
+			}
+			// All rotation preconditions were satisfied but the refresh
+			// attempt did not yield a fresh token — see the non-builtin
+			// branch's identical comment for why we do not re-evaluate the
+			// leeway window here.
+			return DelegatedAccessResult{}, ErrRotationFailed
+		}
+		// Lenient branch: rotation was not applicable (refresh gate
+		// disabled, no provider refresh metadata, or expiry comfortably
+		// outside leeway). Re-read for the most current expiry hint.
+		freshRec, stillCached := h.store.LookupToken(rawToken)
+		if !stillCached || freshRec.ProviderAccessToken == "" {
+			return DelegatedAccessResult{}, ErrSubjectNotFound
+		}
+		if h.store.IsRotationPermanentlyFailed(rawToken) {
+			return DelegatedAccessResult{}, ErrRotationFailed
+		}
 		return DelegatedAccessResult{
-			AccessToken:          record.ProviderAccessToken,
-			ProviderAccessExpiry: record.ProviderAccessExpiry,
+			AccessToken:          freshRec.ProviderAccessToken,
+			ProviderAccessExpiry: freshRec.ProviderAccessExpiry,
 			Scopes:               parseScopes(h.provider.Scopes()),
 		}, nil
 	}

@@ -153,6 +153,97 @@ func TestSQLiteRefreshTokenStoreProviderAccessTokenPersists(t *testing.T) {
 	}
 }
 
+// TestSQLiteRefreshTokenStoreProviderRefreshPersists verifies that the
+// provider refresh token and access-token expiry (builtin-mode rotation,
+// #190, recovered via SaveProviderRefresh/LookupProviderRefresh) survive a
+// store reopen.
+func TestSQLiteRefreshTokenStoreProviderRefreshPersists(t *testing.T) {
+	path := tempSQLitePath(t)
+	exp := time.Now().Add(time.Hour)
+	prExpiry := time.Now().Add(8 * time.Hour).Truncate(time.Second)
+
+	rts1, err := NewSQLiteRefreshTokenStore(path)
+	if err != nil {
+		t.Fatalf("open 1: %v", err)
+	}
+	closeSQLiteStore(t, rts1)
+	if err := rts1.Save("rt-prt-persist", "jwt-persist", "aud", "fid-prt", exp); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := rts1.SaveProviderRefresh("rt-prt-persist", "ghr_persist1", prExpiry); err != nil {
+		t.Fatalf("SaveProviderRefresh: %v", err)
+	}
+	rts1.(*sqliteRefreshTokenStore).Close() //nolint — close before reopening
+
+	rts2, err := NewSQLiteRefreshTokenStore(path)
+	if err != nil {
+		t.Fatalf("open 2: %v", err)
+	}
+	closeSQLiteStore(t, rts2)
+	gotPRT, gotPRExpiry := rts2.LookupProviderRefresh("rt-prt-persist")
+	if gotPRT != "ghr_persist1" {
+		t.Errorf("LookupProviderRefresh after reopen: providerRefreshToken got %q, want %q", gotPRT, "ghr_persist1")
+	}
+	if !gotPRExpiry.Equal(prExpiry) {
+		t.Errorf("LookupProviderRefresh after reopen: providerAccessExpiry got %v, want %v", gotPRExpiry, prExpiry)
+	}
+}
+
+// TestSQLiteRefreshTokenStoreProviderRefreshColumnMigration verifies that
+// opening a database created before the provider_refresh_token/
+// provider_access_expiry columns existed does not fail, and that the columns
+// become usable afterward (idempotent ALTER TABLE ADD COLUMN).
+func TestSQLiteRefreshTokenStoreProviderRefreshColumnMigration(t *testing.T) {
+	path := tempSQLitePath(t)
+
+	// Simulate a pre-#190 database: create the table without the
+	// provider_refresh_token/provider_access_expiry columns.
+	preSchema := `
+CREATE TABLE IF NOT EXISTS refresh_tokens (
+	token_hash   TEXT    PRIMARY KEY,
+	access_token TEXT    NOT NULL,
+	audience     TEXT    NOT NULL DEFAULT '',
+	family_id    TEXT    NOT NULL DEFAULT '',
+	expires_at   INTEGER NOT NULL,
+	revoked      INTEGER NOT NULL DEFAULT 0,
+	nonce        TEXT    NOT NULL DEFAULT '',
+	provider_access_token TEXT NOT NULL DEFAULT ''
+);`
+	db, err := sql.Open("sqlite", path+"?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=on")
+	if err != nil {
+		t.Fatalf("opening raw sqlite db: %v", err)
+	}
+	if _, err := db.Exec(preSchema); err != nil {
+		t.Fatalf("creating pre-migration schema: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("closing raw sqlite db: %v", err)
+	}
+
+	// NewSQLiteRefreshTokenStore must migrate the schema without error and
+	// the new columns must be immediately usable.
+	rts, err := NewSQLiteRefreshTokenStore(path)
+	if err != nil {
+		t.Fatalf("NewSQLiteRefreshTokenStore on pre-migration db: %v", err)
+	}
+	closeSQLiteStore(t, rts)
+	exp := time.Now().Add(time.Hour)
+	prExpiry := time.Now().Add(8 * time.Hour).Truncate(time.Second)
+	if err := rts.Save("rt-migrated", "at-migrated", "aud", "fid-migrated", exp); err != nil {
+		t.Fatalf("Save on migrated schema: %v", err)
+	}
+	if err := rts.SaveProviderRefresh("rt-migrated", "ghr_migrated", prExpiry); err != nil {
+		t.Fatalf("SaveProviderRefresh on migrated schema: %v", err)
+	}
+	gotPRT, gotPRExpiry := rts.LookupProviderRefresh("rt-migrated")
+	if gotPRT != "ghr_migrated" {
+		t.Errorf("LookupProviderRefresh on migrated schema: got %q, want %q", gotPRT, "ghr_migrated")
+	}
+	if !gotPRExpiry.Equal(prExpiry) {
+		t.Errorf("LookupProviderRefresh on migrated schema: expiry got %v, want %v", gotPRExpiry, prExpiry)
+	}
+}
+
 // TestSQLiteRefreshTokenStoreProviderAccessTokenColumnMigration verifies that
 // opening a database created before the provider_access_token column existed
 // does not fail, and that the column becomes usable afterward (idempotent

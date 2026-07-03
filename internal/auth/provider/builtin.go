@@ -39,10 +39,12 @@ func (p *builtinProvider) ExchangeCode(ctx context.Context, code string) (TokenR
 	return p.github.ExchangeCode(ctx, code)
 }
 
-// RefreshToken is not used in builtin mode. Gateway refresh token rotation is
-// managed entirely by the handler; GitHub refresh tokens are never persisted.
-func (p *builtinProvider) RefreshToken(_ context.Context, _ string) (TokenResponse, error) {
-	return TokenResponse{}, ErrRefreshNotSupported
+// RefreshToken delegates to the underlying GitHub provider so that the
+// handler's builtin-mode rotation path (which operates on the provider
+// refresh token stored alongside the gateway JWT, not on the JWT itself) can
+// obtain a fresh GitHub access token. See scottlz0310/mcp-gateway#190.
+func (p *builtinProvider) RefreshToken(ctx context.Context, refreshToken string) (TokenResponse, error) {
+	return p.github.RefreshToken(ctx, refreshToken)
 }
 
 // ValidateToken resolves the caller's identity from the GitHub API using the

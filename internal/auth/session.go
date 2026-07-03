@@ -790,6 +790,27 @@ func (s *Store) LookupRefreshTokenProviderAccessToken(refreshToken string) strin
 	return s.refreshStore.LookupProviderAccessToken(refreshToken)
 }
 
+// SaveRefreshTokenProviderRefresh attaches the upstream provider's refresh
+// token and access-token expiry to an existing refresh-token entry, mirroring
+// SaveRefreshTokenProviderAccessToken. Builtin mode (scottlz0310/mcp-gateway#190)
+// uses this so rotation metadata survives past the access-token TokenStore
+// entry's (a gateway JWT) sweep — refresh tokens carry a 30-day grace period
+// beyond the access token TTL. No-op when entry is absent or expired.
+func (s *Store) SaveRefreshTokenProviderRefresh(refreshToken, providerRefreshToken string, providerAccessExpiry time.Time) {
+	if err := s.refreshStore.SaveProviderRefresh(refreshToken, providerRefreshToken, providerAccessExpiry); err != nil {
+		slog.Warn("refresh token store provider refresh save failed", "err", err)
+	}
+}
+
+// LookupRefreshTokenProviderRefresh returns the provider refresh token and
+// access-token expiry stored for refreshToken, or ("", zero time) when
+// absent, expired, or never set. Reads even soft-revoked entries
+// (already rotated by ReserveRefreshToken), mirroring
+// LookupRefreshTokenProviderAccessToken.
+func (s *Store) LookupRefreshTokenProviderRefresh(refreshToken string) (string, time.Time) {
+	return s.refreshStore.LookupProviderRefresh(refreshToken)
+}
+
 // LookupAnyRefreshToken looks up refreshToken including soft-revoked
 // (already-rotated) entries that have not yet expired. Used by POST /revoke
 // (RFC 7009) to resolve token_type_hint=refresh_token: an already-rotated

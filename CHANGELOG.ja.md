@@ -22,6 +22,14 @@
   - `ValidateToken` は builtin mode ではキャッシュヒット時に非 builtin 用の GitHub rotation 経路を呼ばなくなった。将来 builtin mode の rotation 対応が入った際に顕在化しうるトークン漏洩リスクを事前に塞ぐもの（rotation 自体は follow-up として未実装 — `builtinProvider.RefreshToken` は引き続き `ErrRefreshNotSupported` を返す）。
   - `docs/configuration.md` — builtin mode では `github_refresh_enabled` の設定に関わらず、GitHub アクセストークンが常に `tokens.json` / refresh token ストアに永続化される旨を追記。また builtin mode の delegated access には永続トークンストアが実質必須である旨を制限事項に追記（in-memory ストア構成では JWT に紐付けた GitHub アクセストークンがトークンキャッシュ TTL 経過または再起動で失われ、JWT が有効なまま delegated access だけが再認証を要求し続けるため）。
 
+### 追加
+
+- builtin mode（`OAUTH_PROVIDER=builtin`）で GitHub provider アクセストークンの自動 rotation に対応（[#190](https://github.com/scottlz0310/mcp-gateway/issues/190)）
+  - `builtinProvider.RefreshToken` が GitHub OAuth への委譲実装になった（従来は常に `ErrRefreshNotSupported` を返していた）
+  - builtin mode 専用の rotation ロジック（`tryBuiltinRotationWithAttempt` / `runBuiltinRotation`）を新設。非 builtin mode の rotation（cache key = provider トークン自体を差し替える設計）とは異なり、cache key（gateway JWT）はそのままに、record 内の `ProviderAccessToken` / `ProviderRefreshToken` / `ProviderAccessExpiry` のみを更新する。`EnsureFreshAccessTokenForSubject`（Phase B delegated access）の builtin 分岐にのみ組み込み、`ValidateToken` のキャッシュヒット分岐（PR #189 で追加した「非 builtin rotation を呼ばない」ガード）には手を入れていない — JWT 検証と provider トークンの rotation は builtin mode では独立した関心事であり、rotation が必要になるのは delegated access が provider トークン自体を使う場面のみのため
+  - `RefreshTokenStore.SaveProviderRefresh` / `LookupProviderRefresh`（`ProviderRefreshToken` + `ProviderAccessExpiry`）を新設（mem・file・SQLite の3実装）。`tokenAuthCode` / `tokenDeviceGrant` / `tokenRefresh` の builtin 分岐でこれらを使い、rotation に必要なメタデータをアクセストークン TokenStore エントリの sweep 後も refresh token 経由で引き継げるようにした（既存の `ProviderAccessToken` と同じパターン）
+  - `tokenDeviceGrant` の builtin 分岐が誤ったキー（`completed.AccessToken`、非 builtin mode 用のキー）で provider refresh metadata を保存していたため実質 no-op になっていたバグを修正し、正しいキー（gateway JWT）で保存するようにした
+
 ### 変更
 
 - プライマリトークンストア（TokenStore）を平文 JSON ファイル（`tokens.json`）から SQLite へ移行し、#135 でリフレッシュトークンストアに対して始まったストレージ統合を完了（[#191](https://github.com/scottlz0310/mcp-gateway/issues/191)）

@@ -39,7 +39,9 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
 	expires_at   INTEGER NOT NULL,
 	revoked      INTEGER NOT NULL DEFAULT 0,
 	nonce        TEXT    NOT NULL DEFAULT '',
-	provider_access_token TEXT NOT NULL DEFAULT ''
+	provider_access_token  TEXT    NOT NULL DEFAULT '',
+	provider_refresh_token TEXT    NOT NULL DEFAULT '',
+	provider_access_expiry INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_rt_family  ON refresh_tokens (family_id) WHERE revoked = 0;
 CREATE INDEX IF NOT EXISTS idx_rt_expires ON refresh_tokens (expires_at);
@@ -145,12 +147,14 @@ func openSQLiteTokenDB(path string) (*sql.DB, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("initialising SQLite token store schema: %w", err)
 	}
-	// Add nonce/provider_access_token columns to existing databases created before
-	// these fields were introduced. ALTER TABLE ADD COLUMN is idempotent in SQLite
-	// when the column already exists (returns "duplicate column name" which we
+	// Add columns to existing databases created before these fields were
+	// introduced. ALTER TABLE ADD COLUMN is idempotent in SQLite when the
+	// column already exists (returns "duplicate column name" which we
 	// intentionally ignore).
 	_, _ = db.Exec(`ALTER TABLE refresh_tokens ADD COLUMN nonce TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE refresh_tokens ADD COLUMN provider_access_token TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE refresh_tokens ADD COLUMN provider_refresh_token TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE refresh_tokens ADD COLUMN provider_access_expiry INTEGER NOT NULL DEFAULT 0`)
 	// Backfill family_current_access_token for a database that predates this
 	// feature — otherwise a family whose only pointer-eligible row exists
 	// from before the upgrade would resolve to no current access token on
@@ -389,6 +393,30 @@ func (s *sqliteRefreshTokenStore) LookupProviderAccessToken(refreshToken string)
 		tokenKey(refreshToken), time.Now().Unix(),
 	).Scan(&providerAccessToken)
 	return providerAccessToken
+}
+
+func (s *sqliteRefreshTokenStore) SaveProviderRefresh(refreshToken, providerRefreshToken string, providerAccessExpiry time.Time) error {
+	_, err := s.db.Exec(
+		`UPDATE refresh_tokens SET provider_refresh_token = ?, provider_access_expiry = ? WHERE token_hash = ? AND expires_at > ?`,
+		providerRefreshToken, unixOrZero(providerAccessExpiry), tokenKey(refreshToken), time.Now().Unix(),
+	)
+	if err != nil {
+		return fmt.Errorf("saving refresh token provider refresh metadata: %w", err)
+	}
+	return nil
+}
+
+func (s *sqliteRefreshTokenStore) LookupProviderRefresh(refreshToken string) (string, time.Time) {
+	var providerRefreshToken string
+	var providerAccessExpiryUnix int64
+	err := s.db.QueryRow(
+		`SELECT provider_refresh_token, provider_access_expiry FROM refresh_tokens WHERE token_hash = ? AND expires_at > ?`,
+		tokenKey(refreshToken), time.Now().Unix(),
+	).Scan(&providerRefreshToken, &providerAccessExpiryUnix)
+	if err != nil {
+		return "", time.Time{}
+	}
+	return providerRefreshToken, timeFromUnixOrZero(providerAccessExpiryUnix)
 }
 
 func (s *sqliteRefreshTokenStore) Delete(refreshToken string) error {

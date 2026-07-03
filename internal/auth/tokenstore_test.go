@@ -689,6 +689,46 @@ func testRefreshTokenStoreContract(t *testing.T, rts RefreshTokenStore) {
 		t.Errorf("LookupProviderAccessToken after Revoke: got %q, want %q (soft-revoked entries must remain readable)", got, "gho_rev1")
 	}
 
+	// SaveProviderRefresh attaches provider refresh metadata (builtin-mode
+	// rotation, #190) to an existing RT entry; LookupProviderRefresh returns it.
+	prExpiry := time.Now().Add(8 * time.Hour).Truncate(time.Second)
+	if err := rts.Save("rt-prt", "access-tok-prt", "", "fid-prt", time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("Save rt-prt: %v", err)
+	}
+	if err := rts.SaveProviderRefresh("rt-prt", "ghr_prt1", prExpiry); err != nil {
+		t.Fatalf("SaveProviderRefresh: %v", err)
+	}
+	gotPRT, gotPRExpiry := rts.LookupProviderRefresh("rt-prt")
+	if gotPRT != "ghr_prt1" {
+		t.Errorf("LookupProviderRefresh: providerRefreshToken got %q, want %q", gotPRT, "ghr_prt1")
+	}
+	if !gotPRExpiry.Equal(prExpiry) {
+		t.Errorf("LookupProviderRefresh: providerAccessExpiry got %v, want %v", gotPRExpiry, prExpiry)
+	}
+	// LookupProviderRefresh returns ("", zero) for unknown token.
+	if got, gotExp := rts.LookupProviderRefresh("no-such-rt"); got != "" || !gotExp.IsZero() {
+		t.Errorf("LookupProviderRefresh on absent: got (%q, %v), want (\"\", zero)", got, gotExp)
+	}
+	// SaveProviderRefresh on absent token is a no-op (no error).
+	if err := rts.SaveProviderRefresh("no-such-rt", "ghr_ghost", prExpiry); err != nil {
+		t.Fatalf("SaveProviderRefresh on absent returned error: %v", err)
+	}
+	// LookupProviderRefresh remains readable after soft-revocation (Revoke),
+	// mirroring LookupProviderAccessToken: tokenRefresh reads it via
+	// ReserveRefreshToken, which soft-revokes rather than deletes.
+	if err := rts.Save("rt-prt-revoked", "access-tok-prt-rev", "", "fid-prt-rev", time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("Save rt-prt-revoked: %v", err)
+	}
+	if err := rts.SaveProviderRefresh("rt-prt-revoked", "ghr_rev1", prExpiry); err != nil {
+		t.Fatalf("SaveProviderRefresh rt-prt-revoked: %v", err)
+	}
+	if err := rts.Revoke("rt-prt-revoked"); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	if got, _ := rts.LookupProviderRefresh("rt-prt-revoked"); got != "ghr_rev1" {
+		t.Errorf("LookupProviderRefresh after Revoke: got %q, want %q (soft-revoked entries must remain readable)", got, "ghr_rev1")
+	}
+
 	// IsJTIRevoked is false before RevokeJTI.
 	if rts.IsJTIRevoked("jti-1") {
 		t.Error("IsJTIRevoked: expected false before RevokeJTI")
@@ -993,6 +1033,12 @@ func (f *alwaysFailRefreshStore) SaveNonce(_, _ string) error               { re
 func (f *alwaysFailRefreshStore) LookupNonce(_ string) string               { return "" }
 func (f *alwaysFailRefreshStore) SaveProviderAccessToken(_, _ string) error { return nil }
 func (f *alwaysFailRefreshStore) LookupProviderAccessToken(_ string) string { return "" }
+func (f *alwaysFailRefreshStore) SaveProviderRefresh(_, _ string, _ time.Time) error {
+	return nil
+}
+func (f *alwaysFailRefreshStore) LookupProviderRefresh(_ string) (string, time.Time) {
+	return "", time.Time{}
+}
 func (f *alwaysFailRefreshStore) RevokeJTI(_ string, _ time.Time) error     { return nil }
 func (f *alwaysFailRefreshStore) IsJTIRevoked(_ string) bool                { return false }
 func (f *alwaysFailRefreshStore) Delete(_ string) error                     { return errInjectedStoreFailure }
