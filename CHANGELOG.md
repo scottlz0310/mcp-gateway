@@ -38,6 +38,15 @@ and versioning follows [Semantic Versioning](https://semver.org/).
   - `handler_test.go` に request・response 双方向透過の回帰テスト追加
   - `docs/operations.md` に正しい MCP 初期化シーケンス・切り分け手順・gateway/upstream エラー判別方法を追加
 
+### Changed
+
+- Primary token store (TokenStore) migrated from a plaintext JSON file (`tokens.json`) to SQLite, completing the storage unification started for the refresh-token store in #135 ([#191](https://github.com/scottlz0310/mcp-gateway/issues/191))
+  - Access tokens and refresh tokens now share one SQLite database (`<token-store-path>.refresh.db`): one file, one writer lock, one transaction boundary for the gateway's whole logical token state. The file keeps its historical `.refresh.db` name so upgrades reuse the existing database and a rollback to an older gateway still finds its denylist/refresh state at the expected path
+  - Field updates (`SaveProviderRefresh` / `SaveProviderAccessToken` / `SaveNonce` / `SaveJti` / `MarkRotationFailed`) are now single expiry-guarded `UPDATE` statements, replacing the file store's whole-file rewrite + manual in-memory rollback pattern; expired entries are removed by an indexed `DELETE` instead of a full-map sweep + rewrite
+  - Automatic one-time migration: an existing `tokens.json` is imported on first startup inside a single transaction and renamed to `tokens.json.migrated` (the #135 pattern); startup aborts with the source file intact if migration fails
+  - The TokenStore contract test now also runs against the SQLite implementation; the file-backed implementation remains as the legacy migration-source format
+  - `docs/configuration.md` "Token Persistence" rewritten to match: base-path semantics of `MCP_GATEWAY_TOKEN_STORE_PATH`, shared-database layout, migration behaviour, and backup-exclusion targets (`tokens.json.refresh.db` + `-wal`/`-shm` + `*.migrated`). This resolves the documentation/implementation gap noted in #191 where PR #189 already referenced a SQLite backend for the primary store
+
 ## [0.7.0] - 2026-06-21
 
 ### Added

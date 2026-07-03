@@ -92,6 +92,91 @@ func migrateFileRefreshTokenStore(path string, dst RefreshTokenStore) error {
 	return nil
 }
 
+// migrateFileTokenStore reads an existing tokens.json file, inserts all
+// entries into dst inside a single transaction, then renames the file to
+// <path>.migrated so it is not re-processed on the next startup. Expired
+// entries are imported as-is and removed by the next periodic Sweep, matching
+// migrateFileRefreshTokenStore.
+//
+// If the source file does not exist the function returns nil (no-op).
+// If any step fails the source file is left untouched so the operator can
+// inspect the data; the error is returned and the caller should abort.
+func migrateFileTokenStore(path string, dst TokenStore) error {
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("reading legacy token store %q: %w", path, err)
+	}
+	if len(data) == 0 {
+		_ = renameOverwrite(path, path+".migrated")
+		return nil
+	}
+
+	var entries map[string]fileEntry
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return fmt.Errorf("parsing legacy token store %q: %w", path, err)
+	}
+
+	sq, ok := dst.(*sqliteTokenStore)
+	if !ok {
+		return fmt.Errorf("migration destination is not a SQLite store")
+	}
+
+	// Wrap all inserts in a single transaction: atomic and significantly faster
+	// than one fsync per row when the entry count is large. INSERT OR IGNORE
+	// keeps an already-present SQLite row authoritative over the legacy file.
+	tx, err := sq.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return fmt.Errorf("beginning token migration transaction: %w", err)
+	}
+	stmt, err := tx.Prepare(
+		`INSERT OR IGNORE INTO access_tokens
+		 (token_hash, subject, audiences, expires_at, provider_access_token,
+		  provider_refresh_token, provider_access_expiry, rotation_failed, nonce, jti)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	)
+	if err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("preparing token migration insert: %w", err)
+	}
+	defer func() { _ = stmt.Close() }()
+
+	imported := 0
+	for hash, e := range entries {
+		audiencesEnc, err := encodeAudiences(e.Audiences)
+		if err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("migrating token entry: %w", err)
+		}
+		rotationFailedInt := 0
+		if e.RotationFailed {
+			rotationFailedInt = 1
+		}
+		if _, err := stmt.Exec(
+			hash, e.Subject, audiencesEnc, e.ExpiresAt.Unix(),
+			e.ProviderAccessToken, e.ProviderRefreshToken, unixOrZero(e.ProviderAccessExpiry),
+			rotationFailedInt, e.Nonce, e.Jti,
+		); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("migrating token entry: %w", err)
+		}
+		imported++
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing token migration transaction: %w", err)
+	}
+
+	migratedPath := path + ".migrated"
+	if err := renameOverwrite(path, migratedPath); err != nil {
+		return fmt.Errorf("renaming legacy token store after migration: %w", err)
+	}
+	slog.Info("legacy token store migrated to SQLite",
+		"source", path, "renamed_to", migratedPath, "imported", imported)
+	return nil
+}
+
 // renameOverwrite renames src to dst, removing dst first if it exists.
 // This avoids os.Rename failures on Windows when dst already exists.
 func renameOverwrite(src, dst string) error {

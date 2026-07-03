@@ -2,6 +2,7 @@ package auth
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -11,7 +12,25 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const sqliteRTSchema = `
+const sqliteTokenDBSchema = `
+-- access_tokens is the primary token store (TokenStore): metadata for
+-- validated access tokens, keyed by tokenKey(rawToken) so raw token values
+-- never reach disk. audiences is a JSON-encoded string array ('' = none).
+-- provider_access_expiry is 0 when the provider gave no expiry hint.
+CREATE TABLE IF NOT EXISTS access_tokens (
+	token_hash             TEXT    PRIMARY KEY,
+	subject                TEXT    NOT NULL DEFAULT '',
+	audiences              TEXT    NOT NULL DEFAULT '',
+	expires_at             INTEGER NOT NULL,
+	provider_access_token  TEXT    NOT NULL DEFAULT '',
+	provider_refresh_token TEXT    NOT NULL DEFAULT '',
+	provider_access_expiry INTEGER NOT NULL DEFAULT 0,
+	rotation_failed        INTEGER NOT NULL DEFAULT 0,
+	nonce                  TEXT    NOT NULL DEFAULT '',
+	jti                    TEXT    NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_at_expires ON access_tokens (expires_at);
+
 CREATE TABLE IF NOT EXISTS refresh_tokens (
 	token_hash   TEXT    PRIMARY KEY,
 	access_token TEXT    NOT NULL,
@@ -110,19 +129,21 @@ func backfillFamilyCurrentAccessToken(ex sqlExecer) error {
 	return nil
 }
 
-// NewSQLiteRefreshTokenStore returns a SQLite-backed RefreshTokenStore.
+// openSQLiteTokenDB opens (or creates) the shared token database at path,
+// initialises the full schema (access_tokens + refresh-token tables), applies
+// idempotent column migrations, and enforces owner-only file permissions.
 // path may be ":memory:" for in-process testing.
-func NewSQLiteRefreshTokenStore(path string) (RefreshTokenStore, error) {
+func openSQLiteTokenDB(path string) (*sql.DB, error) {
 	// WAL mode for concurrent readers; busy_timeout avoids immediate SQLITE_BUSY.
 	dsn := path + "?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=on"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
-		return nil, fmt.Errorf("opening SQLite refresh token store %q: %w", path, err)
+		return nil, fmt.Errorf("opening SQLite token store %q: %w", path, err)
 	}
 	db.SetMaxOpenConns(1) // SQLite WAL allows 1 writer; serialise via the connection pool
-	if _, err := db.Exec(sqliteRTSchema); err != nil {
+	if _, err := db.Exec(sqliteTokenDBSchema); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("initialising SQLite refresh token store schema: %w", err)
+		return nil, fmt.Errorf("initialising SQLite token store schema: %w", err)
 	}
 	// Add nonce/provider_access_token columns to existing databases created before
 	// these fields were introduced. ALTER TABLE ADD COLUMN is idempotent in SQLite
@@ -136,12 +157,22 @@ func NewSQLiteRefreshTokenStore(path string) (RefreshTokenStore, error) {
 	// the first POST /revoke after upgrading (see backfillFamilyCurrentAccessTokenSQL).
 	if err := backfillFamilyCurrentAccessToken(db); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("initialising SQLite refresh token store: %w", err)
+		return nil, fmt.Errorf("initialising SQLite token store: %w", err)
 	}
 	if path != ":memory:" {
 		if err := os.Chmod(path, 0o600); err != nil && !os.IsNotExist(err) {
-			slog.Warn("SQLite refresh token store chmod failed", "path", path, "err", err)
+			slog.Warn("SQLite token store chmod failed", "path", path, "err", err)
 		}
+	}
+	return db, nil
+}
+
+// NewSQLiteRefreshTokenStore returns a SQLite-backed RefreshTokenStore.
+// path may be ":memory:" for in-process testing.
+func NewSQLiteRefreshTokenStore(path string) (RefreshTokenStore, error) {
+	db, err := openSQLiteTokenDB(path)
+	if err != nil {
+		return nil, err
 	}
 	s := &sqliteRefreshTokenStore{db: db}
 	swept, err := s.sweepNow()
@@ -152,6 +183,36 @@ func NewSQLiteRefreshTokenStore(path string) (RefreshTokenStore, error) {
 	_ = db.QueryRow("SELECT COUNT(*) FROM refresh_tokens").Scan(&count)
 	slog.Info("SQLite refresh token store opened", "path", path, "entries", count, "swept", swept)
 	return s, nil
+}
+
+// NewSQLiteTokenStores opens the shared token database at path and returns a
+// TokenStore and a RefreshTokenStore backed by the same *sql.DB — one file,
+// one writer lock, one transaction boundary for the gateway's whole logical
+// token state (issue #191). Closing either store closes the shared handle, so
+// callers should close exactly one of them at shutdown (Store.Close does this
+// via the RefreshTokenStore). path may be ":memory:" for in-process testing.
+func NewSQLiteTokenStores(path string) (TokenStore, RefreshTokenStore, error) {
+	db, err := openSQLiteTokenDB(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	ts := &sqliteTokenStore{db: db}
+	rts := &sqliteRefreshTokenStore{db: db}
+	sweptAT, err := ts.sweepNow()
+	if err != nil {
+		slog.Warn("SQLite token store startup sweep failed", "err", err)
+	}
+	sweptRT, err := rts.sweepNow()
+	if err != nil {
+		slog.Warn("SQLite refresh token store startup sweep failed", "err", err)
+	}
+	var countAT, countRT int
+	_ = db.QueryRow("SELECT COUNT(*) FROM access_tokens").Scan(&countAT)
+	_ = db.QueryRow("SELECT COUNT(*) FROM refresh_tokens").Scan(&countRT)
+	slog.Info("SQLite token store opened", "path", path,
+		"access_tokens", countAT, "refresh_tokens", countRT,
+		"swept_access", sweptAT, "swept_refresh", sweptRT)
+	return ts, rts, nil
 }
 
 // Save writes refreshToken's row guarded by a NOT EXISTS check against
@@ -399,5 +460,230 @@ func (s *sqliteRefreshTokenStore) sweepNow() (int64, error) {
 
 // Close releases the underlying database connection.
 func (s *sqliteRefreshTokenStore) Close() error {
+	return s.db.Close()
+}
+
+// ── SQLite TokenStore ────────────────────────────────────────────────────────
+
+// sqliteTokenStore is the SQLite-backed primary TokenStore. Field updates are
+// single UPDATE statements guarded by the expiry predicate, so the manual
+// previous-value rollback pattern of fileTokenStore is unnecessary: a failed
+// statement leaves the row untouched, and memory/disk can never diverge
+// because the database is the only state.
+type sqliteTokenStore struct {
+	db *sql.DB
+}
+
+// encodeAudiences serialises audiences for the access_tokens.audiences column.
+// An empty slice is stored as '' so decodeAudiences can round-trip it to nil.
+func encodeAudiences(audiences []string) (string, error) {
+	if len(audiences) == 0 {
+		return "", nil
+	}
+	b, err := json.Marshal(audiences)
+	if err != nil {
+		return "", fmt.Errorf("encoding audiences: %w", err)
+	}
+	return string(b), nil
+}
+
+func decodeAudiences(s string) ([]string, error) {
+	if s == "" {
+		return nil, nil
+	}
+	var out []string
+	if err := json.Unmarshal([]byte(s), &out); err != nil {
+		return nil, fmt.Errorf("decoding audiences: %w", err)
+	}
+	return out, nil
+}
+
+// unixOrZero maps time.Time's zero value to 0 rather than its (negative) Unix
+// representation, so "no expiry hint" round-trips through the INTEGER column.
+func unixOrZero(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.Unix()
+}
+
+func timeFromUnixOrZero(v int64) time.Time {
+	if v == 0 {
+		return time.Time{}
+	}
+	return time.Unix(v, 0)
+}
+
+// Save inserts or updates the row for token. Re-saving a non-expired token
+// merges audiences and preserves every other field (subject only when the new
+// subject is empty), matching the mem/file implementations; an expired row is
+// treated as absent and fully reset. The read-merge-write runs inside one
+// transaction, which the single DB connection serialises against all other
+// store operations.
+func (s *sqliteTokenStore) Save(token, subject string, audiences []string, expiresAt time.Time) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("saving token: %w", err)
+	}
+	key := tokenKey(token)
+	var (
+		curSubject, curAudiences, curPAT, curPRT, curNonce, curJti string
+		curPAE                                                     int64
+		curRotationFailed                                          int
+	)
+	err = tx.QueryRow(
+		`SELECT subject, audiences, provider_access_token, provider_refresh_token,
+		        provider_access_expiry, rotation_failed, nonce, jti
+		 FROM access_tokens WHERE token_hash = ? AND expires_at > ?`,
+		key, time.Now().Unix(),
+	).Scan(&curSubject, &curAudiences, &curPAT, &curPRT, &curPAE, &curRotationFailed, &curNonce, &curJti)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		_ = tx.Rollback()
+		return fmt.Errorf("saving token: reading current entry: %w", err)
+	}
+	if subject != "" {
+		curSubject = subject
+	}
+	existing, err := decodeAudiences(curAudiences)
+	if err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("saving token: %w", err)
+	}
+	mergedAudiences, err := encodeAudiences(mergeAudiences(existing, audiences))
+	if err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("saving token: %w", err)
+	}
+	if _, err := tx.Exec(
+		`INSERT OR REPLACE INTO access_tokens
+		 (token_hash, subject, audiences, expires_at, provider_access_token,
+		  provider_refresh_token, provider_access_expiry, rotation_failed, nonce, jti)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		key, curSubject, mergedAudiences, expiresAt.Unix(),
+		curPAT, curPRT, curPAE, curRotationFailed, curNonce, curJti,
+	); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("saving token: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("saving token: %w", err)
+	}
+	return nil
+}
+
+func (s *sqliteTokenStore) SaveProviderRefresh(token, providerRefreshToken string, providerAccessExpiry time.Time) error {
+	_, err := s.db.Exec(
+		`UPDATE access_tokens SET provider_refresh_token = ?, provider_access_expiry = ?
+		 WHERE token_hash = ? AND expires_at > ?`,
+		providerRefreshToken, unixOrZero(providerAccessExpiry), tokenKey(token), time.Now().Unix(),
+	)
+	if err != nil {
+		return fmt.Errorf("saving token provider refresh metadata: %w", err)
+	}
+	return nil
+}
+
+func (s *sqliteTokenStore) SaveProviderAccessToken(token, providerAccessToken string) error {
+	_, err := s.db.Exec(
+		`UPDATE access_tokens SET provider_access_token = ? WHERE token_hash = ? AND expires_at > ?`,
+		providerAccessToken, tokenKey(token), time.Now().Unix(),
+	)
+	if err != nil {
+		return fmt.Errorf("saving token provider access token: %w", err)
+	}
+	return nil
+}
+
+func (s *sqliteTokenStore) Lookup(token string) (TokenRecord, bool) {
+	var (
+		subject, audiencesEnc, pat, prt, nonce, jti string
+		expiresUnix, paeUnix                        int64
+		rotationFailedInt                           int
+	)
+	err := s.db.QueryRow(
+		`SELECT subject, audiences, expires_at, provider_access_token, provider_refresh_token,
+		        provider_access_expiry, rotation_failed, nonce, jti
+		 FROM access_tokens WHERE token_hash = ? AND expires_at > ?`,
+		tokenKey(token), time.Now().Unix(),
+	).Scan(&subject, &audiencesEnc, &expiresUnix, &pat, &prt, &paeUnix, &rotationFailedInt, &nonce, &jti)
+	if err != nil {
+		return TokenRecord{}, false
+	}
+	audiences, err := decodeAudiences(audiencesEnc)
+	if err != nil {
+		slog.Warn("token store entry has undecodable audiences; treating as miss", "err", err)
+		return TokenRecord{}, false
+	}
+	return TokenRecord{
+		Subject:                   subject,
+		Audiences:                 audiences,
+		ExpiresAt:                 time.Unix(expiresUnix, 0),
+		ProviderAccessToken:       pat,
+		ProviderRefreshToken:      prt,
+		ProviderAccessExpiry:      timeFromUnixOrZero(paeUnix),
+		RotationPermanentlyFailed: rotationFailedInt != 0,
+		Nonce:                     nonce,
+		Jti:                       jti,
+	}, true
+}
+
+func (s *sqliteTokenStore) SaveNonce(token, nonce string) error {
+	_, err := s.db.Exec(
+		`UPDATE access_tokens SET nonce = ? WHERE token_hash = ? AND expires_at > ?`,
+		nonce, tokenKey(token), time.Now().Unix(),
+	)
+	if err != nil {
+		return fmt.Errorf("saving token nonce: %w", err)
+	}
+	return nil
+}
+
+func (s *sqliteTokenStore) SaveJti(token, jti string) error {
+	_, err := s.db.Exec(
+		`UPDATE access_tokens SET jti = ? WHERE token_hash = ? AND expires_at > ?`,
+		jti, tokenKey(token), time.Now().Unix(),
+	)
+	if err != nil {
+		return fmt.Errorf("saving token jti: %w", err)
+	}
+	return nil
+}
+
+func (s *sqliteTokenStore) MarkRotationFailed(token string) error {
+	_, err := s.db.Exec(
+		`UPDATE access_tokens SET rotation_failed = 1 WHERE token_hash = ? AND expires_at > ?`,
+		tokenKey(token), time.Now().Unix(),
+	)
+	if err != nil {
+		return fmt.Errorf("marking token rotation failed: %w", err)
+	}
+	return nil
+}
+
+func (s *sqliteTokenStore) Delete(token string) error {
+	_, err := s.db.Exec(`DELETE FROM access_tokens WHERE token_hash = ?`, tokenKey(token))
+	if err != nil {
+		return fmt.Errorf("deleting token: %w", err)
+	}
+	return nil
+}
+
+func (s *sqliteTokenStore) Sweep() error {
+	_, err := s.sweepNow()
+	return err
+}
+
+func (s *sqliteTokenStore) sweepNow() (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM access_tokens WHERE expires_at <= ?`, time.Now().Unix())
+	if err != nil {
+		return 0, fmt.Errorf("sweeping expired tokens: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// Close releases the shared database connection. sql.DB.Close is idempotent,
+// so closing both stores returned by NewSQLiteTokenStores is harmless.
+func (s *sqliteTokenStore) Close() error {
 	return s.db.Close()
 }

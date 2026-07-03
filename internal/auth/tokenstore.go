@@ -291,6 +291,11 @@ type fileEntry struct {
 	Jti                  string    `json:"jti,omitempty"`
 }
 
+// fileTokenStore is the legacy file-backed implementation, only exercised
+// directly by its own contract tests; the live NewHandler path opens the
+// SQLite-backed store and migrates any existing tokens.json into it at
+// startup (see tokenstore_sqlite_migrate.go). fileEntry remains the on-disk
+// format that migration reads.
 type fileTokenStore struct {
 	mu      sync.RWMutex
 	path    string

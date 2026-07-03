@@ -1470,6 +1470,55 @@ func TestHandlerRefreshTokenSurvivesRestart(t *testing.T) {
 	}
 }
 
+// TestNewHandlerMigratesLegacyTokenStore verifies that a legacy tokens.json
+// written by the file-backed TokenStore is imported into the SQLite store on
+// startup and renamed to .migrated, so tokens validated before the upgrade
+// keep working (#191).
+func TestNewHandlerMigratesLegacyTokenStore(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "tokens.json")
+
+	legacy, err := NewFileTokenStore(storePath)
+	if err != nil {
+		t.Fatalf("NewFileTokenStore: %v", err)
+	}
+	if err := legacy.Save("tok-legacy", "alice", []string{"http://localhost:8080/mcp"}, time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("legacy Save: %v", err)
+	}
+
+	p := provider.NewGitHub(provider.GitHubConfig{
+		ClientID:     "test-client-id",
+		ClientSecret: "test-client-secret",
+		RedirectURI:  "http://localhost:8080/callback",
+		Scopes:       "repo,user",
+	})
+	h, err := NewHandler(Config{
+		BaseURL:        "http://localhost:8080",
+		SessionTTL:     10 * time.Minute,
+		CacheTTL:       5 * time.Minute,
+		ExpiresIn:      90 * 24 * time.Hour,
+		TokenStorePath: storePath,
+	}, p)
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+
+	rec, ok := h.store.tokens.Lookup("tok-legacy")
+	if !ok {
+		t.Fatal("legacy token not found in SQLite store after migration")
+	}
+	if rec.Subject != "alice" {
+		t.Errorf("Subject: got %q, want %q", rec.Subject, "alice")
+	}
+	if _, statErr := os.Stat(storePath); !os.IsNotExist(statErr) {
+		t.Error("legacy tokens.json should have been renamed after migration")
+	}
+	if _, statErr := os.Stat(storePath + ".migrated"); statErr != nil {
+		t.Errorf("tokens.json.migrated not found: %v", statErr)
+	}
+}
+
 // ── error-injection helpers ───────────────────────────────────────────────────
 
 // deleteFailRefreshStore wraps a real in-memory store for all operations
