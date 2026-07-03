@@ -7,6 +7,8 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-03
+
 ### Security
 
 - Completed the systematic token log-leak audit of all `slog` call sites (#24 Phase 4 backlog). No raw token or secret value is logged anywhere, apart from the deliberate and documented setup-mode one-time token. ([#193](https://github.com/scottlz0310/mcp-gateway/issues/193))
@@ -43,6 +45,12 @@ and versioning follows [Semantic Versioning](https://semver.org/).
   - `proxy request` / `proxy response` ログに `mcp_session_id_present` フィールドを追加（セッション ID の実値はログに出力しない）
   - `handler_test.go` に request・response 双方向透過の回帰テスト追加
   - `docs/operations.md` に正しい MCP 初期化シーケンス・切り分け手順・gateway/upstream エラー判別方法を追加
+- 新ルートオプション `upstream_provider_token=true` を追加し、review-raven 等の upstream へ gateway JWT ではなく該当 subject の provider アクセストークン（builtin mode: GitHub アクセストークン）を注入できるようにした ([#186](https://github.com/scottlz0310/mcp-gateway/issues/186))
+  - `EnsureFreshAccessTokenForSubject` でサブジェクトの provider アクセストークンを解決し、`ProviderTokenSource` インターフェース経由で proxy へ注入する `NewProviderTokenMiddleware` を新設
+  - `upstream_oauth` / `upstream_bearer_token_env` / `auth=none` との同時指定を fail-closed で拒否
+  - provider token が未解決・失効・rotation failure の場合は `401` + `WWW-Authenticate` でフェールクローズ
+  - upstream `401` 時は provider token 委任経路のみを対象とし、gateway JWT の validation cache を誤って失効させないようにした
+  - `docs/configuration.md` に `upstream_provider_token` オプションと「プロバイダートークン委任」セクションを追加
 
 ### Changed
 
@@ -423,7 +431,8 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 - Removed GitHub-specific HTTP calls from `auth.Handler`; delegated to `provider.Provider`.
 - Renamed middleware context key `github_login` → `authenticated_user` (internal only; external compatibility maintained).
 
-[Unreleased]: https://github.com/scottlz0310/mcp-gateway/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/scottlz0310/mcp-gateway/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/scottlz0310/mcp-gateway/compare/v0.5.1...v0.5.2

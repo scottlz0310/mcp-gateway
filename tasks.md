@@ -19,10 +19,26 @@
 
 ## 現在の判断基準
 
-- 対象: 2026-06-21 時点の open issue
+- 対象: 2026-07-03 時点の open issue
 - `#126` は設計決定 issue。Phase 1 (v0.6.0) + Phase 2 (v0.7.0) で実装完了。2026-06-21 にクローズ済み。
 - `#84` は upstream OAuth delegation の親 issue。実装 chain（#113〜#118, #166, #171）+ 関連修正（#162, #175, #177, #179）すべて完了。2026-06-21 にクローズ済み。
 - `#65` は Renovate Dependency Dashboard であり、通常の実装ロードマップには含めない。open 維持。
+
+---
+
+## v0.8.0 で完了した issue（2026-07-03 リリース）
+
+| Issue | 内容 | 対応 PR |
+|---|---|---|
+| [#182](https://github.com/scottlz0310/mcp-gateway/issues/182) | `Mcp-Session-Id` 双方向透過の回帰テストと診断ログ | #183 |
+| [#186](https://github.com/scottlz0310/mcp-gateway/issues/186) | builtin JWT が review-raven へ転送され GitHub API 認証失敗 → `upstream_provider_token=true` 新設 | #187 |
+| [#188](https://github.com/scottlz0310/mcp-gateway/issues/188) | `EnsureFreshAccessTokenForSubject` が builtin mode で gateway JWT を返してしまう | #189 |
+| [#191](https://github.com/scottlz0310/mcp-gateway/issues/191) | プライマリ TokenStore の SQLite 移行 | #196 |
+| [#192](https://github.com/scottlz0310/mcp-gateway/issues/192) | RFC 7009 トークン失効エンドポイント（`/revoke`） | #195 |
+| [#193](https://github.com/scottlz0310/mcp-gateway/issues/193) | トークン値のログ漏洩監査と再発防止 | #194 |
+| [#190](https://github.com/scottlz0310/mcp-gateway/issues/190) | builtin mode で GitHub アクセストークンの rotation 対応 | #197 |
+
+※ [#184](https://github.com/scottlz0310/mcp-gateway/issues/184)（review-raven 認証時の `invalid_target`）は mcp-gateway 側のコード変更を伴わず、根本原因は `scottlz0310/Mcp-Docker` リポジトリ側（PR #192）。cross-repo 対応のためこの表には含めない。
 
 ---
 
