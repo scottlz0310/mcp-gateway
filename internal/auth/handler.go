@@ -816,9 +816,20 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.isBuiltinMode() {
-		_, _, familyID, _, _, ok := h.store.LookupAnyRefreshToken(rt)
-		if ok && familyID != "" {
-			unlock := h.store.LockRefreshTokenFamily(familyID)
+		// Serialize against runBuiltinRotation using the same lock key it
+		// derives: the familyID when known, otherwise tokenKey(accessToken).
+		// Auth code/device flows can issue refresh tokens with an empty
+		// familyID (family-ID generation failure at issuance); without this
+		// fallback those tokens would never lock, letting a concurrent
+		// rotation interleave and restore a stale provider token generation
+		// onto the new lineage (mirrors the familyID != "" case above #190).
+		accessTok, _, familyID, _, _, ok := h.store.LookupAnyRefreshToken(rt)
+		if ok {
+			lockKey := familyID
+			if lockKey == "" {
+				lockKey = tokenKey(accessTok)
+			}
+			unlock := h.store.LockRefreshTokenFamily(lockKey)
 			defer unlock()
 		}
 	}
@@ -884,6 +895,21 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if h.isBuiltinMode() {
+		// Fail closed on a prior permanent rotation failure even if its
+		// family-revoke persistence failed (MarkRotationPermanentlyFailed logs
+		// and continues on that error, see session.go). IsRotationPermanentlyFailed
+		// is an in-memory flag set unconditionally by markTokenRotationPermanentlyFailed,
+		// independent of whether the durable family revoke succeeded, so it still
+		// catches the case where the store recovers and would otherwise let this
+		// grant copy the poisoned provider metadata onto a fresh, unfailed lineage.
+		if h.store.IsRotationPermanentlyFailed(accessToken) {
+			// Do not RestoreRefreshToken: the backing JWT is permanently dead
+			// (mirrors the jwtErr branch below), and restoring it would hand
+			// out another chance to replay the poisoned provider metadata.
+			h.auditFailure("refresh", "invalid_grant", "refresh token backing JWT permanently failed rotation", nil, http.StatusBadRequest, tokenFingerprint(accessToken))
+			oauthError(w, "invalid_grant", "underlying token no longer valid", http.StatusBadRequest)
+			return
+		}
 		// builtin mode: verify the existing gateway JWT locally to extract subject,
 		// then issue a new gateway JWT. GitHub API is not consulted. Revocation
 		// of the old access token's jti (POST /revoke, token_type_hint=access_token)

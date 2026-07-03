@@ -976,3 +976,151 @@ func TestEnsureFreshAccessTokenForSubject_BuiltinCachedOutsideLeeway(t *testing.
 		t.Fatal("expected JWT record to still exist")
 	}
 }
+
+// TestTokenRefresh_BuiltinSerializesWithRotationWhenFamilyIDEmpty verifies
+// that a gateway refresh is still serialized against a concurrent delegated
+// rotation when the refresh token's familyID is empty (the best-effort
+// fallback in tokenAuthCode when family-ID generation fails at issuance
+// time). Before this fix, tokenRefresh only locked when familyID != "",
+// so an empty-family refresh token raced runBuiltinRotation (which falls
+// back to locking on tokenKey(accessToken)) and could let the refresh grant
+// restore a stale provider token generation onto the new lineage (thread-owl
+// review, PR #197).
+func TestTokenRefresh_BuiltinSerializesWithRotationWhenFamilyIDEmpty(t *testing.T) {
+	rotationStarted := make(chan struct{})
+	releaseRotation := make(chan struct{})
+	h := newDelegatedBuiltinRotationTestHandler(t, "gho_original", "ghr_original", 30*time.Second,
+		func(_ context.Context, rt string) (provider.TokenResponse, error) {
+			if rt != "ghr_original" {
+				return provider.TokenResponse{}, fmt.Errorf("unexpected refresh token %q", rt)
+			}
+			close(rotationStarted)
+			<-releaseRotation
+			return provider.TokenResponse{
+				AccessToken:          "gho_rotated",
+				RefreshToken:         "ghr_rotated",
+				AccessTokenExpiresIn: 8 * time.Hour,
+			}, nil
+		})
+
+	jwt, jti, genErr := h.generateGatewayAccessToken("alice", h.cfg.BaseURL)
+	if genErr != nil {
+		t.Fatalf("generateGatewayAccessToken: %v", genErr)
+	}
+	h.store.CacheToken(jwt, "alice", h.cfg.BaseURL)
+	h.store.RecordProviderAccessToken(jwt, "gho_original")
+	h.persistProviderRefresh(jwt, "ghr_original", time.Now().Add(30*time.Second))
+	h.store.SaveTokenJti(jwt, jti)
+
+	// familyID = "" simulates the family-ID generation failure fallback in
+	// tokenAuthCode (handler.go, generateCode() error branch).
+	refreshToken, rtErr := h.store.CreateRefreshToken(jwt, h.cfg.BaseURL, "", h.refreshTokenTTL())
+	if rtErr != nil {
+		t.Fatalf("CreateRefreshToken: %v", rtErr)
+	}
+	h.store.SaveRefreshTokenProviderAccessToken(refreshToken, "gho_original")
+	h.store.SaveRefreshTokenProviderRefresh(refreshToken, "ghr_original", time.Now().Add(30*time.Second))
+
+	rotationResult := make(chan error, 1)
+	go func() {
+		_, err := h.EnsureFreshAccessTokenForSubject(context.Background(), "alice")
+		rotationResult <- err
+	}()
+	<-rotationStarted
+
+	refreshStarted := make(chan struct{})
+	refreshDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		close(refreshStarted)
+		body := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(refreshToken)
+		req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		h.Token(rec, req)
+		refreshDone <- rec
+	}()
+	<-refreshStarted
+
+	select {
+	case rec := <-refreshDone:
+		t.Fatalf("gateway refresh completed before provider rotation despite empty familyID: status=%d body=%s", rec.Code, rec.Body.String())
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseRotation)
+	if err := <-rotationResult; err != nil {
+		t.Fatalf("delegated rotation: %v", err)
+	}
+	rec := <-refreshDone
+	if rec.Code != http.StatusOK {
+		t.Fatalf("gateway refresh: got %d; body=%s", rec.Code, rec.Body.String())
+	}
+	var response map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatalf("decode gateway refresh response: %v", err)
+	}
+	newJWT, _ := response["access_token"].(string)
+	newRecord, ok := h.store.LookupToken(newJWT)
+	if !ok {
+		t.Fatal("gateway refresh did not cache the new JWT")
+	}
+	if newRecord.ProviderAccessToken != "gho_rotated" || newRecord.ProviderRefreshToken != "ghr_rotated" {
+		t.Fatalf("gateway refresh copied stale provider generation despite empty familyID: access=%q refresh=%q",
+			newRecord.ProviderAccessToken, newRecord.ProviderRefreshToken)
+	}
+}
+
+// revokeFamilyFailStore wraps a RefreshTokenStore, delegating everything
+// except RevokeFamily, which always fails — simulating a durable-write
+// failure (e.g. file flush or SQLite transaction failure) after the
+// in-memory permanent-failure bookkeeping in
+// markTokenRotationPermanentlyFailed has already succeeded.
+type revokeFamilyFailStore struct {
+	RefreshTokenStore
+}
+
+func (r *revokeFamilyFailStore) RevokeFamily(_ string) (string, error) {
+	return "", fmt.Errorf("simulated family revoke persistence failure")
+}
+
+// TestTokenRefresh_BuiltinFailsClosedWhenFamilyRevokePersistenceFails verifies
+// that a gateway refresh is rejected for a JWT whose provider rotation
+// permanently failed, even when the durable family-revoke write itself
+// failed. MarkRotationPermanentlyFailed logs and continues on a RevokeFamily
+// error, so without this fail-closed check in tokenRefresh, a client
+// presenting the still-live (not durably revoked) refresh token could have
+// the poisoned provider metadata copied onto a fresh, unfailed lineage once
+// the store recovers (thread-owl review, PR #197).
+func TestTokenRefresh_BuiltinFailsClosedWhenFamilyRevokePersistenceFails(t *testing.T) {
+	h := newDelegatedBuiltinRotationTestHandler(t, "gho_poisoned", "ghr_poisoned", 30*time.Second,
+		func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{}, errors.New("bad_refresh_token")
+		})
+	wrapped := &revokeFamilyFailStore{RefreshTokenStore: h.store.refreshStore}
+	h.store = NewStore(10*time.Minute, 90*24*time.Hour, h.store.tokens, WithRefreshTokenStore(wrapped))
+
+	tokenResp, jwt := runBuiltinFullFlow(t, h, "alice")
+	refreshToken, _ := tokenResp["refresh_token"].(string)
+
+	if result := h.runBuiltinRotation(context.Background(), jwt); result.ok {
+		t.Fatalf("permanently rejected rotation unexpectedly succeeded: %+v", result)
+	}
+	if !h.store.IsRotationPermanentlyFailed(jwt) {
+		t.Fatal("in-memory permanent-failure flag must be set even when family revoke persistence failed")
+	}
+
+	body := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(refreshToken)
+	req := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	h.Token(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("gateway refresh after failed family revoke persistence: got %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	var errResp map[string]any
+	if err := json.NewDecoder(rec.Body).Decode(&errResp); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if errResp["error"] != "invalid_grant" {
+		t.Fatalf("gateway refresh error: got %v, want invalid_grant", errResp["error"])
+	}
+}
