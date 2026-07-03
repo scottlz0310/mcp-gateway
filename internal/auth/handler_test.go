@@ -1488,6 +1488,9 @@ func (d *deleteFailRefreshStore) Lookup(rt string) (string, string, string, time
 func (d *deleteFailRefreshStore) LookupAny(rt string) (string, string, string, time.Time, bool, bool) {
 	return d.inner.LookupAny(rt)
 }
+func (d *deleteFailRefreshStore) LookupActiveByFamily(fid string) (string, bool) {
+	return d.inner.LookupActiveByFamily(fid)
+}
 func (d *deleteFailRefreshStore) Revoke(_ string) error         { return fmt.Errorf("disk I/O error") }
 func (d *deleteFailRefreshStore) RevokeFamily(fid string) error { return d.inner.RevokeFamily(fid) }
 func (d *deleteFailRefreshStore) SaveNonce(rt, n string) error  { return d.inner.SaveNonce(rt, n) }
@@ -3398,6 +3401,136 @@ func TestRevokeIdempotentAndUnknownTokens(t *testing.T) {
 	}
 	if rec := revokeRequest(h, accessToken, "access_token"); rec.Code != http.StatusOK {
 		t.Errorf("second (duplicate) revoke: got %d, want 200", rec.Code)
+	}
+}
+
+// TestRevokeRefreshTokenWithEmptyFamilyIDStillRevokesToken verifies that a
+// refresh token issued with familyID == "" (the best-effort fallback in
+// tokenAuthCode/tokenDeviceGrant when family-ID generation fails) is still
+// individually invalidated by /revoke. Before this fix, /revoke only called
+// RevokeRefreshTokenFamily, which is a no-op for an empty familyID, leaving
+// the presented token itself usable after a 200 response (thread-owl review,
+// PR #195).
+func TestRevokeRefreshTokenWithEmptyFamilyIDStillRevokesToken(t *testing.T) {
+	h := newBuiltinTestHandler(t,
+		func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{AccessToken: "gh-tok"}, nil
+		},
+		func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Subject: "alice"}, nil
+		},
+	)
+	accessToken, _ := issueBuiltinTokens(t, h, "alice")
+	// Simulate the familyID-generation-failure fallback directly: create a
+	// second refresh token for the same access token with familyID = "".
+	rt, err := h.store.CreateRefreshToken(accessToken, "", "", h.refreshTokenTTL())
+	if err != nil {
+		t.Fatalf("CreateRefreshToken: %v", err)
+	}
+
+	rec := revokeRequest(h, rt, "refresh_token")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("revoke: got %d; body=%s", rec.Code, rec.Body.String())
+	}
+
+	refreshBody := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(rt)
+	refreshReq := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(refreshBody))
+	refreshReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	refreshRec := httptest.NewRecorder()
+	h.Token(refreshRec, refreshReq)
+	if refreshRec.Code == http.StatusOK {
+		t.Errorf("refresh grant with revoked (empty-familyID) refresh_token unexpectedly succeeded: %s", refreshRec.Body.String())
+	}
+}
+
+// TestRevokeStaleRefreshTokenCascadesToCurrentAccessToken verifies that
+// revoking an already-rotated (stale) refresh token still finds and denylists
+// the CURRENT access token for that family, not just the older JWT recorded
+// on the stale token's own row. Before this fix, LookupAnyRefreshToken's
+// accessToken field pointed at the predecessor JWT minted before rotation,
+// so the live JWT actually in use remained valid (thread-owl review, PR #195).
+func TestRevokeStaleRefreshTokenCascadesToCurrentAccessToken(t *testing.T) {
+	h := newBuiltinTestHandler(t,
+		func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{AccessToken: "gh-tok"}, nil
+		},
+		func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Subject: "alice"}, nil
+		},
+	)
+	_, refreshToken1 := issueBuiltinTokens(t, h, "alice")
+
+	// Rotate once: refreshToken1 becomes stale, and a new access/refresh
+	// token pair is issued in the same family.
+	refreshBody := "grant_type=refresh_token&refresh_token=" + url.QueryEscape(refreshToken1)
+	refreshReq := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader(refreshBody))
+	refreshReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	refreshRec := httptest.NewRecorder()
+	h.Token(refreshRec, refreshReq)
+	if refreshRec.Code != http.StatusOK {
+		t.Fatalf("rotation: got %d; body=%s", refreshRec.Code, refreshRec.Body.String())
+	}
+	var refreshResp map[string]any
+	if err := json.NewDecoder(refreshRec.Body).Decode(&refreshResp); err != nil {
+		t.Fatalf("decode rotation response: %v", err)
+	}
+	accessToken2, _ := refreshResp["access_token"].(string)
+	if accessToken2 == "" {
+		t.Fatal("rotation response missing access_token")
+	}
+
+	// Revoke the STALE (pre-rotation) refresh token.
+	rec := revokeRequest(h, refreshToken1, "refresh_token")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("revoke: got %d; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// The CURRENT access token (accessToken2), not just the original one,
+	// must now be rejected.
+	h.store.InvalidateCachedToken(accessToken2)
+	if _, _, err := h.ValidateToken(context.Background(), accessToken2, ""); err == nil {
+		t.Error("ValidateToken: expected error for current access token cascaded from a stale refresh token revocation")
+	}
+}
+
+// revokeJTIFailStore wraps a RefreshTokenStore, delegating everything except
+// RevokeJTI, which always fails — simulating a denylist write failure (e.g.
+// SQLite read-only/locked/corrupt) to verify /revoke does not report success
+// when the security property it promises could not actually be persisted.
+type revokeJTIFailStore struct {
+	RefreshTokenStore
+}
+
+func (r *revokeJTIFailStore) RevokeJTI(_ string, _ time.Time) error {
+	return fmt.Errorf("simulated jti denylist write failure")
+}
+
+// TestRevokeStoreWriteFailurePropagatesAsServerError verifies that a failed
+// RevokeJTI write is surfaced as 500 server_error rather than 200 — silently
+// reporting success would leave the JWT re-validating after the next cache
+// eviction (thread-owl review, PR #195).
+func TestRevokeStoreWriteFailurePropagatesAsServerError(t *testing.T) {
+	h := newBuiltinTestHandler(t,
+		func(_ context.Context, _ string) (provider.TokenResponse, error) {
+			return provider.TokenResponse{AccessToken: "gh-tok"}, nil
+		},
+		func(_ context.Context, _ string) (provider.Identity, error) {
+			return provider.Identity{Subject: "alice"}, nil
+		},
+	)
+	accessToken, _ := issueBuiltinTokens(t, h, "alice")
+
+	// Swap in a RefreshTokenStore whose RevokeJTI always fails, simulating a
+	// denylist write failure discovered only once /revoke is called. The
+	// OAuth session/PKCE bookkeeping used only during Authorize->Callback->
+	// Token is no longer needed at this point, so replacing the whole store
+	// (rather than mutating it in place, which Store does not expose) is safe.
+	h.store = NewStore(10*time.Minute, 90*24*time.Hour, NewMemTokenStore(),
+		WithRefreshTokenStore(&revokeJTIFailStore{RefreshTokenStore: NewMemRefreshTokenStore()}))
+
+	rec := revokeRequest(h, accessToken, "access_token")
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("revoke with failing denylist write: got %d, want 500; body=%s", rec.Code, rec.Body.String())
 	}
 }
 

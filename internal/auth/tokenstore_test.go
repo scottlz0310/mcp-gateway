@@ -716,6 +716,65 @@ func testRefreshTokenStoreContract(t *testing.T, rts RefreshTokenStore) {
 	if !rts.IsJTIRevoked("jti-1") {
 		t.Error("IsJTIRevoked: jti-1 should survive Sweep (not yet expired)")
 	}
+
+	// LookupActiveByFamily returns the access token of the current
+	// (non-revoked) row for a family, ignoring an older revoked sibling.
+	if err := rts.Save("rt-fam-old", "at-fam-old", "aud", "fid-fam", time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("Save rt-fam-old: %v", err)
+	}
+	if err := rts.Revoke("rt-fam-old"); err != nil {
+		t.Fatalf("Revoke rt-fam-old: %v", err)
+	}
+	if err := rts.Save("rt-fam-new", "at-fam-new", "aud", "fid-fam", time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("Save rt-fam-new: %v", err)
+	}
+	if got, ok := rts.LookupActiveByFamily("fid-fam"); !ok || got != "at-fam-new" {
+		t.Errorf("LookupActiveByFamily: got (%q, %v), want (%q, true)", got, ok, "at-fam-new")
+	}
+	// No active row -> (\"\", false).
+	if got, ok := rts.LookupActiveByFamily("fid-no-such-family"); ok || got != "" {
+		t.Errorf("LookupActiveByFamily on unknown family: got (%q, %v), want (\"\", false)", got, ok)
+	}
+	// Empty familyID never matches (Save never associates a row with "").
+	if got, ok := rts.LookupActiveByFamily(""); ok || got != "" {
+		t.Errorf("LookupActiveByFamily(\"\"): got (%q, %v), want (\"\", false)", got, ok)
+	}
+
+	// RevokeFamily tombstones familyID: a subsequent Save for a *different*
+	// refresh token in the same family must be rejected with
+	// ErrRefreshTokenFamilyRevoked, closing the race where a rotation
+	// in-flight when /revoke runs would otherwise resurrect the family with
+	// a fresh, non-revoked row (thread-owl review, PR #195).
+	if err := rts.Save("rt-tomb-1", "at-tomb-1", "aud", "fid-tomb", time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("Save rt-tomb-1: %v", err)
+	}
+	if err := rts.RevokeFamily("fid-tomb"); err != nil {
+		t.Fatalf("RevokeFamily: %v", err)
+	}
+	if err := rts.Save("rt-tomb-2", "at-tomb-2", "aud", "fid-tomb", time.Now().Add(time.Hour)); !errors.Is(err, ErrRefreshTokenFamilyRevoked) {
+		t.Errorf("Save into revoked family: got err=%v, want ErrRefreshTokenFamilyRevoked", err)
+	}
+	// The blocked Save must not have written a row.
+	if _, _, _, _, ok := rts.Lookup("rt-tomb-2"); ok {
+		t.Error("Save into revoked family must not create a row despite returning an error")
+	}
+	// RevokeFamily on a familyID with no existing rows still tombstones it
+	// (a rotation could otherwise race the very first Save for a brand-new
+	// family and slip in before any row exists to revoke).
+	if err := rts.RevokeFamily("fid-tomb-empty"); err != nil {
+		t.Fatalf("RevokeFamily (no rows): %v", err)
+	}
+	if err := rts.Save("rt-tomb-empty", "at", "aud", "fid-tomb-empty", time.Now().Add(time.Hour)); !errors.Is(err, ErrRefreshTokenFamilyRevoked) {
+		t.Errorf("Save into family revoked before any row existed: got err=%v, want ErrRefreshTokenFamilyRevoked", err)
+	}
+	// familyID == "" is never tombstoned; RevokeFamily(\"\") remains a no-op
+	// (mirrors the pre-existing contract) and Save with familyID="" always succeeds.
+	if err := rts.RevokeFamily(""); err != nil {
+		t.Fatalf("RevokeFamily(\"\"): %v", err)
+	}
+	if err := rts.Save("rt-no-family", "at", "aud", "", time.Now().Add(time.Hour)); err != nil {
+		t.Errorf("Save with empty familyID: got err=%v, want nil", err)
+	}
 }
 
 // ── memRefreshTokenStore ──────────────────────────────────────────────────────
@@ -927,16 +986,17 @@ func (f *alwaysFailRefreshStore) Lookup(_ string) (string, string, string, time.
 func (f *alwaysFailRefreshStore) LookupAny(_ string) (string, string, string, time.Time, bool, bool) {
 	return "", "", "", time.Time{}, false, false
 }
-func (f *alwaysFailRefreshStore) Revoke(_ string) error                     { return nil }
-func (f *alwaysFailRefreshStore) RevokeFamily(_ string) error               { return nil }
-func (f *alwaysFailRefreshStore) SaveNonce(_, _ string) error               { return nil }
-func (f *alwaysFailRefreshStore) LookupNonce(_ string) string               { return "" }
-func (f *alwaysFailRefreshStore) SaveProviderAccessToken(_, _ string) error { return nil }
-func (f *alwaysFailRefreshStore) LookupProviderAccessToken(_ string) string { return "" }
-func (f *alwaysFailRefreshStore) RevokeJTI(_ string, _ time.Time) error     { return nil }
-func (f *alwaysFailRefreshStore) IsJTIRevoked(_ string) bool                { return false }
-func (f *alwaysFailRefreshStore) Delete(_ string) error                     { return errInjectedStoreFailure }
-func (f *alwaysFailRefreshStore) Sweep() error                              { return nil }
+func (f *alwaysFailRefreshStore) LookupActiveByFamily(_ string) (string, bool) { return "", false }
+func (f *alwaysFailRefreshStore) Revoke(_ string) error                        { return nil }
+func (f *alwaysFailRefreshStore) RevokeFamily(_ string) error                  { return nil }
+func (f *alwaysFailRefreshStore) SaveNonce(_, _ string) error                  { return nil }
+func (f *alwaysFailRefreshStore) LookupNonce(_ string) string                  { return "" }
+func (f *alwaysFailRefreshStore) SaveProviderAccessToken(_, _ string) error    { return nil }
+func (f *alwaysFailRefreshStore) LookupProviderAccessToken(_ string) string    { return "" }
+func (f *alwaysFailRefreshStore) RevokeJTI(_ string, _ time.Time) error        { return nil }
+func (f *alwaysFailRefreshStore) IsJTIRevoked(_ string) bool                   { return false }
+func (f *alwaysFailRefreshStore) Delete(_ string) error                        { return errInjectedStoreFailure }
+func (f *alwaysFailRefreshStore) Sweep() error                                 { return nil }
 
 // testRefreshTokenStoreReuseDetection exercises LookupAny and RevokeFamily on
 // the given RefreshTokenStore.  It is shared across in-memory and file-backed

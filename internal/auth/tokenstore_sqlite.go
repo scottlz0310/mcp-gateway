@@ -2,6 +2,7 @@ package auth
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -33,6 +34,18 @@ CREATE TABLE IF NOT EXISTS revoked_jti (
 	expires_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_revoked_jti_expires ON revoked_jti (expires_at);
+
+-- revoked_families tombstones a refresh-token family (RFC 6819 §5.2.2.3)
+-- permanently, independent of the mutable revoked flag on individual
+-- refresh_tokens rows. Save() checks this table so a rotation racing a
+-- concurrent RevokeFamily cannot resurrect the family with a fresh,
+-- non-revoked row after the revocation appears to have completed. Never
+-- swept: family IDs are single-use random strings, so this table only grows
+-- with explicit revocations (expected to stay small).
+CREATE TABLE IF NOT EXISTS revoked_families (
+	family_id  TEXT PRIMARY KEY,
+	revoked_at INTEGER NOT NULL
+);
 `
 
 type sqliteRefreshTokenStore struct {
@@ -75,14 +88,27 @@ func NewSQLiteRefreshTokenStore(path string) (RefreshTokenStore, error) {
 	return s, nil
 }
 
+// Save writes refreshToken's row guarded by a NOT EXISTS check against
+// revoked_families: the write and the tombstone check happen inside a single
+// statement, so this is atomic with RevokeFamily's own write with respect to
+// concurrent callers (the store's single DB connection — see
+// NewSQLiteRefreshTokenStore's SetMaxOpenConns(1) — fully serialises every
+// Exec against this database, so whichever of Save/RevokeFamily's writes
+// commits first is authoritative for the other). If familyID is tombstoned,
+// RowsAffected is 0 and ErrRefreshTokenFamilyRevoked is returned without
+// writing a row.
 func (s *sqliteRefreshTokenStore) Save(refreshToken, accessToken, audience, familyID string, expiresAt time.Time) error {
-	_, err := s.db.Exec(
+	res, err := s.db.Exec(
 		`INSERT OR REPLACE INTO refresh_tokens (token_hash, access_token, audience, family_id, expires_at, revoked)
-		 VALUES (?, ?, ?, ?, ?, 0)`,
-		tokenKey(refreshToken), accessToken, audience, familyID, expiresAt.Unix(),
+		 SELECT ?, ?, ?, ?, ?, 0
+		 WHERE ? = '' OR NOT EXISTS (SELECT 1 FROM revoked_families WHERE family_id = ?)`,
+		tokenKey(refreshToken), accessToken, audience, familyID, expiresAt.Unix(), familyID, familyID,
 	)
 	if err != nil {
 		return fmt.Errorf("saving refresh token: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrRefreshTokenFamilyRevoked
 	}
 	return nil
 }
@@ -116,6 +142,23 @@ func (s *sqliteRefreshTokenStore) LookupAny(refreshToken string) (string, string
 	return at, aud, fid, time.Unix(expiresUnix, 0), revokedInt != 0, true
 }
 
+func (s *sqliteRefreshTokenStore) LookupActiveByFamily(familyID string) (string, bool) {
+	if familyID == "" {
+		return "", false
+	}
+	var at string
+	err := s.db.QueryRow(
+		`SELECT access_token FROM refresh_tokens
+		 WHERE family_id = ? AND expires_at > ? AND revoked = 0
+		 LIMIT 1`,
+		familyID, time.Now().Unix(),
+	).Scan(&at)
+	if err != nil {
+		return "", false
+	}
+	return at, true
+}
+
 func (s *sqliteRefreshTokenStore) Revoke(refreshToken string) error {
 	_, err := s.db.Exec(
 		`UPDATE refresh_tokens SET revoked = 1 WHERE token_hash = ? AND expires_at > ? AND revoked = 0`,
@@ -127,16 +170,37 @@ func (s *sqliteRefreshTokenStore) Revoke(refreshToken string) error {
 	return nil
 }
 
+// RevokeFamily marks every non-revoked row for familyID as revoked and
+// tombstones familyID in revoked_families, all inside one transaction so a
+// concurrent Save for the same familyID (see Save's doc comment) either
+// commits entirely before this transaction starts (and is caught by the
+// UPDATE below) or is blocked by the tombstone once this transaction
+// commits — the single DB connection means there is no interleaving window
+// between the two.
 func (s *sqliteRefreshTokenStore) RevokeFamily(familyID string) error {
 	if familyID == "" {
 		return nil
 	}
-	_, err := s.db.Exec(
-		`UPDATE refresh_tokens SET revoked = 1 WHERE family_id = ? AND revoked = 0`,
-		familyID,
-	)
+	tx, err := s.db.Begin()
 	if err != nil {
 		return fmt.Errorf("revoking refresh token family %q: %w", familyID, err)
+	}
+	if _, err := tx.Exec(
+		`UPDATE refresh_tokens SET revoked = 1 WHERE family_id = ? AND revoked = 0`,
+		familyID,
+	); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("revoking refresh token family %q: %w", familyID, err)
+	}
+	if _, err := tx.Exec(
+		`INSERT OR IGNORE INTO revoked_families (family_id, revoked_at) VALUES (?, ?)`,
+		familyID, time.Now().Unix(),
+	); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("tombstoning refresh token family %q: %w", familyID, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("committing refresh token family revocation %q: %w", familyID, err)
 	}
 	return nil
 }
@@ -203,13 +267,25 @@ func (s *sqliteRefreshTokenStore) RevokeJTI(jti string, expiresAt time.Time) err
 	return nil
 }
 
+// IsJTIRevoked fails closed: sql.ErrNoRows (the jti is genuinely absent) is
+// the only error treated as "not revoked". Any other error — a locked,
+// unreadable, or corrupt database — is treated as revoked, because the
+// alternative (failing open) would let an actually-revoked gateway JWT keep
+// validating whenever the denylist happens to be unreadable.
 func (s *sqliteRefreshTokenStore) IsJTIRevoked(jti string) bool {
 	var expiresAt int64
 	err := s.db.QueryRow(
 		`SELECT expires_at FROM revoked_jti WHERE jti = ? AND expires_at > ?`,
 		jti, time.Now().Unix(),
 	).Scan(&expiresAt)
-	return err == nil
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return false
+	}
+	slog.Warn("jti denylist query failed; failing closed (treating token as revoked)", "err", err)
+	return true
 }
 
 func (s *sqliteRefreshTokenStore) Sweep() error {

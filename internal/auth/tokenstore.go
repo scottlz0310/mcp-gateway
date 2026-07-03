@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -583,6 +584,16 @@ func (f *fileTokenStore) flush() error {
 
 // ── RefreshTokenStore ────────────────────────────────────────────────────────
 
+// ErrRefreshTokenFamilyRevoked is returned by Save when familyID has been
+// tombstoned by a prior RevokeFamily call. This closes a TOCTOU race between
+// POST /revoke (which revokes a family) and a concurrently in-flight
+// tokenRefresh rotation for the same family: without the tombstone, a
+// rotation that reads its old row before RevokeFamily's UPDATE but writes
+// its new row after would create a fresh, non-revoked entry that survives
+// the revocation. familyID == "" is never tombstoned (Save always succeeds
+// for it), matching RevokeFamily's existing no-op for an empty familyID.
+var ErrRefreshTokenFamilyRevoked = errors.New("refresh token family has been revoked")
+
 // RefreshTokenStore persists gateway-issued refresh token → access token mappings.
 // Two implementations: memRefreshTokenStore (default) and fileRefreshTokenStore (JSON file).
 //
@@ -591,7 +602,10 @@ func (f *fileTokenStore) flush() error {
 // inherited across rotations. When a revoked token is presented again (reuse
 // attack), RevokeFamily invalidates the entire lineage.
 type RefreshTokenStore interface {
-	// Save records that refreshToken maps to accessToken/audience/familyID and is valid until expiresAt.
+	// Save records that refreshToken maps to accessToken/audience/familyID and
+	// is valid until expiresAt. Returns ErrRefreshTokenFamilyRevoked (without
+	// writing) when familyID is non-empty and has been tombstoned by a prior
+	// RevokeFamily call — see ErrRefreshTokenFamilyRevoked.
 	Save(refreshToken, accessToken, audience, familyID string, expiresAt time.Time) error
 	// Lookup returns the access token, audience, familyID, and expiry for an active (non-revoked,
 	// non-expired) refresh token. Returns false when the token is unknown, expired, or revoked.
@@ -600,12 +614,21 @@ type RefreshTokenStore interface {
 	// LookupAny is like Lookup but also returns revoked entries that have not yet expired.
 	// Used for reuse detection: a revoked-but-present entry indicates a replay attack.
 	LookupAny(refreshToken string) (accessToken, audience, familyID string, expiresAt time.Time, revoked, ok bool)
+	// LookupActiveByFamily returns the access token of the current (non-revoked,
+	// non-expired) refresh-token row for familyID, or ("", false) when none
+	// exists. Used by POST /revoke to find the access token actually in use
+	// today even when the presented refresh token is a stale, already-rotated
+	// predecessor whose own accessToken field points at an earlier JWT.
+	LookupActiveByFamily(familyID string) (accessToken string, ok bool)
 	// Revoke marks a single refresh token as revoked without deleting it.
 	// The revoked entry is retained until it expires so that reuse detection
 	// (via LookupAny) can identify replay attacks within the expiry window.
 	Revoke(refreshToken string) error
-	// RevokeFamily marks all non-revoked tokens belonging to familyID as revoked.
-	// Used on reuse detection to invalidate the entire token lineage.
+	// RevokeFamily marks all non-revoked tokens belonging to familyID as
+	// revoked AND tombstones familyID (permanently; see
+	// ErrRefreshTokenFamilyRevoked) so a concurrently in-flight Save for the
+	// same familyID is rejected rather than resurrecting the family. Used on
+	// reuse detection to invalidate the entire token lineage.
 	RevokeFamily(familyID string) error
 	// Delete removes a single refresh token entry immediately.
 	Delete(refreshToken string) error
@@ -658,23 +681,30 @@ type memRTEntry struct {
 }
 
 type memRefreshTokenStore struct {
-	mu         sync.RWMutex
-	entries    map[string]memRTEntry // key: tokenKey(rawRefreshToken)
-	revokedJTI map[string]time.Time  // key: jti, value: expiresAt
+	mu              sync.RWMutex
+	entries         map[string]memRTEntry // key: tokenKey(rawRefreshToken)
+	revokedJTI      map[string]time.Time  // key: jti, value: expiresAt
+	revokedFamilies map[string]struct{}   // key: familyID, tombstoned by RevokeFamily
 }
 
 // NewMemRefreshTokenStore returns an in-memory RefreshTokenStore.
 // All data is lost when the process exits.
 func NewMemRefreshTokenStore() RefreshTokenStore {
 	return &memRefreshTokenStore{
-		entries:    make(map[string]memRTEntry),
-		revokedJTI: make(map[string]time.Time),
+		entries:         make(map[string]memRTEntry),
+		revokedJTI:      make(map[string]time.Time),
+		revokedFamilies: make(map[string]struct{}),
 	}
 }
 
 func (m *memRefreshTokenStore) Save(refreshToken, accessToken, audience, familyID string, expiresAt time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if familyID != "" {
+		if _, revoked := m.revokedFamilies[familyID]; revoked {
+			return ErrRefreshTokenFamilyRevoked
+		}
+	}
 	m.entries[tokenKey(refreshToken)] = memRTEntry{
 		accessToken: accessToken,
 		audience:    audience,
@@ -704,6 +734,21 @@ func (m *memRefreshTokenStore) LookupAny(refreshToken string) (string, string, s
 	return e.accessToken, e.audience, e.familyID, e.expiresAt, e.revoked, true
 }
 
+func (m *memRefreshTokenStore) LookupActiveByFamily(familyID string) (string, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if familyID == "" {
+		return "", false
+	}
+	now := time.Now()
+	for _, e := range m.entries {
+		if e.familyID == familyID && !e.revoked && now.Before(e.expiresAt) {
+			return e.accessToken, true
+		}
+	}
+	return "", false
+}
+
 func (m *memRefreshTokenStore) Revoke(refreshToken string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -720,12 +765,21 @@ func (m *memRefreshTokenStore) Revoke(refreshToken string) error {
 func (m *memRefreshTokenStore) RevokeFamily(familyID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if familyID == "" {
+		return nil
+	}
 	for k, e := range m.entries {
 		if e.familyID == familyID && !e.revoked {
 			e.revoked = true
 			m.entries[k] = e
 		}
 	}
+	// Tombstone permanently: a concurrent Save for this familyID (e.g. a
+	// rotation racing this call) must be rejected rather than resurrecting
+	// the family after this call returns. Never swept — mirrors the
+	// rotationFailed map precedent (session.go): expected to stay small
+	// since it only grows with explicit revocations.
+	m.revokedFamilies[familyID] = struct{}{}
 	return nil
 }
 
@@ -836,13 +890,14 @@ type fileRefreshTokenStore struct {
 	mu      sync.RWMutex
 	path    string
 	entries map[string]fileRTEntry // key: tokenKey(rawRefreshToken)
-	// revokedJTI is intentionally in-memory only (not persisted to path).
-	// This legacy file-backed implementation is only exercised directly by
-	// its own contract tests; the live NewHandler path migrates it to
-	// sqliteRefreshTokenStore at startup (see tokenstore_sqlite_migrate.go)
-	// before any /revoke traffic can occur, so a durable denylist here is
-	// unreachable in production.
-	revokedJTI map[string]time.Time
+	// revokedJTI and revokedFamilies are intentionally in-memory only (not
+	// persisted to path). This legacy file-backed implementation is only
+	// exercised directly by its own contract tests; the live NewHandler path
+	// migrates it to sqliteRefreshTokenStore at startup (see
+	// tokenstore_sqlite_migrate.go) before any /revoke traffic can occur, so
+	// a durable denylist/tombstone here is unreachable in production.
+	revokedJTI      map[string]time.Time
+	revokedFamilies map[string]struct{}
 }
 
 // NewFileRefreshTokenStore returns a file-backed RefreshTokenStore that loads
@@ -851,9 +906,10 @@ type fileRefreshTokenStore struct {
 // If the file does not yet exist, an empty store is returned without error.
 func NewFileRefreshTokenStore(path string) (RefreshTokenStore, error) {
 	s := &fileRefreshTokenStore{
-		path:       path,
-		entries:    make(map[string]fileRTEntry),
-		revokedJTI: make(map[string]time.Time),
+		path:            path,
+		entries:         make(map[string]fileRTEntry),
+		revokedJTI:      make(map[string]time.Time),
+		revokedFamilies: make(map[string]struct{}),
 	}
 	if err := s.load(); err != nil {
 		if !os.IsNotExist(err) {
@@ -902,6 +958,11 @@ func NewFileRefreshTokenStore(path string) (RefreshTokenStore, error) {
 func (f *fileRefreshTokenStore) Save(refreshToken, accessToken, audience, familyID string, expiresAt time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if familyID != "" {
+		if _, revoked := f.revokedFamilies[familyID]; revoked {
+			return ErrRefreshTokenFamilyRevoked
+		}
+	}
 	key := tokenKey(refreshToken)
 	prev, hasPrev := f.entries[key]
 	f.entries[key] = fileRTEntry{AccessToken: accessToken, Audience: audience, FamilyID: familyID, ExpiresAt: expiresAt}
@@ -936,6 +997,21 @@ func (f *fileRefreshTokenStore) LookupAny(refreshToken string) (string, string, 
 	return e.AccessToken, e.Audience, e.FamilyID, e.ExpiresAt, e.Revoked, true
 }
 
+func (f *fileRefreshTokenStore) LookupActiveByFamily(familyID string) (string, bool) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if familyID == "" {
+		return "", false
+	}
+	now := time.Now()
+	for _, e := range f.entries {
+		if e.FamilyID == familyID && !e.Revoked && now.Before(e.ExpiresAt) {
+			return e.AccessToken, true
+		}
+	}
+	return "", false
+}
+
 func (f *fileRefreshTokenStore) Revoke(refreshToken string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -957,6 +1033,9 @@ func (f *fileRefreshTokenStore) Revoke(refreshToken string) error {
 func (f *fileRefreshTokenStore) RevokeFamily(familyID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if familyID == "" {
+		return nil
+	}
 	changed := false
 	for k, e := range f.entries {
 		if e.FamilyID == familyID && !e.Revoked {
@@ -965,6 +1044,10 @@ func (f *fileRefreshTokenStore) RevokeFamily(familyID string) error {
 			changed = true
 		}
 	}
+	// Tombstone permanently (in-memory only — see the revokedFamilies field
+	// comment) regardless of whether any row existed to revoke, so a
+	// concurrent Save for this familyID is rejected either way.
+	f.revokedFamilies[familyID] = struct{}{}
 	if !changed {
 		return nil
 	}

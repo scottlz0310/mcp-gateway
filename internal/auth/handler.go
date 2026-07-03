@@ -870,6 +870,18 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 		// Propagate the same familyID so the token lineage remains traceable.
 		newRT, rtErr := h.store.CreateRefreshToken(newGatewayToken, audience, familyID, h.refreshTokenTTL())
 		if rtErr != nil {
+			if errors.Is(rtErr, ErrRefreshTokenFamilyRevoked) {
+				// The family was revoked (POST /revoke) concurrently with this
+				// rotation. RestoreRefreshToken below is a no-op for the same
+				// reason (Save also rejects the tombstoned family), so the
+				// reserved token stays gone — report the permanent, intentional
+				// nature of this outcome rather than a transient 500 that might
+				// invite a retry loop.
+				h.auditFailure("refresh", "invalid_grant", "refresh token family revoked concurrently with rotation", rtErr, http.StatusBadRequest, tokenFingerprint(newGatewayToken))
+				h.store.RestoreRefreshToken(rt, accessToken, originalAudience, familyID, rtExpiresAt)
+				oauthError(w, "invalid_grant", "refresh token has been revoked", http.StatusBadRequest)
+				return
+			}
 			h.auditFailure("refresh", "store_error", "refresh token rotation failed", rtErr, http.StatusInternalServerError, tokenFingerprint(newGatewayToken))
 			slog.Error("failed to rotate refresh token (builtin)", "err", rtErr)
 			h.store.RestoreRefreshToken(rt, accessToken, originalAudience, familyID, rtExpiresAt)
@@ -912,6 +924,12 @@ func (h *Handler) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 	// Issue the rotated refresh token propagating familyID for reuse tracking.
 	newRT, rtErr := h.store.CreateRefreshToken(accessToken, audience, familyID, h.refreshTokenTTL())
 	if rtErr != nil {
+		if errors.Is(rtErr, ErrRefreshTokenFamilyRevoked) {
+			h.auditFailure("refresh", "invalid_grant", "refresh token family revoked concurrently with rotation", rtErr, http.StatusBadRequest, tokenFingerprint(accessToken))
+			h.store.RestoreRefreshToken(rt, accessToken, originalAudience, familyID, rtExpiresAt)
+			oauthError(w, "invalid_grant", "refresh token has been revoked", http.StatusBadRequest)
+			return
+		}
 		h.auditFailure("refresh", "store_error", "refresh token rotation failed", rtErr, http.StatusInternalServerError, tokenFingerprint(accessToken))
 		slog.Error("failed to rotate refresh token", "err", rtErr)
 		// Restore the original token (with its original audience) so the client can retry.
@@ -1846,8 +1864,11 @@ func (h *Handler) UserInfo(w http.ResponseWriter, r *http.Request) {
 // skip the correct revocation path, so both the refresh-token and
 // access-token paths are always attempted regardless of the hint. Presenting
 // an unknown, already-expired, or already-revoked token is not an error (RFC
-// 7009 §2.2) — the endpoint always responds 200 with an empty body, so a
-// caller cannot use it to probe whether a token is currently valid.
+// 7009 §2.2) — the endpoint responds 200 with an empty body for those cases,
+// so a caller cannot use it to probe whether a token is currently valid. A
+// genuine store write failure is different: it means revocation could not be
+// guaranteed, so it is surfaced as 500 rather than reported as success (see
+// revokeGatewayJWTIfValid).
 func (h *Handler) Revoke(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	if err := r.ParseForm(); err != nil {
@@ -1863,33 +1884,63 @@ func (h *Handler) Revoke(w http.ResponseWriter, r *http.Request) {
 	}
 
 	revokedSomething := false
+	var storeErr error
 
 	// Refresh-token path. LookupAnyRefreshToken finds both active and
 	// soft-revoked (already-rotated) entries so a client presenting a token
 	// it no longer holds the "current" copy of still reaches its familyID.
 	if accessToken, _, familyID, _, _, ok := h.store.LookupAnyRefreshToken(token); ok {
 		revokedSomething = true
+		// Always revoke the presented token itself, independent of familyID:
+		// familyID can be empty when family-ID generation failed at issuance
+		// time (rare best-effort fallback in tokenAuthCode/tokenDeviceGrant),
+		// in which case RevokeRefreshTokenFamily below is a no-op and this
+		// call is the only thing that actually invalidates the presented token.
+		if err := h.store.RevokeSingleRefreshToken(token); err != nil {
+			storeErr = errors.Join(storeErr, fmt.Errorf("revoking refresh token: %w", err))
+		}
+		// Resolve the family's currently active access token BEFORE
+		// RevokeRefreshTokenFamily marks every row revoked: if the presented
+		// token is a stale, already-rotated predecessor, its own accessToken
+		// field points at an earlier JWT, not the one actually in use today.
+		currentAccessToken := accessToken
 		if familyID != "" {
+			if active, ok := h.store.LookupActiveRefreshTokenAccessToken(familyID); ok {
+				currentAccessToken = active
+			}
 			if err := h.store.RevokeRefreshTokenFamily(familyID); err != nil {
-				slog.Warn("revoke: refresh token family revocation failed", "err", err)
+				storeErr = errors.Join(storeErr, fmt.Errorf("revoking refresh token family: %w", err))
 			}
 		}
 		// RevokeRefreshTokenFamily only blocks *future* rotations — the
 		// gateway JWT already issued for this family remains valid
 		// (stateless) until its own exp unless separately denylisted here.
-		if h.isBuiltinMode() && accessToken != "" {
-			h.revokeGatewayJWTIfValid(accessToken)
+		if h.isBuiltinMode() && currentAccessToken != "" {
+			if _, err := h.revokeGatewayJWTIfValid(currentAccessToken); err != nil {
+				storeErr = errors.Join(storeErr, fmt.Errorf("revoking cascaded access token: %w", err))
+			}
 		}
 	}
 
 	// Access-token path.
 	if h.isBuiltinMode() {
-		if h.revokeGatewayJWTIfValid(token) {
+		revoked, err := h.revokeGatewayJWTIfValid(token)
+		if err != nil {
+			storeErr = errors.Join(storeErr, fmt.Errorf("revoking access token: %w", err))
+		}
+		if revoked {
 			revokedSomething = true
 		}
 	} else if _, ok := h.store.LookupToken(token); ok {
 		h.store.InvalidateCachedToken(token)
 		revokedSomething = true
+	}
+
+	if storeErr != nil {
+		h.auditFailure("revoke", "server_error", "token revocation could not be persisted", storeErr, http.StatusInternalServerError, tokenFingerprint(token))
+		slog.Error("revoke: store write failed", "err", storeErr)
+		oauthError(w, "server_error", "token revocation could not be persisted", http.StatusInternalServerError)
+		return
 	}
 
 	if revokedSomething {
@@ -1903,20 +1954,28 @@ func (h *Handler) Revoke(w http.ResponseWriter, r *http.Request) {
 
 // revokeGatewayJWTIfValid adds token's jti to the revocation denylist and
 // invalidates its cache entry, but only if token is a well-formed,
-// signature-valid, not-yet-expired gateway JWT. Returns false (no-op) for a
-// malformed or already-expired token: an expired token needs no denylist
-// entry since verifyGatewayJWT's own exp check already rejects it, and this
-// keeps the denylist bounded to tokens that would otherwise still validate.
-func (h *Handler) revokeGatewayJWTIfValid(token string) bool {
-	claims, err := h.parseGatewayJWTClaims(token)
-	if err != nil || claims.Jti == "" || claims.Exp <= 0 || time.Now().Unix() > claims.Exp {
-		return false
+// signature-valid, not-yet-expired gateway JWT.
+//
+// revoked=false, err=nil for a malformed or already-expired token: an
+// expired token needs no denylist entry since verifyGatewayJWT's own exp
+// check already rejects it, and this keeps the denylist bounded to tokens
+// that would otherwise still validate — this is the RFC 7009 §2.2 no-op
+// case, not an error.
+//
+// err != nil means token WAS a valid, currently-live JWT but the denylist
+// write failed. The caller must not report success in this case: a token
+// whose cache entry is deleted but whose jti was never durably denylisted
+// would simply re-validate (and re-cache) on the next request.
+func (h *Handler) revokeGatewayJWTIfValid(token string) (revoked bool, err error) {
+	claims, parseErr := h.parseGatewayJWTClaims(token)
+	if parseErr != nil || claims.Jti == "" || claims.Exp <= 0 || time.Now().Unix() > claims.Exp {
+		return false, nil
 	}
 	if err := h.store.RevokeJTI(claims.Jti, time.Unix(claims.Exp, 0)); err != nil {
-		slog.Warn("revoke: jti denylist write failed", "err", err)
+		return false, fmt.Errorf("jti denylist write failed: %w", err)
 	}
 	h.store.InvalidateCachedToken(token)
-	return true
+	return true, nil
 }
 
 // isBuiltinMode reports whether the handler operates in builtin mode, where

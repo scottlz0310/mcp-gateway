@@ -3,6 +3,8 @@ package auth
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -312,5 +314,89 @@ func TestSQLiteRefreshTokenStoreRevoke(t *testing.T) {
 	// Sibling token in the same family must be unaffected.
 	if _, _, _, _, ok := rts.Lookup("rt-b"); !ok {
 		t.Error("Lookup rt-b: sibling must remain accessible after Revoke(rt-a)")
+	}
+}
+
+// TestSQLiteRefreshTokenStoreIsJTIRevokedFailsClosedOnDBError verifies that
+// IsJTIRevoked treats a database error (as opposed to a legitimate "not
+// found") as revoked, per the Copilot review finding on PR #195: failing
+// open here would let a JWT that really was denylisted keep validating
+// whenever the store happens to be unreadable (locked, corrupt, read-only).
+func TestSQLiteRefreshTokenStoreIsJTIRevokedFailsClosedOnDBError(t *testing.T) {
+	rts, err := NewSQLiteRefreshTokenStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewSQLiteRefreshTokenStore: %v", err)
+	}
+	sq := rts.(*sqliteRefreshTokenStore)
+
+	// Baseline: an absent jti (sql.ErrNoRows path) is correctly "not revoked".
+	if sq.IsJTIRevoked("never-revoked") {
+		t.Fatal("IsJTIRevoked: expected false for an absent jti before simulating a DB error")
+	}
+
+	// Force every subsequent query to fail with something other than
+	// ErrNoRows by closing the underlying connection.
+	if err := sq.db.Close(); err != nil {
+		t.Fatalf("closing db: %v", err)
+	}
+
+	if !sq.IsJTIRevoked("any-jti") {
+		t.Error("IsJTIRevoked: expected true (fail closed) when the database is unreadable")
+	}
+}
+
+// TestSQLiteRefreshTokenStoreConcurrentRotationVsRevoke stress-tests the
+// atomicity between Save (rotation) and RevokeFamily (POST /revoke) for the
+// same family, racing many goroutines against a single family to catch any
+// interleaving that would let a rotation slip a fresh, non-revoked row past
+// a concurrent revocation (thread-owl review, PR #195).
+func TestSQLiteRefreshTokenStoreConcurrentRotationVsRevoke(t *testing.T) {
+	rts, err := NewSQLiteRefreshTokenStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewSQLiteRefreshTokenStore: %v", err)
+	}
+	sq := rts.(*sqliteRefreshTokenStore)
+	t.Cleanup(func() { _ = sq.Close() })
+
+	const familyID = "fid-race"
+	exp := time.Now().Add(time.Hour)
+	if err := rts.Save("rt-race-0", "at-race-0", "aud", familyID, exp); err != nil {
+		t.Fatalf("seed Save: %v", err)
+	}
+
+	const attempts = 200
+	revokeStart := make(chan struct{})
+	saveResults := make([]error, attempts)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		<-revokeStart
+		for i := range attempts {
+			rt := fmt.Sprintf("rt-race-%d", i+1)
+			saveResults[i] = rts.Save(rt, "at-race-n", "aud", familyID, exp)
+		}
+	}()
+
+	close(revokeStart)
+	if err := rts.RevokeFamily(familyID); err != nil {
+		t.Fatalf("RevokeFamily: %v", err)
+	}
+	<-done
+
+	// Every successful Save must have produced a row that RevokeFamily's own
+	// UPDATE would have caught (i.e. it is now revoked) — the invariant this
+	// test protects is "no active, non-revoked row survives a completed
+	// RevokeFamily call for its family", not any particular split between
+	// successful and rejected Saves (that split is a legitimate race outcome
+	// depending on scheduling).
+	active, ok := rts.LookupActiveByFamily(familyID)
+	if ok {
+		t.Errorf("LookupActiveByFamily after RevokeFamily: got active row %q, want none", active)
+	}
+	for i, err := range saveResults {
+		if err != nil && !errors.Is(err, ErrRefreshTokenFamilyRevoked) {
+			t.Errorf("Save[%d]: unexpected error %v", i, err)
+		}
 	}
 }

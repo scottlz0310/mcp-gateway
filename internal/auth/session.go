@@ -798,6 +798,25 @@ func (s *Store) LookupAnyRefreshToken(refreshToken string) (accessToken, audienc
 	return s.refreshStore.LookupAny(refreshToken)
 }
 
+// LookupActiveRefreshTokenAccessToken returns the access token of the
+// current (non-revoked, non-expired) refresh-token row for familyID, or
+// ("", false) when none exists. Used by POST /revoke to find the access
+// token actually in use today even when the presented refresh token is a
+// stale, already-rotated predecessor.
+func (s *Store) LookupActiveRefreshTokenAccessToken(familyID string) (accessToken string, ok bool) {
+	return s.refreshStore.LookupActiveByFamily(familyID)
+}
+
+// RevokeSingleRefreshToken marks refreshToken itself as revoked, independent
+// of familyID. Used by POST /revoke so the presented token is always
+// individually invalidated even in the rare case familyID is empty (family-ID
+// generation failed at issuance time, so RevokeRefreshTokenFamily would
+// otherwise be the only revocation attempted and — being a no-op for an
+// empty familyID — would leave the token usable).
+func (s *Store) RevokeSingleRefreshToken(refreshToken string) error {
+	return s.refreshStore.Revoke(refreshToken)
+}
+
 // RevokeRefreshTokenFamily marks every non-revoked refresh token belonging to
 // familyID as revoked, invalidating the entire token lineage. Used by both
 // reuse detection (ReserveRefreshToken) and POST /revoke.
