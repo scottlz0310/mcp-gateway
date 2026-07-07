@@ -1,12 +1,13 @@
 module github.com/scottlz0310/mcp-gateway
 
-go 1.26.4
+go 1.26.5
 
 require (
 	filippo.io/age v1.3.1
 	golang.org/x/crypto v0.53.0
 	golang.org/x/sync v0.21.0
 	gopkg.in/yaml.v3 v3.0.1
+	modernc.org/sqlite v1.52.0
 )
 
 require (
@@ -20,5 +21,4 @@ require (
 	modernc.org/libc v1.72.3 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
-	modernc.org/sqlite v1.52.0 // indirect
 )
