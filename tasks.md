@@ -19,12 +19,20 @@
 
 ## 現在の判断基準
 
-- 対象: 2026-07-03 時点の open issue
+- 対象: 2026-07-10 時点の open issue
 - `#126` は設計決定 issue。Phase 1 (v0.6.0) + Phase 2 (v0.7.0) で実装完了。2026-06-21 にクローズ済み。
 - `#84` は upstream OAuth delegation の親 issue。実装 chain（#113〜#118, #166, #171）+ 関連修正（#162, #175, #177, #179）すべて完了。2026-06-21 にクローズ済み。
 - `#65` は Renovate Dependency Dashboard であり、通常の実装ロードマップには含めない。open 維持。
 
 ---
+
+## v0.9.0 で完了した issue（2026-07-10 リリース）
+
+| Issue | 内容 | 対応 PR |
+|---|---|---|
+| [#201](https://github.com/scottlz0310/mcp-gateway/issues/201) | ローカル HTTPS (TLS) 終端サポート（`MCP_GATEWAY_TLS_CERT_PATH` / `MCP_GATEWAY_TLS_KEY_PATH`） | #202 |
+
+※ ペアとなるホスト側自動セットアップ（`make setup-tls`・証明書マウント・health-check の `-k` トグル・register の HTTPS 追従）は `scottlz0310/Mcp-Docker` PR #203 で実装・マージ済み。実環境での結合 E2E（`make setup-tls` → HTTPS 起動 → register）は未実施のため、リリース後の運用確認として実施する。
 
 ## v0.8.0 で完了した issue（2026-07-03 リリース）
 
@@ -171,21 +179,6 @@ Cloudflare MCP など、upstream が独自 OAuth サーバーを持つケース�
 - [x] `memUpstreamTokenStore` / `fileUpstreamTokenStore` に実装を追加
 - [x] `RefreshAfter401` で `LookupForRefresh` を使用して期限切れ access token でも refresh_token を取得可能に
 - [x] 期限切れ access token + 有効 refresh_token のシナリオテストを追加
-
----
-
-## v0.8.0 以降の open issue
-
-### [#201](https://github.com/scottlz0310/mcp-gateway/issues/201) ローカル HTTPS (TLS) 接続サポート
-
-mcp-gateway 側スコープ（証明書の自動セットアップは Mcp-Docker#202 側）:
-
-- [x] `MCP_GATEWAY_TLS_CERT_PATH` / `MCP_GATEWAY_TLS_KEY_PATH` を追加し、両方設定時に `ListenAndServeTLS` で起動（setup wizard も同様）
-- [x] 片方のみ設定・ファイル欠如・ディレクトリ指定は起動時エラー（フェイルファスト、自己署名フォールバックなし）
-- [x] `MCP_GATEWAY_PUBLIC_URL` 未設定時のデフォルトスキームを TLS 有効時は `https` に
-- [x] `validateTLSConfig` のパラメータ化テストと TLS listener の疎通テストを追加
-- [x] `docs/configuration.md` に環境変数と「TLS 終端（ローカル HTTPS）」セクションを追記
-- [ ] Mcp-Docker 側（証明書マウント・`setup-tls`・health-check の `-k` トグル）との結合確認
 
 ---
 
