@@ -153,7 +153,7 @@ func TestListenAndServeTLS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HTTPS request failed: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusNoContent {
 		t.Errorf("status: got %d, want %d", resp.StatusCode, http.StatusNoContent)
 	}
