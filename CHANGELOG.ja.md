@@ -5,6 +5,13 @@
 
 ## [Unreleased]
 
+### 追加
+
+- ローカル HTTPS（TLS 終端）サポート（[#201](https://github.com/scottlz0310/mcp-gateway/issues/201)）
+  - 新環境変数 `MCP_GATEWAY_TLS_CERT_PATH` / `MCP_GATEWAY_TLS_KEY_PATH`: 両方に PEM 証明書・秘密鍵のパスを設定すると、ゲートウェイ（初回セットアップウィザードを含む）が `http.Server.ListenAndServeTLS` で TLS 付きで listen する。
+  - 起動時のフェイルファスト検証: 片方のみの設定、ファイル欠如、ディレクトリ指定は明示的なエラーで起動を中断する。自己署名証明書の自動生成フォールバックは行わない（ローカル証明書の準備はデプロイ側の責務。例: Mcp-Docker の `setup-tls`）。
+  - `MCP_GATEWAY_PUBLIC_URL` 未設定時のデフォルト公開 URL は、TLS 有効時に `https` スキームで導出されるようになり、OAuth コールバックとディスカバリメタデータがリスナーと整合する。
+
 ## [0.8.0] - 2026-07-03
 
 ### セキュリティ

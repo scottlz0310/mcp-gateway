@@ -1,8 +1,21 @@
 package main
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"errors"
+	"math/big"
+	"net"
+	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/scottlz0310/mcp-gateway/internal/router"
 )
@@ -13,6 +26,146 @@ func mustURL(raw string) *url.URL {
 		panic(err)
 	}
 	return u
+}
+
+// writeSelfSignedCert generates a self-signed certificate for 127.0.0.1 and
+// writes the PEM cert/key pair into dir, returning their paths.
+func writeSelfSignedCert(t *testing.T, dir string) (certPath, keyPath string) {
+	t.Helper()
+
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "mcp-gateway test"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, pub, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	certPath = filepath.Join(dir, "cert.pem")
+	keyPath = filepath.Join(dir, "key.pem")
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
+	if err := os.WriteFile(certPath, certPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return certPath, keyPath
+}
+
+func TestValidateTLSConfig(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	certPath, keyPath := writeSelfSignedCert(t, dir)
+
+	tests := []struct {
+		name    string
+		cert    string
+		key     string
+		wantErr bool
+	}{
+		{name: "both empty: TLS disabled", cert: "", key: "", wantErr: false},
+		{name: "both set and files exist", cert: certPath, key: keyPath, wantErr: false},
+		{name: "cert only", cert: certPath, key: "", wantErr: true},
+		{name: "key only", cert: "", key: keyPath, wantErr: true},
+		{name: "cert file missing", cert: filepath.Join(dir, "missing-cert.pem"), key: keyPath, wantErr: true},
+		{name: "key file missing", cert: certPath, key: filepath.Join(dir, "missing-key.pem"), wantErr: true},
+		{name: "cert path is a directory", cert: dir, key: keyPath, wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := validateTLSConfig(tc.cert, tc.key)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("validateTLSConfig(%q, %q) = %v, wantErr %v", tc.cert, tc.key, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestListenAndServeTLS(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	certPath, keyPath := writeSelfSignedCert(t, dir)
+
+	// Hold the ephemeral port until immediately before the server starts to
+	// keep the reuse race window minimal (ListenAndServeTLS re-binds Addr).
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+
+	srv := &http.Server{
+		Addr: addr,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNoContent)
+		}),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+	errCh := make(chan error, 1)
+	if err := ln.Close(); err != nil {
+		t.Fatal(err)
+	}
+	go func() { errCh <- listenAndServe(srv, certPath, keyPath) }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	certPEM, err := os.ReadFile(certPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(certPEM) {
+		t.Fatal("failed to add test certificate to pool")
+	}
+	client := &http.Client{
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}},
+		Timeout:   5 * time.Second,
+	}
+
+	var resp *http.Response
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		resp, err = client.Get("https://" + addr + "/")
+		if err == nil || time.Now().After(deadline) {
+			break
+		}
+		select {
+		case srvErr := <-errCh:
+			t.Fatalf("server exited before accepting connections: %v", srvErr)
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	if err != nil {
+		t.Fatalf("HTTPS request failed: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Errorf("status: got %d, want %d", resp.StatusCode, http.StatusNoContent)
+	}
+
+	if err := srv.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-errCh; !errors.Is(err, http.ErrServerClosed) {
+		t.Errorf("listenAndServe returned %v, want http.ErrServerClosed", err)
+	}
 }
 
 func TestBuildResourceAudienceMap(t *testing.T) {
@@ -39,8 +192,8 @@ func TestBuildResourceAudienceMap(t *testing.T) {
 				{Name: "cloudflare", Prefix: "/mcp/cloudflare", Upstream: mustURL("https://mcp.cloudflare.com/mcp"), RequiredAudience: "mcp-gateway"},
 			},
 			want: map[string]string{
-				"http://127.0.0.1:8080":                  "mcp-gateway",
-				"cloudflare":                             "mcp-gateway",
+				"http://127.0.0.1:8080":                "mcp-gateway",
+				"cloudflare":                           "mcp-gateway",
 				"http://127.0.0.1:8080/mcp/cloudflare": "mcp-gateway",
 			},
 		},
@@ -51,8 +204,8 @@ func TestBuildResourceAudienceMap(t *testing.T) {
 				{Name: "svc", Prefix: "/mcp/svc", Upstream: mustURL("http://svc:9000"), RequiredAudience: "custom-aud"},
 			},
 			want: map[string]string{
-				"http://127.0.0.1:8080":          "mcp-gateway",
-				"svc":                            "custom-aud",
+				"http://127.0.0.1:8080":         "mcp-gateway",
+				"svc":                           "custom-aud",
 				"http://127.0.0.1:8080/mcp/svc": "custom-aud",
 			},
 		},
@@ -84,8 +237,8 @@ func TestBuildResourceAudienceMap(t *testing.T) {
 				{Name: "svc", Prefix: "/mcp/svc", Upstream: mustURL("http://svc:8000"), RequiredAudience: "mcp-gateway"},
 			},
 			want: map[string]string{
-				"http://127.0.0.1:8080":          "mcp-gateway",
-				"svc":                            "mcp-gateway",
+				"http://127.0.0.1:8080":         "mcp-gateway",
+				"svc":                           "mcp-gateway",
 				"http://127.0.0.1:8080/mcp/svc": "mcp-gateway",
 			},
 		},
@@ -97,8 +250,8 @@ func TestBuildResourceAudienceMap(t *testing.T) {
 				{Name: "open", Prefix: "/mcp/open", Upstream: mustURL("http://open:8000"), NoAuth: true, RequiredAudience: "mcp-gateway"},
 			},
 			want: map[string]string{
-				"http://127.0.0.1:8080":             "mcp-gateway",
-				"secure":                            "mcp-gateway",
+				"http://127.0.0.1:8080":            "mcp-gateway",
+				"secure":                           "mcp-gateway",
 				"http://127.0.0.1:8080/mcp/secure": "mcp-gateway",
 			},
 		},

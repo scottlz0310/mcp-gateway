@@ -7,6 +7,13 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Local HTTPS (TLS termination) support ([#201](https://github.com/scottlz0310/mcp-gateway/issues/201))
+  - New env vars `MCP_GATEWAY_TLS_CERT_PATH` / `MCP_GATEWAY_TLS_KEY_PATH`: when both point to a PEM cert/key pair, the gateway (including the first-run setup wizard) listens with TLS via `http.Server.ListenAndServeTLS`.
+  - Fail-fast validation at startup: setting only one of the two vars, or pointing either at a missing file or a directory, aborts startup with an explicit error — no self-signed fallback is generated (local cert provisioning is owned by the deployment side, e.g. Mcp-Docker `setup-tls`).
+  - When `MCP_GATEWAY_PUBLIC_URL` is not set, the derived default public URL now uses the `https` scheme while TLS is enabled, keeping OAuth callbacks and discovery metadata consistent with the listener.
+
 ## [0.8.0] - 2026-07-03
 
 ### Security

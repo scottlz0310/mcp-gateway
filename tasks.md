@@ -174,6 +174,21 @@ Cloudflare MCP など、upstream が独自 OAuth サーバーを持つケース�
 
 ---
 
+## v0.8.0 以降の open issue
+
+### [#201](https://github.com/scottlz0310/mcp-gateway/issues/201) ローカル HTTPS (TLS) 接続サポート
+
+mcp-gateway 側スコープ（証明書の自動セットアップは Mcp-Docker#202 側）:
+
+- [x] `MCP_GATEWAY_TLS_CERT_PATH` / `MCP_GATEWAY_TLS_KEY_PATH` を追加し、両方設定時に `ListenAndServeTLS` で起動（setup wizard も同様）
+- [x] 片方のみ設定・ファイル欠如・ディレクトリ指定は起動時エラー（フェイルファスト、自己署名フォールバックなし）
+- [x] `MCP_GATEWAY_PUBLIC_URL` 未設定時のデフォルトスキームを TLS 有効時は `https` に
+- [x] `validateTLSConfig` のパラメータ化テストと TLS listener の疎通テストを追加
+- [x] `docs/configuration.md` に環境変数と「TLS 終端（ローカル HTTPS）」セクションを追記
+- [ ] Mcp-Docker 側（証明書マウント・`setup-tls`・health-check の `-k` トグル）との結合確認
+
+---
+
 ## 運用枠
 
 ### [#65](https://github.com/scottlz0310/mcp-gateway/issues/65) Dependency Dashboard

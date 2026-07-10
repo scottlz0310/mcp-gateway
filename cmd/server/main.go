@@ -34,6 +34,13 @@ func main() {
 
 	cfg := loadConfig()
 
+	// TLS fail-fast: an inconsistent or dangling cert/key configuration must
+	// abort startup instead of silently falling back to plain HTTP (#201).
+	if err := validateTLSConfig(cfg.tlsCertPath, cfg.tlsKeyPath); err != nil {
+		slog.Error("invalid TLS configuration", "err", err)
+		os.Exit(1)
+	}
+
 	// Load or generate the encryption key.
 	masterKey := []byte(getEnv("MCP_GATEWAY_MASTER_KEY", os.Getenv("MCP_MASTER_KEY")))
 	if len(strings.TrimSpace(string(masterKey))) == 0 {
@@ -113,11 +120,15 @@ func main() {
 		strings.TrimSpace(os.Getenv("MCP_GATEWAY_BASE_URL")) == "" &&
 		strings.TrimSpace(appCfg.Gateway.PublicURL) == "" &&
 		strings.TrimSpace(appCfg.Gateway.BaseURL) == "" {
+		scheme := "http"
+		if cfg.tlsCertPath != "" {
+			scheme = "https"
+		}
 		_, bindPort, err := net.SplitHostPort(cfg.bindAddr)
 		if err == nil && strings.TrimSpace(bindPort) != "" {
-			cfg.publicURL = "http://127.0.0.1:" + bindPort
+			cfg.publicURL = scheme + "://127.0.0.1:" + bindPort
 		} else {
-			cfg.publicURL = "http://127.0.0.1:" + cfg.port
+			cfg.publicURL = scheme + "://127.0.0.1:" + cfg.port
 		}
 	}
 	if _, ok := appconfig.ResolveOAuthEnv("OAUTH_SCOPES", "GITHUB_MCP_OAUTH_SCOPES"); !ok && strings.TrimSpace(appCfg.Gateway.OAuthScopes) != "" {
@@ -247,15 +258,15 @@ func main() {
 	}()
 
 	oauthHandler, err := auth.NewHandler(auth.Config{
-		BaseURL:              cfg.publicURL,
-		SessionTTL:           time.Duration(cfg.sessionTTLMin) * time.Minute,
-		CacheTTL:             time.Duration(cfg.tokenCacheTTLMin) * time.Minute,
-		ExpiresIn:            time.Duration(cfg.tokenExpiresInSec) * time.Second,
-		TokenStorePath:       cfg.tokenStorePath,
-		ResourceAudienceMap:  buildResourceAudienceMap(routes, cfg.publicURL),
-		TokenAudienceStrict:  cfg.tokenAudienceStrict,
-		GitHubRefreshEnabled: cfg.githubRefreshEnabled,
-		OIDCPrivateKey:       oidcPrivateKey,
+		BaseURL:                cfg.publicURL,
+		SessionTTL:             time.Duration(cfg.sessionTTLMin) * time.Minute,
+		CacheTTL:               time.Duration(cfg.tokenCacheTTLMin) * time.Minute,
+		ExpiresIn:              time.Duration(cfg.tokenExpiresInSec) * time.Second,
+		TokenStorePath:         cfg.tokenStorePath,
+		ResourceAudienceMap:    buildResourceAudienceMap(routes, cfg.publicURL),
+		TokenAudienceStrict:    cfg.tokenAudienceStrict,
+		GitHubRefreshEnabled:   cfg.githubRefreshEnabled,
+		OIDCPrivateKey:         oidcPrivateKey,
 		AllowedRedirectHosts:   cfg.allowedRedirectHosts,
 		AllowedRedirectSchemes: cfg.allowedRedirectSchemes,
 	}, prov, auth.WithAuditRecorder(auditRecorder))
@@ -426,6 +437,7 @@ func main() {
 	slog.Info("mcp-gateway starting",
 		"bind_addr", cfg.bindAddr,
 		"public_url", cfg.publicURL,
+		"tls_enabled", cfg.tlsCertPath != "",
 		"provider", prov.Name(),
 		"routes", len(routes),
 		"trusted_proxies", len(trustedProxies),
@@ -448,10 +460,45 @@ func main() {
 	// (fail-closed) with an explicit log so misconfiguration is obvious.
 	startInternalAPI(oauthHandler, oauthHandler)
 
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if err := listenAndServe(server, cfg.tlsCertPath, cfg.tlsKeyPath); err != nil && err != http.ErrServerClosed {
 		slog.Error("server error", "err", err)
 		os.Exit(1)
 	}
+}
+
+// listenAndServe starts srv with TLS termination when a cert/key pair is
+// configured, and plain HTTP otherwise. Path consistency is validated at
+// startup by validateTLSConfig.
+func listenAndServe(srv *http.Server, tlsCertPath, tlsKeyPath string) error {
+	if tlsCertPath != "" {
+		return srv.ListenAndServeTLS(tlsCertPath, tlsKeyPath)
+	}
+	return srv.ListenAndServe()
+}
+
+// validateTLSConfig rejects half-configured TLS (only one of cert/key set)
+// and dangling paths. Deliberately no self-signed fallback: local cert
+// provisioning is owned by the deployment side (Mcp-Docker setup-tls).
+func validateTLSConfig(tlsCertPath, tlsKeyPath string) error {
+	if tlsCertPath == "" && tlsKeyPath == "" {
+		return nil
+	}
+	if tlsCertPath == "" || tlsKeyPath == "" {
+		return fmt.Errorf("MCP_GATEWAY_TLS_CERT_PATH and MCP_GATEWAY_TLS_KEY_PATH must be set together (cert=%q, key=%q)", tlsCertPath, tlsKeyPath)
+	}
+	for name, path := range map[string]string{
+		"MCP_GATEWAY_TLS_CERT_PATH": tlsCertPath,
+		"MCP_GATEWAY_TLS_KEY_PATH":  tlsKeyPath,
+	} {
+		info, err := os.Stat(path)
+		if err != nil {
+			return fmt.Errorf("%s: cannot access %q: %w", name, path, err)
+		}
+		if info.IsDir() {
+			return fmt.Errorf("%s: %q is a directory, expected a PEM file", name, path)
+		}
+	}
+	return nil
 }
 
 // runSetupWizard starts an HTTP server that serves only the /setup endpoint.
@@ -493,8 +540,8 @@ func runSetupWizard(cfg config, appCfg *appconfig.AppConfig, km *appconfig.KeyMa
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
-	slog.Info("setup wizard listening", "bind_addr", cfg.bindAddr)
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	slog.Info("setup wizard listening", "bind_addr", cfg.bindAddr, "tls_enabled", cfg.tlsCertPath != "")
+	if err := listenAndServe(server, cfg.tlsCertPath, cfg.tlsKeyPath); err != nil && err != http.ErrServerClosed {
 		slog.Error("setup server error", "err", err)
 	}
 }
@@ -510,23 +557,26 @@ type config struct {
 	// Replaces the deprecated baseURL / MCP_GATEWAY_BASE_URL.
 	publicURL string
 	// bindAddr is the TCP address the HTTP listener binds to (host:port).
-	bindAddr             string
-	oauthProvider        string
-	oauthScopes          string
-	oidcIssuerURL        string
-	oidcAudience         string
-	port                 string
-	logLevel             string
-	upstreamURL          string // deprecated; prefer ROUTE_* env vars
-	trustedProxyCIDRs    []string
-	sessionTTLMin        int
-	tokenCacheTTLMin     int
-	tokenExpiresInSec    int
-	tokenAudienceStrict  bool
-	githubRefreshEnabled bool
-	tokenStorePath       string
-	keyPath              string
-	configPath           string
+	bindAddr string
+	// tlsCertPath / tlsKeyPath enable TLS termination when both are set.
+	tlsCertPath            string
+	tlsKeyPath             string
+	oauthProvider          string
+	oauthScopes            string
+	oidcIssuerURL          string
+	oidcAudience           string
+	port                   string
+	logLevel               string
+	upstreamURL            string // deprecated; prefer ROUTE_* env vars
+	trustedProxyCIDRs      []string
+	sessionTTLMin          int
+	tokenCacheTTLMin       int
+	tokenExpiresInSec      int
+	tokenAudienceStrict    bool
+	githubRefreshEnabled   bool
+	tokenStorePath         string
+	keyPath                string
+	configPath             string
 	allowedRedirectHosts   []string
 	allowedRedirectSchemes []string
 	// upstream OAuth state paths
@@ -537,10 +587,21 @@ type config struct {
 func loadConfig() config {
 	port := getEnv("MCP_GATEWAY_PORT", "8080")
 
+	tlsCertPath := strings.TrimSpace(getEnv("MCP_GATEWAY_TLS_CERT_PATH", ""))
+	tlsKeyPath := strings.TrimSpace(getEnv("MCP_GATEWAY_TLS_KEY_PATH", ""))
+
+	// The default public URL scheme follows the listener: https when TLS
+	// termination is enabled, so OAuth callbacks and discovery metadata stay
+	// reachable without an explicit MCP_GATEWAY_PUBLIC_URL.
+	defaultScheme := "http"
+	if tlsCertPath != "" {
+		defaultScheme = "https"
+	}
+
 	// publicURL resolution: MCP_GATEWAY_PUBLIC_URL > MCP_GATEWAY_BASE_URL > default.
 	// Deprecation warning for MCP_GATEWAY_BASE_URL is emitted in main() after logger init.
 	publicURL := getEnv("MCP_GATEWAY_PUBLIC_URL",
-		getEnv("MCP_GATEWAY_BASE_URL", "http://127.0.0.1:"+port))
+		getEnv("MCP_GATEWAY_BASE_URL", defaultScheme+"://127.0.0.1:"+port))
 
 	// bindAddr defaults to loopback; Docker deployments should set MCP_GATEWAY_BIND_ADDR=0.0.0.0:<port>.
 	bindAddr := getEnv("MCP_GATEWAY_BIND_ADDR", "127.0.0.1:"+port)
@@ -559,26 +620,28 @@ func loadConfig() config {
 
 	return config{
 		// githubClientID and githubClientSecret are resolved after key/config loading in main().
-		publicURL:            publicURL,
-		bindAddr:             bindAddr,
-		port:                 port,
-		oauthProvider:        oauthProvider,
-		oauthScopes:          oauthScopes,
-		oidcIssuerURL:        getEnv("OAUTH_ISSUER_URL", ""),
-		oidcAudience:         getEnv("OAUTH_AUDIENCE", ""),
-		logLevel:             getEnv("LOG_LEVEL", "info"),
-		upstreamURL:          getEnv("GITHUB_MCP_UPSTREAM_URL", ""),
-		trustedProxyCIDRs:    splitCSV(os.Getenv("MCP_GATEWAY_TRUSTED_PROXIES")),
-		sessionTTLMin:        getEnvInt("SESSION_TTL_MIN", 10),
-		tokenCacheTTLMin:     getEnvInt("TOKEN_CACHE_TTL_MIN", 30),
-		tokenExpiresInSec:    getEnvInt("TOKEN_EXPIRES_IN_SEC", 7776000), // 90 days
-		tokenAudienceStrict:  getEnvBool("MCP_GATEWAY_TOKEN_AUDIENCE_STRICT", false),
-		githubRefreshEnabled: getEnvBool("MCP_GATEWAY_GITHUB_REFRESH_ENABLED", false),
-		tokenStorePath:       lookupEnv("MCP_GATEWAY_TOKEN_STORE_PATH", filepath.Join(stateDir, "tokens.json")),
-		keyPath:              getEnv("MCP_GATEWAY_KEY_PATH", filepath.Join(stateDir, "gateway.key")),
-		configPath:           getEnv("MCP_CONFIG_FILE", filepath.Join(stateDir, "config.yaml")),
-		allowedRedirectHosts:   splitCSV(os.Getenv("MCP_GATEWAY_ALLOWED_REDIRECT_HOSTS")),
-		allowedRedirectSchemes: splitCSV(os.Getenv("MCP_GATEWAY_ALLOWED_REDIRECT_SCHEMES")),
+		publicURL:               publicURL,
+		bindAddr:                bindAddr,
+		tlsCertPath:             tlsCertPath,
+		tlsKeyPath:              tlsKeyPath,
+		port:                    port,
+		oauthProvider:           oauthProvider,
+		oauthScopes:             oauthScopes,
+		oidcIssuerURL:           getEnv("OAUTH_ISSUER_URL", ""),
+		oidcAudience:            getEnv("OAUTH_AUDIENCE", ""),
+		logLevel:                getEnv("LOG_LEVEL", "info"),
+		upstreamURL:             getEnv("GITHUB_MCP_UPSTREAM_URL", ""),
+		trustedProxyCIDRs:       splitCSV(os.Getenv("MCP_GATEWAY_TRUSTED_PROXIES")),
+		sessionTTLMin:           getEnvInt("SESSION_TTL_MIN", 10),
+		tokenCacheTTLMin:        getEnvInt("TOKEN_CACHE_TTL_MIN", 30),
+		tokenExpiresInSec:       getEnvInt("TOKEN_EXPIRES_IN_SEC", 7776000), // 90 days
+		tokenAudienceStrict:     getEnvBool("MCP_GATEWAY_TOKEN_AUDIENCE_STRICT", false),
+		githubRefreshEnabled:    getEnvBool("MCP_GATEWAY_GITHUB_REFRESH_ENABLED", false),
+		tokenStorePath:          lookupEnv("MCP_GATEWAY_TOKEN_STORE_PATH", filepath.Join(stateDir, "tokens.json")),
+		keyPath:                 getEnv("MCP_GATEWAY_KEY_PATH", filepath.Join(stateDir, "gateway.key")),
+		configPath:              getEnv("MCP_CONFIG_FILE", filepath.Join(stateDir, "config.yaml")),
+		allowedRedirectHosts:    splitCSV(os.Getenv("MCP_GATEWAY_ALLOWED_REDIRECT_HOSTS")),
+		allowedRedirectSchemes:  splitCSV(os.Getenv("MCP_GATEWAY_ALLOWED_REDIRECT_SCHEMES")),
 		upstreamClientStorePath: filepath.Join(stateDir, "upstream_clients.json"),
 		upstreamTokenStorePath:  filepath.Join(stateDir, "upstream_tokens.json"),
 	}

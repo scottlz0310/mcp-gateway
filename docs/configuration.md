@@ -57,6 +57,8 @@ OAuth クライアントシークレットは意図的に特別扱いです。`c
 | `MCP_MASTER_KEY` | なし | `MCP_GATEWAY_MASTER_KEY` の旧エイリアス。 |
 | `MCP_GATEWAY_PUBLIC_URL` | `http://127.0.0.1:<port>` | OAuth コールバック・ディスカバリメタデータ・Protected Resource Metadata で使用するクライアントから見える正規 URL。 |
 | `MCP_GATEWAY_BIND_ADDR` | `127.0.0.1:<port>` | TCP リスナーアドレス。Docker でポートを公開する場合は `0.0.0.0:<port>` を使用。 |
+| `MCP_GATEWAY_TLS_CERT_PATH` | なし | TLS サーバー証明書（PEM）のパス。`MCP_GATEWAY_TLS_KEY_PATH` とペアで設定すると HTTPS で listen する。片方のみの設定やファイル欠如は起動エラー（フェイルファスト）。 |
+| `MCP_GATEWAY_TLS_KEY_PATH` | なし | TLS 秘密鍵（PEM）のパス。`MCP_GATEWAY_TLS_CERT_PATH` とペアで設定する。 |
 | `MCP_GATEWAY_PORT` | `8080` | `public_url` と `bind_addr` のデフォルト導出に使用するポート。 |
 | `MCP_GATEWAY_BASE_URL` | なし | `MCP_GATEWAY_PUBLIC_URL` の非推奨エイリアス。設定されると起動時警告を出力。 |
 | `MCP_GATEWAY_TRUSTED_PROXIES` | なし | `X-Forwarded-*` ヘッダーを信頼する直前のリバースプロキシの CIDR リスト（カンマ区切り）。 |
@@ -349,9 +351,23 @@ MCP_GATEWAY_TOKEN_STORE_PATH=
 
 **builtin mode（`OAUTH_PROVIDER=builtin`）の追加事項:** builtin mode ではクライアントに渡すアクセストークンはゲートウェイ署名の JWT であり、GitHub アクセストークン自体ではありません。ただし Phase B delegated access（`EnsureFreshAccessTokenForSubject`、`upstream_provider_token=true` ルートおよび `/internal/v1/whoami` が使用）が upstream サービスへ GitHub トークンを引き渡せるようにするため、GitHub アクセストークンは JWT に紐付けて、アクセストークンストアとリフレッシュトークンストアの両方（同一 SQLite データベース内）に**平文で常に**保存されます（`github_refresh_enabled` 無効時でも同様）。`github_refresh_enabled` はリフレッシュトークン自体の保存有無のみを制御し、GitHub アクセストークンの保存有無は制御しません。したがって上記の「トークンデータベースの読者はログイン済みユーザーの GitHub セッションを乗っ取れる」というリスクは、`github_refresh_enabled` の設定に関わらず builtin mode にも同様に適用されます。
 
+## TLS 終端（ローカル HTTPS）
+
+mcp-gateway 自体で TLS を終端する場合、PEM 形式の証明書と秘密鍵のパスをペアで指定します:
+
+```bash
+MCP_GATEWAY_TLS_CERT_PATH=/data/certs/localhost.pem
+MCP_GATEWAY_TLS_KEY_PATH=/data/certs/localhost-key.pem
+MCP_GATEWAY_PUBLIC_URL=https://localhost:8080
+```
+
+- 両方が設定されている場合のみ HTTPS で listen します。片方のみの設定、またはファイルが存在しない場合は起動時にエラー終了します（フェイルファスト）。
+- 自己署名証明書の自動生成は行いません。ローカル開発では [mkcert](https://github.com/FiloSottile/mkcert) 等で信頼済み証明書を生成してください（Docker 運用でのセットアップ自動化は Mcp-Docker 側で提供）。
+- `MCP_GATEWAY_PUBLIC_URL` 未設定時のデフォルトスキームは、TLS 有効時は自動的に `https` になります。
+
 ## リバースプロキシヘッダー
 
-mcp-gateway の前で TLS を終端する場合:
+リバースプロキシで mcp-gateway の前段で TLS を終端する場合:
 
 ```bash
 MCP_GATEWAY_PUBLIC_URL=https://mcp.example.com
