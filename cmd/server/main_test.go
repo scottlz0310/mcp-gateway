@@ -104,14 +104,13 @@ func TestListenAndServeTLS(t *testing.T) {
 	dir := t.TempDir()
 	certPath, keyPath := writeSelfSignedCert(t, dir)
 
+	// Hold the ephemeral port until immediately before the server starts to
+	// keep the reuse race window minimal (ListenAndServeTLS re-binds Addr).
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	addr := ln.Addr().String()
-	if err := ln.Close(); err != nil {
-		t.Fatal(err)
-	}
 
 	srv := &http.Server{
 		Addr: addr,
@@ -121,6 +120,9 @@ func TestListenAndServeTLS(t *testing.T) {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	errCh := make(chan error, 1)
+	if err := ln.Close(); err != nil {
+		t.Fatal(err)
+	}
 	go func() { errCh <- listenAndServe(srv, certPath, keyPath) }()
 	t.Cleanup(func() { _ = srv.Close() })
 
