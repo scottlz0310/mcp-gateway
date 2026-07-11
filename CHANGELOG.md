@@ -5,7 +5,16 @@ All notable changes to this project will be documented in this file.
 This format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and versioning follows [Semantic Versioning](https://semver.org/).
 
-## [0.9.0] - 2026-07-10
+## [Unreleased]
+
+### Fixed
+
+- The TLS listener now speaks HTTP/1.1 only by default; HTTP/2 is removed from the ALPN offer ([#204](https://github.com/scottlz0310/mcp-gateway/issues/204))
+  - Node.js >= 26 fetch clients (undici) negotiate h2 but refuse to multiplex requests with a body while any other request is in flight, so the never-ending MCP Streamable HTTP SSE GET starved every subsequent POST until the client timed out (observed as `MCP error -32001: Request timed out` in mcp-resource-subscriber and cosmetic 502 `Content-Length ... but only wrote 0 bytes` proxy errors in the gateway log). The gateway's h2 -> h1 proxying itself was verified sound; the queueing happened entirely inside the client.
+  - New env var `MCP_GATEWAY_ENABLE_HTTP2` (default `false`) re-enables HTTP/2 on the TLS listener for deployments whose clients are known to be unaffected.
+  - Regression test pinning the ALPN policy (`TestListenAndServeALPN`).
+
+
 
 ### Added
 

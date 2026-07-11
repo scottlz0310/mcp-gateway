@@ -3,6 +3,15 @@
 すべての変更は [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) に従い、
 バージョニングは [Semantic Versioning](https://semver.org/lang/ja/) に従う。
 
+## [Unreleased]
+
+### 修正
+
+- TLS リスナーはデフォルトで HTTP/1.1 のみを話すようになり、ALPN のオファーから HTTP/2 を除外した（[#204](https://github.com/scottlz0310/mcp-gateway/issues/204)）
+  - Node.js 26 以降の fetch クライアント（undici）は h2 をネゴシエートするが、他のリクエストが in-flight の間はボディ付きリクエストを多重化しないため、終わらない MCP Streamable HTTP の SSE GET が後続のすべての POST をクライアントタイムアウトまで飢餓させていた（mcp-resource-subscriber では `MCP error -32001: Request timed out`、ゲートウェイログでは副次的な 502 `Content-Length ... but only wrote 0 bytes` proxy error として観測）。ゲートウェイ自体の h2 → h1 中継は正常であることを検証済みで、キューイングは完全にクライアント内部で発生していた。
+  - 新環境変数 `MCP_GATEWAY_ENABLE_HTTP2`（デフォルト `false`）: 影響を受けないクライアントのみを想定するデプロイでは TLS リスナーの HTTP/2 を再有効化できる。
+  - ALPN ポリシーを固定する回帰テスト（`TestListenAndServeALPN`）を追加。
+
 ## [0.9.0] - 2026-07-10
 
 ### 追加

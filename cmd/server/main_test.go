@@ -123,7 +123,7 @@ func TestListenAndServeTLS(t *testing.T) {
 	if err := ln.Close(); err != nil {
 		t.Fatal(err)
 	}
-	go func() { errCh <- listenAndServe(srv, certPath, keyPath) }()
+	go func() { errCh <- listenAndServe(srv, certPath, keyPath, false) }()
 	t.Cleanup(func() { _ = srv.Close() })
 
 	certPEM, err := os.ReadFile(certPath)
@@ -165,6 +165,87 @@ func TestListenAndServeTLS(t *testing.T) {
 	}
 	if err := <-errCh; !errors.Is(err, http.ErrServerClosed) {
 		t.Errorf("listenAndServe returned %v, want http.ErrServerClosed", err)
+	}
+}
+
+// TestListenAndServeALPN pins the HTTP/2 policy on the TLS listener: a client
+// offering h2 must fall back to HTTP/1.1 unless enableHTTP2 is set (#204).
+func TestListenAndServeALPN(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		enableHTTP2 bool
+		wantProto   string
+	}{
+		{name: "default: h2 offer falls back to http/1.1", enableHTTP2: false, wantProto: "http/1.1"},
+		{name: "enableHTTP2: h2 negotiated", enableHTTP2: true, wantProto: "h2"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			dir := t.TempDir()
+			certPath, keyPath := writeSelfSignedCert(t, dir)
+
+			// Hold the ephemeral port until immediately before the server starts to
+			// keep the reuse race window minimal (ListenAndServeTLS re-binds Addr).
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			addr := ln.Addr().String()
+
+			srv := &http.Server{
+				Addr: addr,
+				Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusNoContent)
+				}),
+				ReadHeaderTimeout: 5 * time.Second,
+			}
+			if err := ln.Close(); err != nil {
+				t.Fatal(err)
+			}
+			errCh := make(chan error, 1)
+			go func() { errCh <- listenAndServe(srv, certPath, keyPath, tc.enableHTTP2) }()
+			t.Cleanup(func() { _ = srv.Close() })
+
+			certPEM, err := os.ReadFile(certPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pool := x509.NewCertPool()
+			if !pool.AppendCertsFromPEM(certPEM) {
+				t.Fatal("failed to add test certificate to pool")
+			}
+			tlsCfg := &tls.Config{
+				RootCAs:    pool,
+				NextProtos: []string{"h2", "http/1.1"},
+			}
+
+			var conn *tls.Conn
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				conn, err = tls.Dial("tcp", addr, tlsCfg)
+				if err == nil || time.Now().After(deadline) {
+					break
+				}
+				select {
+				case srvErr := <-errCh:
+					t.Fatalf("server exited before accepting connections: %v", srvErr)
+				case <-time.After(50 * time.Millisecond):
+				}
+			}
+			if err != nil {
+				t.Fatalf("TLS dial failed: %v", err)
+			}
+			defer func() { _ = conn.Close() }()
+
+			if got := conn.ConnectionState().NegotiatedProtocol; got != tc.wantProto {
+				t.Errorf("negotiated ALPN protocol: got %q, want %q", got, tc.wantProto)
+			}
+		})
 	}
 }
 
