@@ -26,6 +26,14 @@
 
 ---
 
+## 対応中の issue
+
+| Issue | 内容 | 対応 PR |
+|---|---|---|
+| [#204](https://github.com/scottlz0310/mcp-gateway/issues/204) | thread-owl の Streamable HTTP 購読が reverse proxy 経由で 502 / timeout。原因は Node 26（undici）の h2 クライアント側キューイング → TLS リスナーの HTTP/2 を既定無効化（`MCP_GATEWAY_ENABLE_HTTP2` で opt-in） | #205 |
+
+※ #204 のクローズは、リリース後に subscriber / Squirrel Notifier での実環境 E2E（受け入れ条件の `enqueue_review` 通知受信まで）を確認してから行う。
+
 ## v0.9.0 で完了した issue（2026-07-10 リリース）
 
 | Issue | 内容 | 対応 PR |

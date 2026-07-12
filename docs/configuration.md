@@ -59,6 +59,7 @@ OAuth クライアントシークレットは意図的に特別扱いです。`c
 | `MCP_GATEWAY_BIND_ADDR` | `127.0.0.1:<port>` | TCP リスナーアドレス。Docker でポートを公開する場合は `0.0.0.0:<port>` を使用。 |
 | `MCP_GATEWAY_TLS_CERT_PATH` | なし | TLS サーバー証明書（PEM）のパス。`MCP_GATEWAY_TLS_KEY_PATH` とペアで設定すると HTTPS で listen する。片方のみの設定やファイル欠如は起動エラー（フェイルファスト）。 |
 | `MCP_GATEWAY_TLS_KEY_PATH` | なし | TLS 秘密鍵（PEM）のパス。`MCP_GATEWAY_TLS_CERT_PATH` とペアで設定する。 |
+| `MCP_GATEWAY_ENABLE_HTTP2` | `false` | TLS リスナーで HTTP/2（ALPN `h2`）を有効化する。デフォルトは HTTP/1.1 のみ（[TLS 終端](#tls-終端ローカル-https)参照）。 |
 | `MCP_GATEWAY_PORT` | `8080` | `public_url` と `bind_addr` のデフォルト導出に使用するポート。 |
 | `MCP_GATEWAY_BASE_URL` | なし | `MCP_GATEWAY_PUBLIC_URL` の非推奨エイリアス。設定されると起動時警告を出力。 |
 | `MCP_GATEWAY_TRUSTED_PROXIES` | なし | `X-Forwarded-*` ヘッダーを信頼する直前のリバースプロキシの CIDR リスト（カンマ区切り）。 |
@@ -364,6 +365,7 @@ MCP_GATEWAY_PUBLIC_URL=https://localhost:8080
 - 両方が設定されている場合のみ HTTPS で listen します。片方のみの設定、またはファイルが存在しない場合は起動時にエラー終了します（フェイルファスト）。
 - 自己署名証明書の自動生成は行いません。ローカル開発では [mkcert](https://github.com/FiloSottile/mkcert) 等で信頼済み証明書を生成してください（Docker 運用でのセットアップ自動化は Mcp-Docker 側で提供）。
 - `MCP_GATEWAY_PUBLIC_URL` 未設定時のデフォルトスキームは、TLS 有効時は自動的に `https` になります。
+- TLS リスナーは**デフォルトで HTTP/1.1 のみ**を話します（HTTP/2 は ALPN から除外）。Node.js 26 以降の fetch クライアント（undici）は h2 をネゴシエートしますが、他のリクエストが in-flight の間はボディ付きリクエストを多重化しないため、MCP Streamable HTTP の長寿命 SSE GET が後続の POST を飢餓させます（[#204](https://github.com/scottlz0310/mcp-gateway/issues/204)）。この問題の影響を受けないクライアントのみを想定する場合は `MCP_GATEWAY_ENABLE_HTTP2=true` で HTTP/2 を再有効化できます。
 
 ## リバースプロキシヘッダー
 

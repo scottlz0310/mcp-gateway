@@ -438,6 +438,7 @@ func main() {
 		"bind_addr", cfg.bindAddr,
 		"public_url", cfg.publicURL,
 		"tls_enabled", cfg.tlsCertPath != "",
+		"http2_enabled", cfg.enableHTTP2,
 		"provider", prov.Name(),
 		"routes", len(routes),
 		"trusted_proxies", len(trustedProxies),
@@ -460,7 +461,7 @@ func main() {
 	// (fail-closed) with an explicit log so misconfiguration is obvious.
 	startInternalAPI(oauthHandler, oauthHandler)
 
-	if err := listenAndServe(server, cfg.tlsCertPath, cfg.tlsKeyPath); err != nil && err != http.ErrServerClosed {
+	if err := listenAndServe(server, cfg.tlsCertPath, cfg.tlsKeyPath, cfg.enableHTTP2); err != nil && err != http.ErrServerClosed {
 		slog.Error("server error", "err", err)
 		os.Exit(1)
 	}
@@ -469,8 +470,20 @@ func main() {
 // listenAndServe starts srv with TLS termination when a cert/key pair is
 // configured, and plain HTTP otherwise. Path consistency is validated at
 // startup by validateTLSConfig.
-func listenAndServe(srv *http.Server, tlsCertPath, tlsKeyPath string) error {
+//
+// The TLS listener speaks HTTP/1.1 only unless enableHTTP2 is set. Node.js
+// >= 26 clients (undici) negotiate h2 via ALPN but refuse to multiplex
+// requests with a body while any other request is in flight, so the
+// never-ending MCP Streamable HTTP SSE GET starves every subsequent POST
+// until the client times out (#204). HTTP/1.1 restores per-request pooled
+// connections, which those clients handle correctly.
+func listenAndServe(srv *http.Server, tlsCertPath, tlsKeyPath string, enableHTTP2 bool) error {
 	if tlsCertPath != "" {
+		if !enableHTTP2 {
+			protocols := new(http.Protocols)
+			protocols.SetHTTP1(true)
+			srv.Protocols = protocols
+		}
 		return srv.ListenAndServeTLS(tlsCertPath, tlsKeyPath)
 	}
 	return srv.ListenAndServe()
@@ -541,7 +554,7 @@ func runSetupWizard(cfg config, appCfg *appconfig.AppConfig, km *appconfig.KeyMa
 		IdleTimeout:       120 * time.Second,
 	}
 	slog.Info("setup wizard listening", "bind_addr", cfg.bindAddr, "tls_enabled", cfg.tlsCertPath != "")
-	if err := listenAndServe(server, cfg.tlsCertPath, cfg.tlsKeyPath); err != nil && err != http.ErrServerClosed {
+	if err := listenAndServe(server, cfg.tlsCertPath, cfg.tlsKeyPath, cfg.enableHTTP2); err != nil && err != http.ErrServerClosed {
 		slog.Error("setup server error", "err", err)
 	}
 }
@@ -559,8 +572,11 @@ type config struct {
 	// bindAddr is the TCP address the HTTP listener binds to (host:port).
 	bindAddr string
 	// tlsCertPath / tlsKeyPath enable TLS termination when both are set.
-	tlsCertPath            string
-	tlsKeyPath             string
+	tlsCertPath string
+	tlsKeyPath  string
+	// enableHTTP2 re-enables HTTP/2 on the TLS listener. Off by default;
+	// see listenAndServe for the rationale (#204).
+	enableHTTP2            bool
 	oauthProvider          string
 	oauthScopes            string
 	oidcIssuerURL          string
@@ -635,6 +651,7 @@ func loadConfig() config {
 		sessionTTLMin:           getEnvInt("SESSION_TTL_MIN", 10),
 		tokenCacheTTLMin:        getEnvInt("TOKEN_CACHE_TTL_MIN", 30),
 		tokenExpiresInSec:       getEnvInt("TOKEN_EXPIRES_IN_SEC", 7776000), // 90 days
+		enableHTTP2:             getEnvBool("MCP_GATEWAY_ENABLE_HTTP2", false),
 		tokenAudienceStrict:     getEnvBool("MCP_GATEWAY_TOKEN_AUDIENCE_STRICT", false),
 		githubRefreshEnabled:    getEnvBool("MCP_GATEWAY_GITHUB_REFRESH_ENABLED", false),
 		tokenStorePath:          lookupEnv("MCP_GATEWAY_TOKEN_STORE_PATH", filepath.Join(stateDir, "tokens.json")),
