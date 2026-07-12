@@ -168,8 +168,9 @@ func TestListenAndServeTLS(t *testing.T) {
 	}
 }
 
-// TestListenAndServeALPN pins the HTTP/2 policy on the TLS listener: a client
-// offering h2 must fall back to HTTP/1.1 unless enableHTTP2 is set (#204).
+// TestListenAndServeALPN pins the HTTP/2 policy on the TLS listener when a
+// client offers both h2 and HTTP/1.1: HTTP/1.1 is selected unless enableHTTP2
+// is set (#204). A client offering only h2 has no common protocol by default.
 func TestListenAndServeALPN(t *testing.T) {
 	t.Parallel()
 
@@ -178,8 +179,8 @@ func TestListenAndServeALPN(t *testing.T) {
 		enableHTTP2 bool
 		wantProto   string
 	}{
-		{name: "default: h2 offer falls back to http/1.1", enableHTTP2: false, wantProto: "http/1.1"},
-		{name: "enableHTTP2: h2 negotiated", enableHTTP2: true, wantProto: "h2"},
+		{name: "default: http/1.1 selected from h2 and http/1.1", enableHTTP2: false, wantProto: "http/1.1"},
+		{name: "enableHTTP2: h2 selected from h2 and http/1.1", enableHTTP2: true, wantProto: "h2"},
 	}
 
 	for _, tc := range tests {
