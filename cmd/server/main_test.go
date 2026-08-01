@@ -98,6 +98,31 @@ func TestValidateTLSConfig(t *testing.T) {
 	}
 }
 
+func TestLoadConfigHTTP2(t *testing.T) {
+	stateDir := t.TempDir()
+	t.Setenv("LOCALAPPDATA", stateDir)
+	t.Setenv("XDG_STATE_HOME", stateDir)
+
+	tests := []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{name: "enabled by default", value: "", want: true},
+		{name: "explicitly enabled", value: "true", want: true},
+		{name: "explicitly disabled", value: "false", want: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("MCP_GATEWAY_ENABLE_HTTP2", tc.value)
+			if got := loadConfig().enableHTTP2; got != tc.want {
+				t.Errorf("enableHTTP2 = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestListenAndServeTLS(t *testing.T) {
 	t.Parallel()
 
@@ -168,9 +193,8 @@ func TestListenAndServeTLS(t *testing.T) {
 	}
 }
 
-// TestListenAndServeALPN pins the HTTP/2 policy on the TLS listener when a
-// client offers both h2 and HTTP/1.1: HTTP/1.1 is selected unless enableHTTP2
-// is set (#204). A client offering only h2 has no common protocol by default.
+// TestListenAndServeALPN は TLS リスナーの両モードを固定する。
+// 有効時は HTTP/2、互換性退避時は HTTP/1.1 のみをネゴシエートする。
 func TestListenAndServeALPN(t *testing.T) {
 	t.Parallel()
 
@@ -179,8 +203,8 @@ func TestListenAndServeALPN(t *testing.T) {
 		enableHTTP2 bool
 		wantProto   string
 	}{
-		{name: "default: http/1.1 selected from h2 and http/1.1", enableHTTP2: false, wantProto: "http/1.1"},
-		{name: "enableHTTP2: h2 selected from h2 and http/1.1", enableHTTP2: true, wantProto: "h2"},
+		{name: "HTTP/2 disabled: http/1.1 selected", enableHTTP2: false, wantProto: "http/1.1"},
+		{name: "HTTP/2 enabled: h2 selected", enableHTTP2: true, wantProto: "h2"},
 	}
 
 	for _, tc := range tests {
