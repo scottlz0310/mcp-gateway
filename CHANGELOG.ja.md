@@ -5,12 +5,13 @@
 
 ## [Unreleased]
 
-### 修正
+### 変更
 
-- TLS リスナーはデフォルトで HTTP/1.1 のみを話すようになり、ALPN のオファーから HTTP/2 を除外した（[#204](https://github.com/scottlz0310/mcp-gateway/issues/204)）
-  - Node.js 26 以降の fetch クライアント（undici）は h2 をネゴシエートするが、他のリクエストが in-flight の間はボディ付きリクエストを多重化しないため、終わらない MCP Streamable HTTP の SSE GET が後続のすべての POST をクライアントタイムアウトまで飢餓させていた（mcp-resource-subscriber では `MCP error -32001: Request timed out`、ゲートウェイログでは副次的な 502 `Content-Length ... but only wrote 0 bytes` proxy error として観測）。ゲートウェイ自体の h2 → h1 中継は正常であることを検証済みで、キューイングは完全にクライアント内部で発生していた。
-  - 新環境変数 `MCP_GATEWAY_ENABLE_HTTP2`（デフォルト `false`）: 影響を受けないクライアントのみを想定するデプロイでは TLS リスナーの HTTP/2 を再有効化できる。
-  - ALPN ポリシーを固定する回帰テスト（`TestListenAndServeALPN`）を追加。
+- upstream の undici 修正を受け、TLS リスナーの HTTP/2 を再びデフォルトで有効化（[#204](https://github.com/scottlz0310/mcp-gateway/issues/204)、[#206](https://github.com/scottlz0310/mcp-gateway/issues/206)）
+  - 長寿命 SSE GET とボディ付き POST の多重化問題は undici 8.8.0 で修正され、Node.js 26.5.1 は undici 8.9.0 を同梱している。
+  - Node.js 26.5.1 上の mcp-resource-subscriber による E2E で、同一 h2 セッション上の SSE と POST が並行動作し、502 が発生しないことを確認した。
+  - `MCP_GATEWAY_ENABLE_HTTP2` のデフォルトを `true` に変更。影響を受ける旧 undici runtime を使用するクライアント向けに、`false` による HTTP/1.1 限定の退避策を維持する。
+  - 設定のデフォルト値と ALPN の両モードを固定する回帰テストを追加。
 
 ## [0.9.0] - 2026-07-10
 

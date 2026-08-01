@@ -19,7 +19,7 @@
 
 ## 現在の判断基準
 
-- 対象: 2026-07-10 時点の open issue
+- 対象: 2026-08-01 時点の open issue
 - `#126` は設計決定 issue。Phase 1 (v0.6.0) + Phase 2 (v0.7.0) で実装完了。2026-06-21 にクローズ済み。
 - `#84` は upstream OAuth delegation の親 issue。実装 chain（#113〜#118, #166, #171）+ 関連修正（#162, #175, #177, #179）すべて完了。2026-06-21 にクローズ済み。
 - `#65` は Renovate Dependency Dashboard であり、通常の実装ロードマップには含めない。open 維持。
@@ -30,9 +30,10 @@
 
 | Issue | 内容 | 対応 PR |
 |---|---|---|
-| [#204](https://github.com/scottlz0310/mcp-gateway/issues/204) | thread-owl の Streamable HTTP 購読が reverse proxy 経由で 502 / timeout。原因は Node 26（undici）の h2 クライアント側キューイング → TLS リスナーの HTTP/2 を既定無効化（`MCP_GATEWAY_ENABLE_HTTP2` で opt-in） | #205 |
+| [#204](https://github.com/scottlz0310/mcp-gateway/issues/204) | thread-owl の Streamable HTTP 購読が reverse proxy 経由で 502 / timeout。原因は旧 undici の h2 クライアント側キューイング。#205 で HTTP/1.1 既定へ一時退避し、Node.js 26.5.1 上の修正版 undici で h2 E2E 成功済み | #205 / 実装中 |
+| [#206](https://github.com/scottlz0310/mcp-gateway/issues/206) | upstream 修正とクライアント更新を受けて TLS リスナーの HTTP/2 を既定有効へ戻す。`MCP_GATEWAY_ENABLE_HTTP2=false` の HTTP/1.1 退避策は維持 | 実装中 |
 
-※ #204 のクローズは、リリース後に subscriber / Squirrel Notifier での実環境 E2E（受け入れ条件の `enqueue_review` 通知受信まで）を確認してから行う。
+※ #204 のクローズは、リリース後に Squirrel Notifier での実環境 E2E（受け入れ条件の `enqueue_review` 通知受信まで）を確認してから行う。subscriber 単体では Node.js 26.5.1 上の同一 h2 セッションで SSE 通知と後続 POST の成功を確認済み。
 
 ## v0.9.0 で完了した issue（2026-07-10 リリース）
 

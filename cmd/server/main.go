@@ -471,12 +471,9 @@ func main() {
 // configured, and plain HTTP otherwise. Path consistency is validated at
 // startup by validateTLSConfig.
 //
-// The TLS listener speaks HTTP/1.1 only unless enableHTTP2 is set. Node.js
-// >= 26 clients (undici) negotiate h2 via ALPN but refuse to multiplex
-// requests with a body while any other request is in flight, so the
-// never-ending MCP Streamable HTTP SSE GET starves every subsequent POST
-// until the client times out (#204). HTTP/1.1 restores per-request pooled
-// connections, which those clients handle correctly.
+// enableHTTP2 が false の場合、TLS リスナーは HTTP/1.1 のみを通知する。
+// 長寿命 SSE GET の背後で POST が飢餓する undici 8.8.0 未満のクライアント向けに、
+// この退避策を維持する（#204）。現在サポートするクライアントは修正版を使用する（#206）。
 func listenAndServe(srv *http.Server, tlsCertPath, tlsKeyPath string, enableHTTP2 bool) error {
 	if tlsCertPath != "" {
 		if !enableHTTP2 {
@@ -574,8 +571,8 @@ type config struct {
 	// tlsCertPath / tlsKeyPath enable TLS termination when both are set.
 	tlsCertPath string
 	tlsKeyPath  string
-	// enableHTTP2 re-enables HTTP/2 on the TLS listener. Off by default;
-	// see listenAndServe for the rationale (#204).
+	// enableHTTP2 は TLS リスナーの HTTP/2 を制御する。デフォルトは true。
+	// false は影響を受ける旧クライアント向けの HTTP/1.1 退避策として維持する（#204）。
 	enableHTTP2            bool
 	oauthProvider          string
 	oauthScopes            string
@@ -651,7 +648,7 @@ func loadConfig() config {
 		sessionTTLMin:           getEnvInt("SESSION_TTL_MIN", 10),
 		tokenCacheTTLMin:        getEnvInt("TOKEN_CACHE_TTL_MIN", 30),
 		tokenExpiresInSec:       getEnvInt("TOKEN_EXPIRES_IN_SEC", 7776000), // 90 days
-		enableHTTP2:             getEnvBool("MCP_GATEWAY_ENABLE_HTTP2", false),
+		enableHTTP2:             getEnvBool("MCP_GATEWAY_ENABLE_HTTP2", true),
 		tokenAudienceStrict:     getEnvBool("MCP_GATEWAY_TOKEN_AUDIENCE_STRICT", false),
 		githubRefreshEnabled:    getEnvBool("MCP_GATEWAY_GITHUB_REFRESH_ENABLED", false),
 		tokenStorePath:          lookupEnv("MCP_GATEWAY_TOKEN_STORE_PATH", filepath.Join(stateDir, "tokens.json")),
