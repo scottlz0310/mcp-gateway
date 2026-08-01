@@ -30,8 +30,8 @@
 
 | Issue | 内容 | 対応 PR |
 |---|---|---|
-| [#204](https://github.com/scottlz0310/mcp-gateway/issues/204) | thread-owl の Streamable HTTP 購読が reverse proxy 経由で 502 / timeout。原因は旧 undici の h2 クライアント側キューイング。#205 で HTTP/1.1 既定へ一時退避し、Node.js 26.5.1 上の修正版 undici で h2 E2E 成功済み | #205 / 実装中 |
-| [#206](https://github.com/scottlz0310/mcp-gateway/issues/206) | upstream 修正とクライアント更新を受けて TLS リスナーの HTTP/2 を既定有効へ戻す。`MCP_GATEWAY_ENABLE_HTTP2=false` の HTTP/1.1 退避策は維持 | 実装中 |
+| [#204](https://github.com/scottlz0310/mcp-gateway/issues/204) | thread-owl の Streamable HTTP 購読が reverse proxy 経由で 502 / timeout。原因は旧 undici の h2 クライアント側キューイング。#205 で HTTP/1.1 既定へ一時退避し、Node.js 26.5.1 上の修正版 undici で h2 E2E 成功済み | #205 / #210 |
+| [#206](https://github.com/scottlz0310/mcp-gateway/issues/206) | upstream 修正とクライアント更新を受けて TLS リスナーの HTTP/2 を既定有効へ戻す。`MCP_GATEWAY_ENABLE_HTTP2=false` の HTTP/1.1 退避策は維持 | #210 |
 
 ※ #204 のクローズは、リリース後に Squirrel Notifier での実環境 E2E（受け入れ条件の `enqueue_review` 通知受信まで）を確認してから行う。subscriber 単体では Node.js 26.5.1 上の同一 h2 セッションで SSE 通知と後続 POST の成功を確認済み。
 
