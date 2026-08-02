@@ -1098,3 +1098,67 @@ func TestParseFromConfigUpstreamProviderTokenIncompatibleWithUpstreamOAuth(t *te
 		t.Fatal("expected error: upstream_provider_token + upstream_oauth in config")
 	}
 }
+
+func TestParseEnvUpstreamGitHubApp(t *testing.T) {
+	tests := []struct {
+		name    string
+		route   string
+		wantErr bool
+	}{
+		{name: "enabled", route: "ROUTE_GH=/mcp/github|http://github-mcp:8082|upstream_github_app=true"},
+		{name: "explicit false", route: "ROUTE_GH=/mcp/github|http://github-mcp:8082|upstream_github_app=false"},
+		{name: "invalid boolean", route: "ROUTE_GH=/mcp/github|http://github-mcp:8082|upstream_github_app=yes", wantErr: true},
+		{name: "no auth", route: "ROUTE_GH=/mcp/github|http://github-mcp:8082|auth=none|upstream_github_app=true", wantErr: true},
+		{name: "static token", route: "ROUTE_GH=/mcp/github|http://github-mcp:8082|upstream_bearer_token_env=STATIC_TOKEN|upstream_github_app=true", wantErr: true},
+		{name: "upstream oauth", route: "ROUTE_GH=/mcp/github|http://github-mcp:8082|upstream_oauth=auto|upstream_github_app=true", wantErr: true},
+		{name: "provider token", route: "ROUTE_GH=/mcp/github|http://github-mcp:8082|upstream_provider_token=true|upstream_github_app=true", wantErr: true},
+	}
+	t.Setenv("STATIC_TOKEN", "static")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			routes, err := parseRoutes([]string{tt.route})
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "upstream_github_app") {
+					t.Fatalf("error = %v, want upstream_github_app validation error", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantEnabled := strings.Contains(tt.route, "upstream_github_app=true")
+			if routes[0].UpstreamGitHubApp != wantEnabled {
+				t.Fatalf("UpstreamGitHubApp = %v, want %v", routes[0].UpstreamGitHubApp, wantEnabled)
+			}
+		})
+	}
+}
+
+func TestParseFromConfigUpstreamGitHubApp(t *testing.T) {
+	tests := []struct {
+		name    string
+		config  appconfig.RouteConfig
+		wantErr bool
+	}{
+		{name: "enabled", config: appconfig.RouteConfig{Name: "gh", Prefix: "/mcp/github", Upstream: "http://github-mcp:8082", UpstreamGitHubApp: true}},
+		{name: "no auth", config: appconfig.RouteConfig{Name: "gh", Prefix: "/mcp/github", Upstream: "http://github-mcp:8082", NoAuth: true, UpstreamGitHubApp: true}, wantErr: true},
+		{name: "provider token", config: appconfig.RouteConfig{Name: "gh", Prefix: "/mcp/github", Upstream: "http://github-mcp:8082", UpstreamProviderToken: true, UpstreamGitHubApp: true}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			routes, err := ParseFromConfig([]appconfig.RouteConfig{tt.config})
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "upstream_github_app") {
+					t.Fatalf("error = %v, want upstream_github_app validation error", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !routes[0].UpstreamGitHubApp {
+				t.Fatal("UpstreamGitHubApp = false, want true")
+			}
+		})
+	}
+}

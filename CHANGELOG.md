@@ -7,6 +7,17 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Added `upstream_github_app=true` for GitHub App installation-token authentication without a personal access token ([#212](https://github.com/scottlz0310/mcp-gateway/issues/212))
+  - Signs short-lived App JWTs using the numeric GitHub App ID as the issuer and an age-encrypted RSA private key, then caches installation tokens in memory with proactive refresh.
+  - Retries replayable upstream requests once with a freshly minted token after HTTP 401.
+  - Adds loopback-only credential-source diagnostics without exposing token or key values.
+
+### Changed
+
+- Removed the active `GITHUB_PERSONAL_ACCESS_TOKEN` contract from the bundled multi-service example. Cross-repository runtime and fallback removal are tracked by `Mcp-Docker#225` and `review-raven#106`.
+
 ### Changed
 
 - HTTP/2 is enabled by default again on the TLS listener after the upstream undici fix ([#204](https://github.com/scottlz0310/mcp-gateway/issues/204), [#206](https://github.com/scottlz0310/mcp-gateway/issues/206))

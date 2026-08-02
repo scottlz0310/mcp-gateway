@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,23 @@ import (
 	"github.com/scottlz0310/mcp-gateway/internal/auth"
 	"github.com/scottlz0310/mcp-gateway/internal/middleware"
 )
+
+type mockServerTokenSource struct {
+	token        string
+	tokenErr     error
+	refreshToken string
+	refreshErr   error
+	refreshCalls int
+}
+
+func (m *mockServerTokenSource) Token(context.Context) (string, error) {
+	return m.token, m.tokenErr
+}
+
+func (m *mockServerTokenSource) RefreshAfter401(_ context.Context, _ string) (string, error) {
+	m.refreshCalls++
+	return m.refreshToken, m.refreshErr
+}
 
 // mockRefresher is a test double for UpstreamTokenRefresher.
 type mockRefresher struct {
@@ -415,5 +433,66 @@ func TestProxyUpstreamOAuthWith401WhenRefresherNil(t *testing.T) {
 	// Token must be deleted (#117 behavior preserved).
 	if _, ok := tokenStore.Lookup("carol@example.com", "myroute"); ok {
 		t.Error("expected stale token to be deleted when Refresher is nil")
+	}
+}
+
+func TestProxyServerTokenSource(t *testing.T) {
+	tests := []struct {
+		name          string
+		source        *mockServerTokenSource
+		firstStatus   int
+		wantStatus    int
+		wantAuth      string
+		wantCalls     int
+		wantRefreshes int
+	}{
+		{
+			name: "injects installation token", source: &mockServerTokenSource{token: "ghs_initial"},
+			firstStatus: http.StatusOK, wantStatus: http.StatusOK, wantAuth: "Bearer ghs_initial", wantCalls: 1,
+		},
+		{
+			name: "refreshes after 401", source: &mockServerTokenSource{token: "ghs_stale", refreshToken: "ghs_fresh"},
+			firstStatus: http.StatusUnauthorized, wantStatus: http.StatusOK, wantAuth: "Bearer ghs_fresh", wantCalls: 2, wantRefreshes: 1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			lastAuth := ""
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				lastAuth = r.Header.Get("Authorization")
+				if calls == 1 && tt.firstStatus == http.StatusUnauthorized {
+					w.WriteHeader(http.StatusUnauthorized)
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer upstream.Close()
+			u, _ := url.Parse(upstream.URL)
+			h := NewHandler(u, &mockInvalidator{}, "", "", nil, WithServerTokenSource("github", tt.source))
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, requestWithContext("alice", "gateway-token"))
+			if w.Code != tt.wantStatus || calls != tt.wantCalls || lastAuth != tt.wantAuth || tt.source.refreshCalls != tt.wantRefreshes {
+				t.Fatalf("status=%d calls=%d auth=%q refreshes=%d", w.Code, calls, lastAuth, tt.source.refreshCalls)
+			}
+		})
+	}
+}
+
+func TestProxyServerTokenSourceFailsClosed(t *testing.T) {
+	upstreamCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		upstreamCalls++
+	}))
+	defer upstream.Close()
+	u, _ := url.Parse(upstream.URL)
+	h := NewHandler(u, &mockInvalidator{}, "", "", nil, WithServerTokenSource("github", &mockServerTokenSource{
+		tokenErr: errors.New("credential unavailable"),
+	}))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, requestWithContext("alice", "gateway-token"))
+	if w.Code != http.StatusBadGateway || upstreamCalls != 0 || strings.Contains(w.Body.String(), "credential unavailable") {
+		t.Fatalf("status=%d calls=%d body=%q", w.Code, upstreamCalls, w.Body.String())
 	}
 }

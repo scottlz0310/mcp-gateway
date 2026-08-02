@@ -201,6 +201,16 @@ curl -fsS \
 
 レスポンスは最新順で最大 100 件です。永続的な事後解析の正本は JSON Lines ファイルであり、internal API の履歴はプロセス再起動時に消失します。
 
+GitHub App installation token route の実認証種別と期限は、同じ境界の credential diagnostics で確認します。
+
+```bash
+curl -fsS \
+  -H "Authorization: Bearer ${MCP_GATEWAY_INTERNAL_SECRET}" \
+  "http://127.0.0.1:${MCP_GATEWAY_INTERNAL_PORT}/internal/v1/credentials"
+```
+
+`credential_type=github_app_installation`、`ready=true`、将来時刻の `expires_at` を確認します。この呼び出しは必要に応じて installation token を取得しますが、token・App JWT・private key の値は返しません。
+
 ## よくある問題
 
 ### `Mcp-Session-Id is required`

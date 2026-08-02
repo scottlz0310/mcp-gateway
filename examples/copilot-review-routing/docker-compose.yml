@@ -18,7 +18,9 @@ services:
     environment:
       OAUTH_CLIENT_ID: ${OAUTH_CLIENT_ID:-${GITHUB_MCP_CLIENT_ID:-}}
       OAUTH_CLIENT_SECRET: ${OAUTH_CLIENT_SECRET:-${GITHUB_MCP_CLIENT_SECRET:-}}
-      GITHUB_PERSONAL_ACCESS_TOKEN: ${GITHUB_PERSONAL_ACCESS_TOKEN}
+      GITHUB_APP_ID: ${GITHUB_APP_ID}
+      GITHUB_APP_INSTALLATION_ID: ${GITHUB_APP_INSTALLATION_ID}
+      GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/github-app-private-key.pem
       # Bind on all interfaces so Docker port-forwarding works (container → host).
       # Port in MCP_GATEWAY_BIND_ADDR must match MCP_GATEWAY_PORT (both default to 8080).
       MCP_GATEWAY_BIND_ADDR: ${MCP_GATEWAY_BIND_ADDR:-0.0.0.0:8080}
@@ -29,7 +31,7 @@ services:
       MCP_CONFIG_FILE: ${MCP_CONFIG_FILE:-/data/config.yaml}
       MCP_GATEWAY_TOKEN_STORE_PATH: ${MCP_GATEWAY_TOKEN_STORE_PATH:-/data/tokens.json}
       # Route longest-prefix-first; both routes served from a single gateway port.
-      ROUTE_GITHUB: /mcp/github|http://github-mcp:8082|upstream_bearer_token_env=GITHUB_PERSONAL_ACCESS_TOKEN
+      ROUTE_GITHUB: /mcp/github|http://github-mcp:8082|upstream_github_app=true
       ROUTE_COPILOT_REVIEW: /mcp/copilot-review|http://copilot-review-mcp:8083
       OAUTH_SCOPES: ${OAUTH_SCOPES:-${GITHUB_MCP_OAUTH_SCOPES:-repo,user}}
       LOG_LEVEL: ${LOG_LEVEL:-info}
@@ -37,6 +39,7 @@ services:
       TOKEN_CACHE_TTL_MIN: ${TOKEN_CACHE_TTL_MIN:-30}
     volumes:
       - ./data:/data
+      - ./secrets/github-app-private-key.pem:/run/secrets/github-app-private-key.pem:ro
     depends_on:
       - github-mcp
       - copilot-review-mcp
@@ -59,7 +62,6 @@ services:
     restart: unless-stopped
     command: ["http", "--port", "8082"]
     environment:
-      GITHUB_PERSONAL_ACCESS_TOKEN: ${GITHUB_PERSONAL_ACCESS_TOKEN}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     # Exposed only within the Docker network; access via mcp-gateway on port 8080.
     expose:

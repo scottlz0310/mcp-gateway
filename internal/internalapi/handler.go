@@ -43,11 +43,26 @@ type FailureReader interface {
 	RecentAuthFailures() []authaudit.Event
 }
 
+// CredentialDiagnostic is a secret-free route credential snapshot.
+type CredentialDiagnostic struct {
+	RouteName      string `json:"route_name"`
+	CredentialType string `json:"credential_type"`
+	InstallationID int64  `json:"installation_id,omitempty"`
+	ExpiresAt      string `json:"expires_at,omitempty"`
+	Ready          bool   `json:"ready"`
+}
+
+// CredentialDiagnosticsProvider reports token-source metadata without values.
+type CredentialDiagnosticsProvider interface {
+	CredentialDiagnostics(ctx context.Context) []CredentialDiagnostic
+}
+
 // Handler serves the loopback-only internal API.
 type Handler struct {
-	resolver TokenResolver
-	failures FailureReader
-	secret   string
+	resolver    TokenResolver
+	failures    FailureReader
+	credentials CredentialDiagnosticsProvider
+	secret      string
 }
 
 type HandlerOption func(*Handler)
@@ -56,6 +71,13 @@ type HandlerOption func(*Handler)
 func WithFailureReader(reader FailureReader) HandlerOption {
 	return func(h *Handler) {
 		h.failures = reader
+	}
+}
+
+// WithCredentialDiagnostics enables route credential diagnostics.
+func WithCredentialDiagnostics(provider CredentialDiagnosticsProvider) HandlerOption {
+	return func(h *Handler) {
+		h.credentials = provider
 	}
 }
 
@@ -86,10 +108,47 @@ func NewHandler(resolver TokenResolver, secret string, opts ...HandlerOption) (*
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/internal/v1/whoami", h.Whoami)
 	mux.HandleFunc("/internal/v1/auth/failures", h.AuthFailures)
+	mux.HandleFunc("/internal/v1/credentials", h.Credentials)
 }
 
 type authFailuresResponse struct {
 	Failures []authaudit.Event `json:"failures"`
+}
+
+type credentialsResponse struct {
+	Credentials []CredentialDiagnostic `json:"credentials"`
+}
+
+// Credentials returns route credential types and expiry metadata. Token values,
+// key material, and environment variable names are intentionally excluded.
+func (h *Handler) Credentials(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	if !isLoopback(r.RemoteAddr) {
+		writeError(w, http.StatusForbidden, "loopback_required")
+		return
+	}
+	if !h.checkAuth(r) {
+		writeError(w, http.StatusUnauthorized, "invalid_authorization")
+		return
+	}
+	if h.credentials == nil {
+		writeError(w, http.StatusServiceUnavailable, "diagnostics_unavailable")
+		return
+	}
+	credentials := h.credentials.CredentialDiagnostics(r.Context())
+	if credentials == nil {
+		credentials = []CredentialDiagnostic{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	if err := json.NewEncoder(w).Encode(credentialsResponse{Credentials: credentials}); err != nil {
+		slog.Warn("internalapi: credential diagnostics response encode failed", "err", err)
+	}
 }
 
 // AuthFailures は直近の OAuth 失敗を最新順で返す。

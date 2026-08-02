@@ -17,6 +17,61 @@ type refreshingTransport struct {
 	opts *UpstreamOAuthOptions
 }
 
+type serverTokenRefreshingTransport struct {
+	base      http.RoundTripper
+	routeName string
+	source    ServerTokenSource
+}
+
+func (t *serverTokenRefreshingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.base.RoundTrip(req)
+	if err != nil || resp.StatusCode != http.StatusUnauthorized {
+		return resp, err
+	}
+
+	newToken, err := t.source.RefreshAfter401(req.Context(), extractBearer(req))
+	if err != nil {
+		slog.Warn("server credential 401 retry: refresh failed; returning 401 to caller",
+			"route", t.routeName,
+			"path", req.URL.Path,
+			"err", err,
+		)
+		return resp, nil
+	}
+
+	hasBody := req.Body != nil && req.Body != http.NoBody
+	if hasBody && req.GetBody == nil {
+		slog.Warn("server credential 401 retry: request body is not replayable; returning 401 to caller",
+			"route", t.routeName,
+			"path", req.URL.Path,
+		)
+		return resp, nil
+	}
+	var newBody io.ReadCloser
+	if hasBody {
+		newBody, err = req.GetBody()
+		if err != nil {
+			slog.Warn("server credential 401 retry: failed to rewind request body; returning 401 to caller",
+				"route", t.routeName,
+				"path", req.URL.Path,
+				"err", err,
+			)
+			return resp, nil
+		}
+	}
+	_ = resp.Body.Close()
+	newReq := req.Clone(req.Context())
+	newReq.Header.Set("Authorization", "Bearer "+newToken)
+	if newBody != nil {
+		newReq.Body = newBody
+	}
+	slog.Info("server credential 401 retry: retrying request with refreshed token",
+		"route", t.routeName,
+		"path", req.URL.Path,
+	)
+	return t.base.RoundTrip(newReq)
+}
+
 func (t *refreshingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	resp, err := t.base.RoundTrip(req)
 	if err != nil || resp.StatusCode != http.StatusUnauthorized {
