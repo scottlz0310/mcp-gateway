@@ -33,7 +33,7 @@ const (
 // Config contains the GitHub App installation identity. PrivateKeyPEM is
 // expected to have already been decrypted by the config package.
 type Config struct {
-	ClientID       string
+	AppID          int64
 	InstallationID int64
 	PrivateKeyPEM  string
 	APIBaseURL     string
@@ -53,7 +53,7 @@ type Status struct {
 // intentionally spans the network request so concurrent callers cannot mint a
 // burst of redundant tokens.
 type TokenSource struct {
-	clientID       string
+	appID          int64
 	installationID int64
 	privateKey     *rsa.PrivateKey
 	apiBaseURL     string
@@ -67,9 +67,8 @@ type TokenSource struct {
 
 // NewTokenSource validates the installation configuration and private key.
 func NewTokenSource(cfg Config) (*TokenSource, error) {
-	clientID := strings.TrimSpace(cfg.ClientID)
-	if clientID == "" {
-		return nil, errors.New("github app client ID must not be empty")
+	if cfg.AppID <= 0 {
+		return nil, errors.New("github app ID must be positive")
 	}
 	if cfg.InstallationID <= 0 {
 		return nil, errors.New("github app installation ID must be positive")
@@ -95,7 +94,7 @@ func NewTokenSource(cfg Config) (*TokenSource, error) {
 		now = time.Now
 	}
 	return &TokenSource{
-		clientID:       clientID,
+		appID:          cfg.AppID,
 		installationID: cfg.InstallationID,
 		privateKey:     privateKey,
 		apiBaseURL:     baseURL,
@@ -188,7 +187,7 @@ func (s *TokenSource) signAppJWT() (string, error) {
 	claims, err := json.Marshal(map[string]any{
 		"iat": now.Add(-time.Minute).Unix(),
 		"exp": now.Add(9 * time.Minute).Unix(),
-		"iss": s.clientID,
+		"iss": strconv.FormatInt(s.appID, 10),
 	})
 	if err != nil {
 		return "", err

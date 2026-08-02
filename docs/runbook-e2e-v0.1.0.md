@@ -75,7 +75,7 @@ v0.1.0 で追加された **設定永続化（age 暗号化）**・**Setup Wizar
    ```env
    OAUTH_CLIENT_ID=Iv23liXXXXXXXXXX
    OAUTH_CLIENT_SECRET=__leave_empty_for_wizard_test__
-   GITHUB_APP_CLIENT_ID=Iv23liXXXXXXXXXX
+   GITHUB_APP_ID=123456
    GITHUB_APP_INSTALLATION_ID=12345678
    GITHUB_APP_PRIVATE_KEY_PATH=/run/secrets/github-app-private-key.pem
    COPILOT_REVIEW_AUTH_MODE=gateway

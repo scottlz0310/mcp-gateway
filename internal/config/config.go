@@ -74,7 +74,7 @@ type AppConfig struct {
 // access tokens. It is deliberately separate from AuthConfig: caller OAuth and
 // upstream GitHub App authentication are independent security boundaries.
 type GitHubAppConfig struct {
-	ClientID       string `yaml:"client_id,omitempty"`
+	AppID          int64  `yaml:"app_id,omitempty"`
 	InstallationID int64  `yaml:"installation_id,omitempty"`
 	PrivateKey     string `yaml:"private_key,omitempty"`
 }

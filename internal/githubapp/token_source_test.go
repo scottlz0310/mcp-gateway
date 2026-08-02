@@ -38,7 +38,7 @@ func TestTokenSourceCachesAndRefreshesInstallationToken(t *testing.T) {
 		if r.Header.Get("X-GitHub-Api-Version") != apiVersion {
 			t.Fatalf("API version = %q", r.Header.Get("X-GitHub-Api-Version"))
 		}
-		assertJWTClaims(t, strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "), "Iv1.test", now)
+		assertJWTClaims(t, strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "), "12345", now)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -49,7 +49,7 @@ func TestTokenSourceCachesAndRefreshesInstallationToken(t *testing.T) {
 	defer server.Close()
 
 	source, err := NewTokenSource(Config{
-		ClientID:       "Iv1.test",
+		AppID:          12345,
 		InstallationID: 42,
 		PrivateKeyPEM:  privateKeyPEM,
 		APIBaseURL:     server.URL,
@@ -91,10 +91,10 @@ func TestTokenSourceRejectsInvalidConfiguration(t *testing.T) {
 		name string
 		cfg  Config
 	}{
-		{name: "missing client ID", cfg: Config{InstallationID: 1, PrivateKeyPEM: privateKeyPEM}},
-		{name: "invalid installation ID", cfg: Config{ClientID: "Iv1.test", PrivateKeyPEM: privateKeyPEM}},
-		{name: "invalid private key", cfg: Config{ClientID: "Iv1.test", InstallationID: 1, PrivateKeyPEM: "not-pem"}},
-		{name: "invalid API URL", cfg: Config{ClientID: "Iv1.test", InstallationID: 1, PrivateKeyPEM: privateKeyPEM, APIBaseURL: "file:///tmp"}},
+		{name: "missing app ID", cfg: Config{InstallationID: 1, PrivateKeyPEM: privateKeyPEM}},
+		{name: "invalid installation ID", cfg: Config{AppID: 12345, PrivateKeyPEM: privateKeyPEM}},
+		{name: "invalid private key", cfg: Config{AppID: 12345, InstallationID: 1, PrivateKeyPEM: "not-pem"}},
+		{name: "invalid API URL", cfg: Config{AppID: 12345, InstallationID: 1, PrivateKeyPEM: privateKeyPEM, APIBaseURL: "file:///tmp"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -113,7 +113,7 @@ func TestTokenSourceDoesNotExposeResponseBody(t *testing.T) {
 	}))
 	defer server.Close()
 	source, err := NewTokenSource(Config{
-		ClientID: "Iv1.test", InstallationID: 1, PrivateKeyPEM: privateKeyPEM,
+		AppID: 12345, InstallationID: 1, PrivateKeyPEM: privateKeyPEM,
 		APIBaseURL: server.URL, HTTPClient: server.Client(),
 	})
 	if err != nil {

@@ -30,7 +30,7 @@ mcp-gateway を通常モードで起動するには、以下のすべてが揃�
 | 信頼済みプロキシ | `MCP_GATEWAY_TRUSTED_PROXIES` > `gateway.trusted_proxies` > なし |
 | トークン audience 厳格モード | `MCP_GATEWAY_TOKEN_AUDIENCE_STRICT` > `gateway.token_audience_strict` > `false` |
 | GitHub リフレッシュトークンローテーション | `MCP_GATEWAY_GITHUB_REFRESH_ENABLED` > `gateway.github_refresh_enabled` > `false` |
-| GitHub App installation Client ID | `GITHUB_APP_CLIENT_ID` > `github_app.client_id` |
+| GitHub App ID | `GITHUB_APP_ID` > `github_app.app_id` |
 | GitHub App installation ID | `GITHUB_APP_INSTALLATION_ID` > `github_app.installation_id` |
 | GitHub App private key | 暗号化/平文 `github_app.private_key` > `GITHUB_APP_PRIVATE_KEY` > `GITHUB_APP_PRIVATE_KEY_PATH` |
 | 許可リダイレクトホスト | `MCP_GATEWAY_ALLOWED_REDIRECT_HOSTS` > `gateway.allowed_redirect_hosts` > `localhost, 127.0.0.1, vscode.dev, antigravity.google`（デフォルト） |
@@ -53,7 +53,7 @@ OAuth クライアントシークレットは意図的に特別扱いです。`c
 | `GITHUB_MCP_CLIENT_ID` | なし | **非推奨** — `OAUTH_CLIENT_ID` を使用してください。起動時警告付きで引き続き受け入れ。 |
 | `GITHUB_MCP_CLIENT_SECRET` | なし | **非推奨** — `OAUTH_CLIENT_SECRET` を使用してください。起動時警告付きで引き続き受け入れ。 |
 | `GITHUB_MCP_OAUTH_SCOPES` | なし | **非推奨** — `OAUTH_SCOPES` を使用してください。起動時警告付きで引き続き受け入れ。 |
-| `GITHUB_APP_CLIENT_ID` | なし | `upstream_github_app=true` ルートが使用する GitHub App Client ID。caller OAuth の `OAUTH_CLIENT_ID` とは独立して明示する。 |
+| `GITHUB_APP_ID` | なし | `upstream_github_app=true` ルートがJWTの `iss` に使用する正の整数GitHub App ID。caller OAuth のClient IDとは別の値。 |
 | `GITHUB_APP_INSTALLATION_ID` | なし | installation token を発行する対象 installation の正の整数 ID。 |
 | `GITHUB_APP_PRIVATE_KEY` | なし | GitHub App RSA private key の PEM。初回起動時に `ENC[age:]` へ暗号化して `config.yaml` に保存する。ログには出力しない。 |
 | `GITHUB_APP_PRIVATE_KEY_PATH` | なし | PEM private key ファイルのパス。`GITHUB_APP_PRIVATE_KEY` が空の場合の初回シード。暗号化後の config があれば以後は不要。 |
@@ -118,7 +118,7 @@ auth:
   github_client_secret: "ENC[age:]<base64-ciphertext>"
 
 github_app:
-  client_id: "Iv23XXXX"
+  app_id: 123456
   installation_id: 12345678
   private_key: "ENC[age:]<base64-ciphertext>"
 
@@ -158,7 +158,7 @@ setup:
 | `auth.github_client_secret` | GitHub App クライアントシークレット。`ENC[age:]...` として暗号化可能。 |
 | `auth.oidc_issuer_url` | OIDC issuer URL。 |
 | `auth.oidc_audience` | OIDC audience。将来のローカル JWT 検証用に予約済み。現在は UserInfo 検証で未使用/no-op。 |
-| `github_app.client_id` | server-to-server installation token 用 GitHub App Client ID。 |
+| `github_app.app_id` | server-to-server installation token用の正の整数GitHub App ID。App JWTの `iss` に使用する。 |
 | `github_app.installation_id` | token 発行対象の GitHub App installation ID。 |
 | `github_app.private_key` | GitHub App RSA private key。`ENC[age:]...` として暗号化保存する。 |
 | `gateway.public_url` | OAuth および MCP クライアントに見える正規公開 URL。 |
@@ -231,14 +231,14 @@ ROUTE_REVIEW_RAVEN=/mcp/review-raven|http://review-raven:8083
 
 ```bash
 ROUTE_GITHUB=/mcp/github|http://github-mcp:8082|upstream_github_app=true
-GITHUB_APP_CLIENT_ID=Iv23xxxxxxxxxxxxxxxx
+GITHUB_APP_ID=123456
 GITHUB_APP_INSTALLATION_ID=12345678
 GITHUB_APP_PRIVATE_KEY_PATH=/run/secrets/github-app-private-key.pem
 ```
 
 ゲートウェイは RSA private key で有効期間9分の App JWT を署名し、対象 installation の access token を取得します。installation token はメモリ内だけに保持し、期限5分前に更新します。upstream が 401 を返した場合は token を強制再発行し、body が再送可能なリクエストに限り1回だけ透過的に再試行します。
 
-起動時には Client ID・Installation ID・private key をすべて検証し、不足・不正があれば fail-closed で起動を中止します。private key は初回シード時に `ENC[age:]` へ移行され、token・JWT・private key の生値はログへ出力しません。
+起動時には App ID・Installation ID・private key をすべて検証し、不足・不正があれば fail-closed で起動を中止します。private key は初回シード時に `ENC[age:]` へ移行され、token・JWT・private key の生値はログへ出力しません。
 
 `MCP_GATEWAY_INTERNAL_SECRET` / `MCP_GATEWAY_INTERNAL_PORT` を設定した環境では、loopback-only の `GET /internal/v1/credentials` が route ごとの `credential_type`・installation ID・有効期限・ready 状態を返します。token 値は返しません。
 

@@ -8,7 +8,7 @@
 ### 追加
 
 - Personal Access Token を使わず GitHub App installation token で upstream 認証する `upstream_github_app=true` を追加（[#212](https://github.com/scottlz0310/mcp-gateway/issues/212)）
-  - age 暗号化した RSA private key で短命 App JWT を署名し、installation token をメモリ内でキャッシュして期限前に更新する。
+  - 数値 GitHub App ID を issuer とし、age 暗号化した RSA private key で短命 App JWT を署名する。installation token はメモリ内でキャッシュして期限前に更新する。
   - upstream 401 後、再送可能なリクエストを新しい token で1回だけ透過的に再試行する。
   - token・private key を露出しない loopback-only の credential source 診断を追加。
 

@@ -221,7 +221,7 @@ environment:
   OAUTH_CLIENT_SECRET: <your-client-secret>
   MCP_GATEWAY_BIND_ADDR: 0.0.0.0:8080
   MCP_GATEWAY_PUBLIC_URL: http://127.0.0.1:8080
-  GITHUB_APP_CLIENT_ID: <your-github-app-client-id>
+  GITHUB_APP_ID: <your-numeric-github-app-id>
   GITHUB_APP_INSTALLATION_ID: <your-installation-id>
   GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/github-app-private-key.pem
   ROUTE_GITHUB: /mcp/github|http://github-mcp:8082|upstream_github_app=true

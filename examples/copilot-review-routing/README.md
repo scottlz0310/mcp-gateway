@@ -84,5 +84,5 @@ to the mcp-gateway credentials. See `.env.example` for details.
 `GITHUB_MCP_CLIENT_ID`/`GITHUB_MCP_CLIENT_SECRET` still accepted) and
 `GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET` (copilot-review-mcp, standalone mode only)
 can point to the same GitHub App. The server-to-server installation flow still
-uses the separately named `GITHUB_APP_CLIENT_ID` plus Installation ID and RSA
+uses the separately named numeric `GITHUB_APP_ID` plus Installation ID and RSA
 private key so the caller OAuth and upstream credential boundaries stay explicit.

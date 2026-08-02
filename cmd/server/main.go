@@ -212,17 +212,21 @@ func main() {
 		os.Exit(1)
 	}
 
-	var githubAppClientID string
+	var githubAppID int64
 	var githubAppInstallationID int64
 	if routesUseGitHubApp(routes) {
-		githubAppClientID = strings.TrimSpace(os.Getenv("GITHUB_APP_CLIENT_ID"))
-		if githubAppClientID == "" {
-			githubAppClientID = strings.TrimSpace(appCfg.GitHubApp.ClientID)
-		} else {
-			appCfg.GitHubApp.ClientID = githubAppClientID
+		githubAppID = appCfg.GitHubApp.AppID
+		if raw := strings.TrimSpace(os.Getenv("GITHUB_APP_ID")); raw != "" {
+			parsed, err := strconv.ParseInt(raw, 10, 64)
+			if err != nil || parsed <= 0 {
+				slog.Error("GITHUB_APP_ID must be a positive integer")
+				os.Exit(1)
+			}
+			githubAppID = parsed
+			appCfg.GitHubApp.AppID = parsed
 		}
-		if githubAppClientID == "" {
-			slog.Error("GitHub App client ID is required for upstream_github_app routes")
+		if githubAppID <= 0 {
+			slog.Error("GitHub App ID is required for upstream_github_app routes")
 			os.Exit(1)
 		}
 		githubAppInstallationID = appCfg.GitHubApp.InstallationID
@@ -257,7 +261,7 @@ func main() {
 			os.Exit(1)
 		}
 		githubAppTokenSource, err = githubapp.NewTokenSource(githubapp.Config{
-			ClientID:       githubAppClientID,
+			AppID:          githubAppID,
 			InstallationID: githubAppInstallationID,
 			PrivateKeyPEM:  privateKeyPEM,
 			APIBaseURL:     os.Getenv("GITHUB_API_URL"),

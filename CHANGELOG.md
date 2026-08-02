@@ -10,7 +10,7 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 ### Added
 
 - Added `upstream_github_app=true` for GitHub App installation-token authentication without a personal access token ([#212](https://github.com/scottlz0310/mcp-gateway/issues/212))
-  - Signs short-lived App JWTs with an age-encrypted RSA private key and caches installation tokens in memory with proactive refresh.
+  - Signs short-lived App JWTs using the numeric GitHub App ID as the issuer and an age-encrypted RSA private key, then caches installation tokens in memory with proactive refresh.
   - Retries replayable upstream requests once with a freshly minted token after HTTP 401.
   - Adds loopback-only credential-source diagnostics without exposing token or key values.
 
