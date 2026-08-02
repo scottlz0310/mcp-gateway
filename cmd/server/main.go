@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net"
@@ -18,6 +19,7 @@ import (
 	"github.com/scottlz0310/mcp-gateway/internal/auth/provider"
 	"github.com/scottlz0310/mcp-gateway/internal/authaudit"
 	appconfig "github.com/scottlz0310/mcp-gateway/internal/config"
+	"github.com/scottlz0310/mcp-gateway/internal/githubapp"
 	"github.com/scottlz0310/mcp-gateway/internal/internalapi"
 	"github.com/scottlz0310/mcp-gateway/internal/middleware"
 	"github.com/scottlz0310/mcp-gateway/internal/proxy"
@@ -210,12 +212,60 @@ func main() {
 		os.Exit(1)
 	}
 
+	var githubAppClientID string
+	var githubAppInstallationID int64
+	if routesUseGitHubApp(routes) {
+		githubAppClientID = strings.TrimSpace(os.Getenv("GITHUB_APP_CLIENT_ID"))
+		if githubAppClientID == "" {
+			githubAppClientID = strings.TrimSpace(appCfg.GitHubApp.ClientID)
+		} else {
+			appCfg.GitHubApp.ClientID = githubAppClientID
+		}
+		if githubAppClientID == "" {
+			slog.Error("GitHub App client ID is required for upstream_github_app routes")
+			os.Exit(1)
+		}
+		githubAppInstallationID = appCfg.GitHubApp.InstallationID
+		if raw := strings.TrimSpace(os.Getenv("GITHUB_APP_INSTALLATION_ID")); raw != "" {
+			parsed, err := strconv.ParseInt(raw, 10, 64)
+			if err != nil || parsed <= 0 {
+				slog.Error("GITHUB_APP_INSTALLATION_ID must be a positive integer")
+				os.Exit(1)
+			}
+			githubAppInstallationID = parsed
+			appCfg.GitHubApp.InstallationID = parsed
+		}
+		if githubAppInstallationID <= 0 {
+			slog.Error("GitHub App installation ID is required for upstream_github_app routes")
+			os.Exit(1)
+		}
+	}
+
 	// Resolve the client secret (and persist it encrypted if sourced from env).
 	// Only runs after the above validations pass to avoid making a wrong value sticky.
 	clientSecret, err := appconfig.MigrateSecret(cfg.configPath, appCfg, km, cfg.oauthProvider)
 	if err != nil {
 		slog.Error("client secret is unavailable", "err", err)
 		os.Exit(1)
+	}
+
+	var githubAppTokenSource *githubapp.TokenSource
+	if routesUseGitHubApp(routes) {
+		privateKeyPEM, err := appconfig.MigrateGitHubAppPrivateKey(cfg.configPath, appCfg, km)
+		if err != nil {
+			slog.Error("GitHub App private key is unavailable", "err", err)
+			os.Exit(1)
+		}
+		githubAppTokenSource, err = githubapp.NewTokenSource(githubapp.Config{
+			ClientID:       githubAppClientID,
+			InstallationID: githubAppInstallationID,
+			PrivateKeyPEM:  privateKeyPEM,
+			APIBaseURL:     os.Getenv("GITHUB_API_URL"),
+		})
+		if err != nil {
+			slog.Error("GitHub App installation token source initialization failed", "err", err)
+			os.Exit(1)
+		}
 	}
 
 	cfg.githubClientID = clientID
@@ -359,7 +409,11 @@ func main() {
 				Refresher:  upstreamRefresher,
 			}
 		}
-		h := proxy.NewHandler(route.Upstream, oauthHandler, route.UpstreamBearerTokenEnv, route.Prefix, upstreamOAuthOpts)
+		var proxyOptions []proxy.HandlerOption
+		if route.UpstreamGitHubApp {
+			proxyOptions = append(proxyOptions, proxy.WithServerTokenSource(route.Name, githubAppTokenSource))
+		}
+		h := proxy.NewHandler(route.Upstream, oauthHandler, route.UpstreamBearerTokenEnv, route.Prefix, upstreamOAuthOpts, proxyOptions...)
 		var wrapped http.Handler
 		if route.NoAuth {
 			wrapped = h
@@ -431,6 +485,7 @@ func main() {
 			"upstream_bearer_token_env", route.UpstreamBearerTokenEnv != "",
 			"upstream_oauth", route.UpstreamOAuth != "",
 			"upstream_provider_token", route.UpstreamProviderToken,
+			"upstream_github_app", route.UpstreamGitHubApp,
 		)
 	}
 
@@ -459,7 +514,10 @@ func main() {
 	// Phase B (#72) delegated-access PoC: optional loopback-only internal API.
 	// Activated only when both env vars are set; missing either → disabled
 	// (fail-closed) with an explicit log so misconfiguration is obvious.
-	startInternalAPI(oauthHandler, oauthHandler)
+	startInternalAPI(oauthHandler, oauthHandler, &routeCredentialDiagnostics{
+		routes:    routes,
+		githubApp: githubAppTokenSource,
+	})
 
 	if err := listenAndServe(server, cfg.tlsCertPath, cfg.tlsKeyPath, cfg.enableHTTP2); err != nil && err != http.ErrServerClosed {
 		slog.Error("server error", "err", err)
@@ -673,6 +731,15 @@ func splitCSV(value string) []string {
 	return out
 }
 
+func routesUseGitHubApp(routes []router.Route) bool {
+	for _, route := range routes {
+		if route.UpstreamGitHubApp {
+			return true
+		}
+	}
+	return false
+}
+
 // buildResourceAudienceMap builds the map from resource identifier → required_audience
 // used by auth.Handler to resolve the resource parameter in /token requests.
 //
@@ -809,7 +876,7 @@ func parseLogLevel(level string) slog.Level {
 // Missing or invalid configuration fails closed: the API is simply not served
 // and a log line announces the disabled state. We never bind to a non-loopback
 // address.
-func startInternalAPI(resolver internalapi.TokenResolver, failures internalapi.FailureReader) {
+func startInternalAPI(resolver internalapi.TokenResolver, failures internalapi.FailureReader, credentials internalapi.CredentialDiagnosticsProvider) {
 	secret := strings.TrimSpace(os.Getenv("MCP_GATEWAY_INTERNAL_SECRET"))
 	portRaw := strings.TrimSpace(os.Getenv("MCP_GATEWAY_INTERNAL_PORT"))
 	if secret == "" || portRaw == "" {
@@ -821,7 +888,12 @@ func startInternalAPI(resolver internalapi.TokenResolver, failures internalapi.F
 		slog.Error("internal delegated access API disabled: invalid port", "port", portRaw)
 		return
 	}
-	handler, err := internalapi.NewHandler(resolver, secret, internalapi.WithFailureReader(failures))
+	handler, err := internalapi.NewHandler(
+		resolver,
+		secret,
+		internalapi.WithFailureReader(failures),
+		internalapi.WithCredentialDiagnostics(credentials),
+	)
 	if err != nil {
 		slog.Error("internal delegated access API disabled: invalid configuration", "err", err)
 		return
@@ -858,4 +930,43 @@ func startInternalAPI(resolver internalapi.TokenResolver, failures internalapi.F
 			slog.Error("internal delegated access API exited", "err", err)
 		}
 	}()
+}
+
+type routeCredentialDiagnostics struct {
+	routes    []router.Route
+	githubApp *githubapp.TokenSource
+}
+
+func (d *routeCredentialDiagnostics) CredentialDiagnostics(ctx context.Context) []internalapi.CredentialDiagnostic {
+	diagnostics := make([]internalapi.CredentialDiagnostic, 0, len(d.routes))
+	for _, route := range d.routes {
+		diagnostic := internalapi.CredentialDiagnostic{RouteName: route.Name, Ready: true}
+		switch {
+		case route.UpstreamGitHubApp:
+			diagnostic.CredentialType = "github_app_installation"
+			if d.githubApp == nil {
+				diagnostic.Ready = false
+				break
+			}
+			if _, err := d.githubApp.Token(ctx); err != nil {
+				diagnostic.Ready = false
+			}
+			status := d.githubApp.Status()
+			diagnostic.InstallationID = status.InstallationID
+			diagnostic.Ready = diagnostic.Ready && status.Ready
+			if !status.ExpiresAt.IsZero() {
+				diagnostic.ExpiresAt = status.ExpiresAt.UTC().Format(time.RFC3339)
+			}
+		case route.UpstreamProviderToken:
+			diagnostic.CredentialType = "provider_user_token"
+		case route.UpstreamOAuth != "":
+			diagnostic.CredentialType = "upstream_oauth"
+		case route.UpstreamBearerTokenEnv != "":
+			diagnostic.CredentialType = "static_bearer_env"
+		default:
+			diagnostic.CredentialType = "gateway_client_token"
+		}
+		diagnostics = append(diagnostics, diagnostic)
+	}
+	return diagnostics
 }

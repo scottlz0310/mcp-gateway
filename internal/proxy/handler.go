@@ -50,6 +50,31 @@ type UpstreamOAuthOptions struct {
 	Refresher  UpstreamTokenRefresher // nil = no proactive/auto refresh
 }
 
+// ServerTokenSource provides a shared server-to-server credential such as a
+// GitHub App installation token. Implementations own caching and rotation.
+type ServerTokenSource interface {
+	Token(ctx context.Context) (string, error)
+	RefreshAfter401(ctx context.Context, rejectedToken string) (string, error)
+}
+
+type serverTokenContextKey struct{}
+
+type handlerOptions struct {
+	serverTokenSource ServerTokenSource
+	routeName         string
+}
+
+// HandlerOption configures an optional proxy credential source.
+type HandlerOption func(*handlerOptions)
+
+// WithServerTokenSource configures a shared server-to-server credential.
+func WithServerTokenSource(routeName string, source ServerTokenSource) HandlerOption {
+	return func(opts *handlerOptions) {
+		opts.routeName = routeName
+		opts.serverTokenSource = source
+	}
+}
+
 // NewProviderTokenMiddleware returns a handler that resolves the authenticated subject's
 // provider access token (e.g. the GitHub user token in builtin mode) via src, stores it in
 // the request context, and delegates to next. If resolution fails for any reason the request
@@ -120,8 +145,9 @@ func writeProviderTokenUnauthorized(w http.ResponseWriter, errDesc, resourceMeta
 // Token injection priority:
 //  1. upstreamOAuth non-nil → per-user token from UpstreamTokenStore,
 //     with optional proactive refresh via UpstreamOAuthOptions.Refresher.
-//  2. upstreamBearerTokenEnv non-empty → token from named env var.
-//  3. otherwise → gateway client OAuth token from context.
+//  2. serverTokenSource non-nil → gateway-managed server credential.
+//  3. upstreamBearerTokenEnv non-empty → token from named env var.
+//  4. otherwise → gateway client OAuth token from context.
 //
 // Upstream 401 handling:
 //   - upstreamOAuth with Refresher: refreshingTransport intercepts the 401,
@@ -131,7 +157,11 @@ func writeProviderTokenUnauthorized(w http.ResponseWriter, errDesc, resourceMeta
 //     TokenStore so the next request triggers re-authorization.
 //   - upstreamBearerTokenEnv: logs a warning; env var token must be rotated.
 //   - otherwise: invalidates the gateway client token cache.
-func NewHandler(upstream *url.URL, inv TokenInvalidator, upstreamBearerTokenEnv string, prefix string, upstreamOAuth *UpstreamOAuthOptions) http.Handler {
+func NewHandler(upstream *url.URL, inv TokenInvalidator, upstreamBearerTokenEnv string, prefix string, upstreamOAuth *UpstreamOAuthOptions, options ...HandlerOption) http.Handler {
+	opts := handlerOptions{}
+	for _, option := range options {
+		option(&opts)
+	}
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			// Strip prefix before SetURL so that SetURL correctly joins
@@ -195,6 +225,8 @@ func NewHandler(upstream *url.URL, inv TokenInvalidator, upstreamBearerTokenEnv 
 						"path", pr.Out.URL.Path,
 					)
 				}
+			} else if token, ok := pr.In.Context().Value(serverTokenContextKey{}).(string); ok && token != "" {
+				pr.Out.Header.Set("Authorization", "Bearer "+token)
 			} else if upstreamBearerTokenEnv != "" {
 				// Upstream credential injection: read the named env var at request time.
 				// A warning is emitted when the env var is unset or empty so that
@@ -266,6 +298,11 @@ func NewHandler(upstream *url.URL, inv TokenInvalidator, upstreamBearerTokenEnv 
 							)
 						}
 					}
+				} else if _, usedServerToken := resp.Request.Context().Value(serverTokenContextKey{}).(string); usedServerToken {
+					slog.Warn("upstream rejected server credential after refresh attempt",
+						"route", opts.routeName,
+						"path", resp.Request.URL.Path,
+					)
 				} else if upstreamBearerTokenEnv != "" {
 					// The 401 came from an upstream-credential route.
 					// This is a problem with the upstream API token, not the
@@ -309,6 +346,30 @@ func NewHandler(upstream *url.URL, inv TokenInvalidator, upstreamBearerTokenEnv 
 			base: http.DefaultTransport,
 			opts: upstreamOAuth,
 		}
+	}
+	if opts.serverTokenSource != nil {
+		rp.Transport = &serverTokenRefreshingTransport{
+			base:      http.DefaultTransport,
+			routeName: opts.routeName,
+			source:    opts.serverTokenSource,
+		}
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			token, err := opts.serverTokenSource.Token(r.Context())
+			if err != nil {
+				slog.Error("server credential unavailable; request rejected",
+					"route", opts.routeName,
+					"path", r.URL.Path,
+					"err", err,
+				)
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Cache-Control", "no-store")
+				w.WriteHeader(http.StatusBadGateway)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "upstream_credential_unavailable"})
+				return
+			}
+			ctx := context.WithValue(r.Context(), serverTokenContextKey{}, token)
+			rp.ServeHTTP(w, r.WithContext(ctx))
+		})
 	}
 
 	return rp

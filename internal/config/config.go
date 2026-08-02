@@ -50,6 +50,10 @@ type RouteConfig struct {
 	// and injects it as the upstream Authorization Bearer header instead of the gateway JWT.
 	// Requires gateway authentication. Incompatible with upstream_bearer_token_env and upstream_oauth.
 	UpstreamProviderToken bool `yaml:"upstream_provider_token,omitempty" json:"upstream_provider_token,omitempty"`
+	// UpstreamGitHubApp injects a GitHub App installation token into the
+	// upstream Authorization header. The installation credentials are global
+	// gateway configuration and the short-lived token is managed in memory.
+	UpstreamGitHubApp bool `yaml:"upstream_github_app,omitempty" json:"upstream_github_app,omitempty"`
 }
 
 // SetupConfig holds first-run wizard state.
@@ -59,10 +63,20 @@ type SetupConfig struct {
 
 // AppConfig is the application configuration stored in config.yaml.
 type AppConfig struct {
-	Auth    AuthConfig    `yaml:"auth,omitempty"`
-	Gateway GatewayConfig `yaml:"gateway,omitempty"`
-	Routes  []RouteConfig `yaml:"routes,omitempty"`
-	Setup   SetupConfig   `yaml:"setup,omitempty"`
+	Auth      AuthConfig      `yaml:"auth,omitempty"`
+	GitHubApp GitHubAppConfig `yaml:"github_app,omitempty"`
+	Gateway   GatewayConfig   `yaml:"gateway,omitempty"`
+	Routes    []RouteConfig   `yaml:"routes,omitempty"`
+	Setup     SetupConfig     `yaml:"setup,omitempty"`
+}
+
+// GitHubAppConfig holds server-to-server credentials used to mint installation
+// access tokens. It is deliberately separate from AuthConfig: caller OAuth and
+// upstream GitHub App authentication are independent security boundaries.
+type GitHubAppConfig struct {
+	ClientID       string `yaml:"client_id,omitempty"`
+	InstallationID int64  `yaml:"installation_id,omitempty"`
+	PrivateKey     string `yaml:"private_key,omitempty"`
 }
 
 // AuthConfig holds OAuth client credentials.
@@ -222,6 +236,55 @@ func MigrateSecret(configPath string, cfg *AppConfig, km *KeyMaterial, providerK
 	}
 }
 
+// MigrateGitHubAppPrivateKey resolves the GitHub App private key and persists
+// it encrypted when it is supplied as plaintext or through the environment.
+// The returned PEM is never written to logs.
+func MigrateGitHubAppPrivateKey(configPath string, cfg *AppConfig, km *KeyMaterial) (string, error) {
+	key := &cfg.GitHubApp.PrivateKey
+	switch {
+	case IsEncrypted(*key):
+		plaintext, err := DecryptField(km, *key)
+		if err != nil {
+			return "", fmt.Errorf("decrypting github_app.private_key: %w", err)
+		}
+		return plaintext, nil
+	case strings.TrimSpace(*key) != "":
+		plaintext := *key
+		encrypted, err := EncryptField(km, plaintext)
+		if err != nil {
+			return "", fmt.Errorf("encrypting github_app.private_key: %w", err)
+		}
+		*key = encrypted
+		if err := SaveConfig(configPath, cfg); err != nil {
+			return "", fmt.Errorf("saving config after encrypting github_app.private_key: %w", err)
+		}
+		return plaintext, nil
+	default:
+		plaintext := os.Getenv("GITHUB_APP_PRIVATE_KEY")
+		if strings.TrimSpace(plaintext) == "" {
+			if keyPath := strings.TrimSpace(os.Getenv("GITHUB_APP_PRIVATE_KEY_PATH")); keyPath != "" {
+				keyBytes, err := os.ReadFile(keyPath)
+				if err != nil {
+					return "", fmt.Errorf("reading GITHUB_APP_PRIVATE_KEY_PATH: %w", err)
+				}
+				plaintext = string(keyBytes)
+			}
+		}
+		if strings.TrimSpace(plaintext) == "" {
+			return "", fmt.Errorf("github_app.private_key is required: set GITHUB_APP_PRIVATE_KEY, GITHUB_APP_PRIVATE_KEY_PATH, or provide an encrypted value in config.yaml")
+		}
+		encrypted, err := EncryptField(km, plaintext)
+		if err != nil {
+			return "", fmt.Errorf("encrypting GITHUB_APP_PRIVATE_KEY: %w", err)
+		}
+		*key = encrypted
+		if err := SaveConfig(configPath, cfg); err != nil {
+			return "", fmt.Errorf("saving config after encrypting GITHUB_APP_PRIVATE_KEY: %w", err)
+		}
+		return plaintext, nil
+	}
+}
+
 // MigrateOIDCPrivateKey resolves the OIDC RSA private key, following this priority:
 //
 //  1. cfg.Auth.OIDCPrivateKey is "ENC[age:]..." → decrypt, parse PEM, and return *rsa.PrivateKey
@@ -272,4 +335,3 @@ func MigrateOIDCPrivateKey(configPath string, cfg *AppConfig, km *KeyMaterial) (
 
 	return privKey, nil
 }
-

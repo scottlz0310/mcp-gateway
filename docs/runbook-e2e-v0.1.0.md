@@ -59,12 +59,13 @@ v0.1.0 で追加された **設定永続化（age 暗号化）**・**Setup Wizar
 
 ### 必要な事前準備
 
-1. GitHub OAuth App を用意する
+1. GitHub App を用意し、検証対象リポジトリの owner account にインストールする
    - `AUTH_MODE=gateway` で検証する場合は gateway 用 1 つでよい
    - `copilot-review-mcp` の standalone モードも併せて検証する場合のみ、copilot-review-mcp 用に 2 つ目を用意する
    - 用途を分けるためアプリは分離してもよいが、同一アプリでも検証は可能
-   - Authorization callback URL: `http://localhost:8080/callback`
-   - Device Flow を有効化（GitHub OAuth App 設定 → "Enable Device Flow"）
+   - Authorization callback URLs: `http://localhost:8080/callback` と `http://localhost:8080/device_callback`
+   - Device Flow を有効化
+   - installation token 用 private key を生成し、安全な場所へ保存する
 2. `examples/copilot-review-routing/` をコピーして作業ディレクトリを作る
    ```bash
    cp -r examples/copilot-review-routing /tmp/mcp-gateway-e2e
@@ -72,12 +73,15 @@ v0.1.0 で追加された **設定永続化（age 暗号化）**・**Setup Wizar
    ```
 3. `.env` を作成（`.env.example` があればそれをベースに、無ければ次の最小構成）
    ```env
-   GITHUB_MCP_CLIENT_ID=Ov23liXXXXXXXXXX
-   GITHUB_MCP_CLIENT_SECRET=__leave_empty_for_wizard_test__
+   OAUTH_CLIENT_ID=Iv23liXXXXXXXXXX
+   OAUTH_CLIENT_SECRET=__leave_empty_for_wizard_test__
+   GITHUB_APP_CLIENT_ID=Iv23liXXXXXXXXXX
+   GITHUB_APP_INSTALLATION_ID=12345678
+   GITHUB_APP_PRIVATE_KEY_PATH=/run/secrets/github-app-private-key.pem
    COPILOT_REVIEW_AUTH_MODE=gateway
    GITHUB_CLIENT_ID=
    GITHUB_CLIENT_SECRET=
-   GITHUB_PERSONAL_ACCESS_TOKEN=ghp_xxxxxxxxxxxx
+   ROUTE_GITHUB=/mcp/github|http://github-mcp:8082|upstream_github_app=true
    MCP_GATEWAY_BASE_URL=http://localhost:8080
    ```
 4. `data/` ディレクトリを volume mount 用に作成

@@ -5,6 +5,17 @@
 
 ## [Unreleased]
 
+### 追加
+
+- Personal Access Token を使わず GitHub App installation token で upstream 認証する `upstream_github_app=true` を追加（[#212](https://github.com/scottlz0310/mcp-gateway/issues/212)）
+  - age 暗号化した RSA private key で短命 App JWT を署名し、installation token をメモリ内でキャッシュして期限前に更新する。
+  - upstream 401 後、再送可能なリクエストを新しい token で1回だけ透過的に再試行する。
+  - token・private key を露出しない loopback-only の credential source 診断を追加。
+
+### 変更
+
+- 同梱 multi-service example から active な `GITHUB_PERSONAL_ACCESS_TOKEN` 契約を削除。repo 横断の runtime / fallback 削除は `Mcp-Docker#225` と `review-raven#106` で追跡する。
+
 ### 変更
 
 - upstream の undici 修正を受け、TLS リスナーの HTTP/2 を再びデフォルトで有効化（[#204](https://github.com/scottlz0310/mcp-gateway/issues/204)、[#206](https://github.com/scottlz0310/mcp-gateway/issues/206)）

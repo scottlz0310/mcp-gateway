@@ -216,6 +216,7 @@ Operational details and recovery procedures are in
 - Structured JSON logs with request, auth, setup, and proxy events.
 - Trusted reverse proxy header handling for TLS-terminating proxies.
 - **Upstream OAuth delegation**: per-route upstream OAuth with `authorization_code` (user-interactive) or `client_credentials` (service-to-service) grant, automatic AS discovery (RFC 9728 + RFC 8414), Dynamic Client Registration, per-user token persistence, proactive refresh, and transparent 401 retry.
+- **GitHub App installation credentials**: short-lived installation-token injection, proactive refresh, and transparent 401 retry without a personal access token.
 
 ## Core Configuration
 
@@ -227,7 +228,10 @@ environment:
   OAUTH_CLIENT_SECRET: <your-client-secret>
   MCP_GATEWAY_BIND_ADDR: 0.0.0.0:8080
   MCP_GATEWAY_PUBLIC_URL: http://127.0.0.1:8080
-  ROUTE_GITHUB: /mcp/github|http://github-mcp:8082
+  GITHUB_APP_CLIENT_ID: <your-github-app-client-id>
+  GITHUB_APP_INSTALLATION_ID: <your-installation-id>
+  GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/github-app-private-key.pem
+  ROUTE_GITHUB: /mcp/github|http://github-mcp:8082|upstream_github_app=true
 ```
 
 Important paths:

@@ -209,6 +209,7 @@ setup token を消費して終了コード 0 で終了します。その後 supe
 - request、auth、setup、proxy event の構造化 JSON log。
 - TLS 終端 proxy 向け trusted reverse proxy header 処理。
 - **upstream OAuth 委任**: ルート単位で upstream OAuth を設定。`authorization_code`（ユーザー認可フロー）または `client_credentials`（サービス間通信）を選択可能。AS の自動検出（RFC 9728 + RFC 8414）・Dynamic Client Registration・ユーザーごとのトークン永続化・proactive refresh・透過的 401 retry に対応。
+- **GitHub App installation 認証**: Personal Access Token を使わず、短命 installation token の注入・期限前更新・透過的 401 retry に対応。
 
 ## 主要設定
 
@@ -220,7 +221,10 @@ environment:
   OAUTH_CLIENT_SECRET: <your-client-secret>
   MCP_GATEWAY_BIND_ADDR: 0.0.0.0:8080
   MCP_GATEWAY_PUBLIC_URL: http://127.0.0.1:8080
-  ROUTE_GITHUB: /mcp/github|http://github-mcp:8082
+  GITHUB_APP_CLIENT_ID: <your-github-app-client-id>
+  GITHUB_APP_INSTALLATION_ID: <your-installation-id>
+  GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/github-app-private-key.pem
+  ROUTE_GITHUB: /mcp/github|http://github-mcp:8082|upstream_github_app=true
 ```
 
 重要な path:

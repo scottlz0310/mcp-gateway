@@ -51,6 +51,10 @@ type Route struct {
 	// mode) via EnsureFreshAccessTokenForSubject and injects it as the upstream Bearer token.
 	// Requires gateway authentication. Incompatible with UpstreamBearerTokenEnv and UpstreamOAuth.
 	UpstreamProviderToken bool
+	// UpstreamGitHubApp enables a gateway-managed GitHub App installation token.
+	// It requires gateway authentication and is mutually exclusive with every
+	// other upstream credential source.
+	UpstreamGitHubApp bool
 }
 
 // ParseEnv reads ROUTE_<NAME>=<prefix>|<upstream_url>[|opt=val...] environment
@@ -239,6 +243,31 @@ func parseRoutes(env []string) ([]Route, error) {
 			return nil, fmt.Errorf("%s: upstream_provider_token and upstream_oauth are mutually exclusive", key)
 		}
 
+		// upstream_github_app: inject a gateway-managed GitHub App installation token.
+		var upstreamGitHubApp bool
+		if appVal, ok := options["upstream_github_app"]; ok {
+			switch strings.TrimSpace(appVal) {
+			case "true":
+				upstreamGitHubApp = true
+			case "false":
+			default:
+				return nil, fmt.Errorf("%s: upstream_github_app must be \"true\" or \"false\" (got %q)", key, appVal)
+			}
+			delete(options, "upstream_github_app")
+		}
+		if upstreamGitHubApp && noAuth {
+			return nil, fmt.Errorf("%s: upstream_github_app is incompatible with auth=none; GitHub App token injection requires gateway authentication", key)
+		}
+		if upstreamGitHubApp && upstreamBearerTokenEnv != "" {
+			return nil, fmt.Errorf("%s: upstream_github_app and upstream_bearer_token_env are mutually exclusive", key)
+		}
+		if upstreamGitHubApp && upstreamOAuth != "" {
+			return nil, fmt.Errorf("%s: upstream_github_app and upstream_oauth are mutually exclusive", key)
+		}
+		if upstreamGitHubApp && upstreamProviderToken {
+			return nil, fmt.Errorf("%s: upstream_github_app and upstream_provider_token are mutually exclusive", key)
+		}
+
 		// Reject any unrecognised option keys.
 		if len(options) > 0 {
 			unknown := make([]string, 0, len(options))
@@ -287,6 +316,7 @@ func parseRoutes(env []string) ([]Route, error) {
 			UpstreamOAuthScope:     upstreamOAuthScope,
 			UpstreamOAuthGrant:     upstreamOAuthGrant,
 			UpstreamProviderToken:  upstreamProviderToken,
+			UpstreamGitHubApp:      upstreamGitHubApp,
 		})
 	}
 	// Longest prefix first for correct matching order.
@@ -427,6 +457,19 @@ func ParseFromConfig(cfgRoutes []appconfig.RouteConfig) ([]Route, error) {
 		if upstreamProviderToken && upstreamOAuth != "" {
 			return nil, fmt.Errorf("route %q: upstream_provider_token and upstream_oauth are mutually exclusive", name)
 		}
+		upstreamGitHubApp := r.UpstreamGitHubApp
+		if upstreamGitHubApp && r.NoAuth {
+			return nil, fmt.Errorf("route %q: upstream_github_app is incompatible with no_auth; GitHub App token injection requires gateway authentication", name)
+		}
+		if upstreamGitHubApp && upstreamBearerTokenEnv != "" {
+			return nil, fmt.Errorf("route %q: upstream_github_app and upstream_bearer_token_env are mutually exclusive", name)
+		}
+		if upstreamGitHubApp && upstreamOAuth != "" {
+			return nil, fmt.Errorf("route %q: upstream_github_app and upstream_oauth are mutually exclusive", name)
+		}
+		if upstreamGitHubApp && upstreamProviderToken {
+			return nil, fmt.Errorf("route %q: upstream_github_app and upstream_provider_token are mutually exclusive", name)
+		}
 		seen[prefix] = struct{}{}
 		routes = append(routes, Route{
 			Name:                   name,
@@ -439,6 +482,7 @@ func ParseFromConfig(cfgRoutes []appconfig.RouteConfig) ([]Route, error) {
 			UpstreamOAuthScope:     upstreamOAuthScope,
 			UpstreamOAuthGrant:     upstreamOAuthGrant,
 			UpstreamProviderToken:  upstreamProviderToken,
+			UpstreamGitHubApp:      upstreamGitHubApp,
 		})
 	}
 	sort.Slice(routes, func(i, j int) bool {

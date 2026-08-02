@@ -30,6 +30,9 @@ mcp-gateway を通常モードで起動するには、以下のすべてが揃�
 | 信頼済みプロキシ | `MCP_GATEWAY_TRUSTED_PROXIES` > `gateway.trusted_proxies` > なし |
 | トークン audience 厳格モード | `MCP_GATEWAY_TOKEN_AUDIENCE_STRICT` > `gateway.token_audience_strict` > `false` |
 | GitHub リフレッシュトークンローテーション | `MCP_GATEWAY_GITHUB_REFRESH_ENABLED` > `gateway.github_refresh_enabled` > `false` |
+| GitHub App installation Client ID | `GITHUB_APP_CLIENT_ID` > `github_app.client_id` |
+| GitHub App installation ID | `GITHUB_APP_INSTALLATION_ID` > `github_app.installation_id` |
+| GitHub App private key | 暗号化/平文 `github_app.private_key` > `GITHUB_APP_PRIVATE_KEY` > `GITHUB_APP_PRIVATE_KEY_PATH` |
 | 許可リダイレクトホスト | `MCP_GATEWAY_ALLOWED_REDIRECT_HOSTS` > `gateway.allowed_redirect_hosts` > `localhost, 127.0.0.1, vscode.dev, antigravity.google`（デフォルト） |
 | 許可リダイレクトスキーム | `MCP_GATEWAY_ALLOWED_REDIRECT_SCHEMES` > `gateway.allowed_redirect_schemes` > `antigravity, antigravity-insiders`（デフォルト） |
 
@@ -50,6 +53,11 @@ OAuth クライアントシークレットは意図的に特別扱いです。`c
 | `GITHUB_MCP_CLIENT_ID` | なし | **非推奨** — `OAUTH_CLIENT_ID` を使用してください。起動時警告付きで引き続き受け入れ。 |
 | `GITHUB_MCP_CLIENT_SECRET` | なし | **非推奨** — `OAUTH_CLIENT_SECRET` を使用してください。起動時警告付きで引き続き受け入れ。 |
 | `GITHUB_MCP_OAUTH_SCOPES` | なし | **非推奨** — `OAUTH_SCOPES` を使用してください。起動時警告付きで引き続き受け入れ。 |
+| `GITHUB_APP_CLIENT_ID` | なし | `upstream_github_app=true` ルートが使用する GitHub App Client ID。caller OAuth の `OAUTH_CLIENT_ID` とは独立して明示する。 |
+| `GITHUB_APP_INSTALLATION_ID` | なし | installation token を発行する対象 installation の正の整数 ID。 |
+| `GITHUB_APP_PRIVATE_KEY` | なし | GitHub App RSA private key の PEM。初回起動時に `ENC[age:]` へ暗号化して `config.yaml` に保存する。ログには出力しない。 |
+| `GITHUB_APP_PRIVATE_KEY_PATH` | なし | PEM private key ファイルのパス。`GITHUB_APP_PRIVATE_KEY` が空の場合の初回シード。暗号化後の config があれば以後は不要。 |
+| `GITHUB_API_URL` | `https://api.github.com` | installation token 発行先の GitHub API base URL。GitHub Enterprise Server では API URL を指定する。 |
 | `ROUTE_<NAME>` | なし | `<prefix>\|<upstream_url>[|auth=none]` 形式のルート定義。`config.yaml` で設定されていない限り1つ以上必須。 |
 | `MCP_CONFIG_FILE` | OS state dir¹ `/config.yaml` | 永続化 YAML 設定ファイルのパス。 |
 | `MCP_GATEWAY_KEY_PATH` | OS state dir¹ `/gateway.key` | `auth.github_client_secret` の暗号化に使用する age X25519 identity のパス。 |
@@ -109,6 +117,11 @@ auth:
   github_client_id: "Ov23liXXXX"
   github_client_secret: "ENC[age:]<base64-ciphertext>"
 
+github_app:
+  client_id: "Iv23XXXX"
+  installation_id: 12345678
+  private_key: "ENC[age:]<base64-ciphertext>"
+
 gateway:
   public_url: "http://127.0.0.1:8080"
   bind_addr: "127.0.0.1:8080"
@@ -124,6 +137,7 @@ routes:
   - name: github
     prefix: /mcp/github
     upstream: http://github-mcp:8082
+    upstream_github_app: true
   - name: public
     prefix: /public
     upstream: http://public-svc:8083
@@ -144,6 +158,9 @@ setup:
 | `auth.github_client_secret` | GitHub App クライアントシークレット。`ENC[age:]...` として暗号化可能。 |
 | `auth.oidc_issuer_url` | OIDC issuer URL。 |
 | `auth.oidc_audience` | OIDC audience。将来のローカル JWT 検証用に予約済み。現在は UserInfo 検証で未使用/no-op。 |
+| `github_app.client_id` | server-to-server installation token 用 GitHub App Client ID。 |
+| `github_app.installation_id` | token 発行対象の GitHub App installation ID。 |
+| `github_app.private_key` | GitHub App RSA private key。`ENC[age:]...` として暗号化保存する。 |
 | `gateway.public_url` | OAuth および MCP クライアントに見える正規公開 URL。 |
 | `gateway.bind_addr` | TCP リスナーアドレス。 |
 | `gateway.base_url` | `gateway.public_url` の非推奨エイリアス。 |
@@ -164,6 +181,7 @@ setup:
 | `routes[].upstream_oauth_scope` | Upstream AS へのトークンリクエストで要求するスコープ（スペース区切り。カンマ区切りは自動正規化）。`upstream_oauth` が必要。 |
 | `routes[].upstream_oauth_grant` | Upstream トークン取得に使用する OAuth 2.0 グラントタイプ（`authorization_code` または `client_credentials`、デフォルト: `authorization_code`）。`upstream_oauth` が必要。[Upstream OAuth 委任](#upstream-oauth-委任) を参照。 |
 | `routes[].upstream_provider_token` | `true` の場合、ゲートウェイの provider アクセストークン（builtin モードでは GitHub ユーザートークン）を upstream Bearer トークンとして注入する。ゲートウェイ認証が必要（`no_auth` と排他）。`upstream_bearer_token_env` および `upstream_oauth` と排他。[プロバイダートークン委任](#プロバイダートークン委任) を参照。 |
+| `routes[].upstream_github_app` | `true` の場合、GitHub App installation token を upstream Bearer トークンとして注入する。gateway 認証が必要で、他の upstream credential source と排他。[GitHub App installation token](#github-app-installation-token) を参照。 |
 | `setup.completed` | ゲートウェイが書き込むセットアップウィザード状態。オペレーターが直接編集することは通常ありません。 |
 
 ゲートウェイがシークレット移行またはセットアップ完了時に `config.yaml` を書き直す際、未知の YAML フィールドとコメントは保持されません。
@@ -205,6 +223,24 @@ ROUTE_REVIEW_RAVEN=/mcp/review-raven|http://review-raven:8083
 | `upstream_oauth_scope` | なし | Upstream AS へのトークンリクエストで要求するスコープ（スペース区切り。カンマ区切りは自動正規化）。`upstream_oauth` が必要。 |
 | `upstream_oauth_grant` | `authorization_code` | Upstream トークン取得に使用する OAuth 2.0 グラントタイプ。`authorization_code`（ユーザーを認可エンドポイントへリダイレクト）または `client_credentials`（バックグラウンドでトークンを取得、ユーザー操作不要）。`upstream_oauth` が必要。 |
 | `upstream_provider_token` | `false` | `true` の場合、ゲートウェイの provider アクセストークン（builtin モードでは GitHub ユーザートークン）を upstream Bearer トークンとして注入する。ゲートウェイ認証必須（`auth=none` と排他）。`upstream_bearer_token_env` および `upstream_oauth` と排他。[プロバイダートークン委任](#プロバイダートークン委任) を参照。 |
+| `upstream_github_app` | `false` | GitHub App installation token を gateway が取得・更新して upstream に注入する。`auth=none` と他の upstream credential source は併用不可。[GitHub App installation token](#github-app-installation-token) を参照。 |
+
+### GitHub App installation token
+
+`upstream_github_app=true` は、個人 PAT を使わず GitHub App installation として動作する server-to-server route 用です。
+
+```bash
+ROUTE_GITHUB=/mcp/github|http://github-mcp:8082|upstream_github_app=true
+GITHUB_APP_CLIENT_ID=Iv23xxxxxxxxxxxxxxxx
+GITHUB_APP_INSTALLATION_ID=12345678
+GITHUB_APP_PRIVATE_KEY_PATH=/run/secrets/github-app-private-key.pem
+```
+
+ゲートウェイは RSA private key で有効期間9分の App JWT を署名し、対象 installation の access token を取得します。installation token はメモリ内だけに保持し、期限5分前に更新します。upstream が 401 を返した場合は token を強制再発行し、body が再送可能なリクエストに限り1回だけ透過的に再試行します。
+
+起動時には Client ID・Installation ID・private key をすべて検証し、不足・不正があれば fail-closed で起動を中止します。private key は初回シード時に `ENC[age:]` へ移行され、token・JWT・private key の生値はログへ出力しません。
+
+`MCP_GATEWAY_INTERNAL_SECRET` / `MCP_GATEWAY_INTERNAL_PORT` を設定した環境では、loopback-only の `GET /internal/v1/credentials` が route ごとの `credential_type`・installation ID・有効期限・ready 状態を返します。token 値は返しません。
 
 ### Upstream OAuth 委任
 

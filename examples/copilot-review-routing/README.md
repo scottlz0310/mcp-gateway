@@ -21,10 +21,12 @@ changes** to copilot-review-mcp.
 ## Prerequisites
 
 - Docker & Docker Compose v2
-- A GitHub OAuth App (create at https://github.com/settings/applications/new)
+- A GitHub App
   - **Homepage URL**: `http://127.0.0.1:8080`
   - **Authorization callback URL**: `http://127.0.0.1:8080/callback`
-- A GitHub Personal Access Token (for `github-mcp-server`)
+  - Install the App on every organization or user account whose repositories the route must access
+  - Grant only the repository permissions required by `github-mcp-server`
+  - Download a private key for installation-token authentication
 
 ## Quick Start
 
@@ -32,6 +34,10 @@ changes** to copilot-review-mcp.
 # 1. Copy and fill in credentials
 cp .env.example .env
 $EDITOR .env
+
+# Copy the downloaded GitHub App private key (never commit this directory)
+mkdir -p secrets
+cp /path/to/downloaded-app-key.pem secrets/github-app-private-key.pem
 
 # 2. Start the stack
 docker compose up -d
@@ -72,9 +78,11 @@ To run `copilot-review-mcp` in standalone mode (direct access without mcp-gatewa
 credentials (`GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` for copilot-review-mcp) in addition
 to the mcp-gateway credentials. See `.env.example` for details.
 
-### Shared OAuth App credentials
+### Shared GitHub App credentials
 
 `OAUTH_CLIENT_ID`/`OAUTH_CLIENT_SECRET` (mcp-gateway; legacy
 `GITHUB_MCP_CLIENT_ID`/`GITHUB_MCP_CLIENT_SECRET` still accepted) and
 `GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET` (copilot-review-mcp, standalone mode only)
-can point to the **same** GitHub OAuth App.
+can point to the same GitHub App. The server-to-server installation flow still
+uses the separately named `GITHUB_APP_CLIENT_ID` plus Installation ID and RSA
+private key so the caller OAuth and upstream credential boundaries stay explicit.

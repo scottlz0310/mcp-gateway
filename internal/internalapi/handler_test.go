@@ -32,6 +32,14 @@ type fakeFailureReader struct {
 	failures []authaudit.Event
 }
 
+type fakeCredentialDiagnostics struct {
+	credentials []CredentialDiagnostic
+}
+
+func (f *fakeCredentialDiagnostics) CredentialDiagnostics(context.Context) []CredentialDiagnostic {
+	return append([]CredentialDiagnostic(nil), f.credentials...)
+}
+
 func (f *fakeFailureReader) RecentAuthFailures() []authaudit.Event {
 	return append([]authaudit.Event(nil), f.failures...)
 }
@@ -519,6 +527,75 @@ func TestAuthFailuresEmptyResponse(t *testing.T) {
 	if rec.Header().Get("Cache-Control") != "no-store" || rec.Header().Get("Pragma") != "no-cache" {
 		t.Errorf("cache headers: got Cache-Control=%q Pragma=%q",
 			rec.Header().Get("Cache-Control"), rec.Header().Get("Pragma"))
+	}
+}
+
+func TestCredentialsReturnsSecretFreeRouteMetadata(t *testing.T) {
+	h, err := NewHandler(&fakeResolver{}, testSecret, WithCredentialDiagnostics(&fakeCredentialDiagnostics{
+		credentials: []CredentialDiagnostic{{
+			RouteName: "github", CredentialType: "github_app_installation",
+			InstallationID: 42, ExpiresAt: "2026-08-02T13:00:00Z", Ready: true,
+		}},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/internal/v1/credentials", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Header.Set("Authorization", "Bearer "+testSecret)
+	rec := httptest.NewRecorder()
+	h.Credentials(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	body := rec.Body.Bytes()
+	var payload credentialsResponse
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Credentials) != 1 || payload.Credentials[0].CredentialType != "github_app_installation" || !payload.Credentials[0].Ready {
+		t.Fatalf("unexpected credentials: %+v", payload.Credentials)
+	}
+	if strings.Contains(string(body), "access_token") || strings.Contains(string(body), "private_key") {
+		t.Fatalf("credential response exposed secret fields: %s", body)
+	}
+}
+
+func TestCredentialsFailsClosed(t *testing.T) {
+	tests := []struct {
+		name       string
+		method     string
+		remoteAddr string
+		auth       string
+		withSource bool
+		wantStatus int
+	}{
+		{name: "method", method: http.MethodPost, remoteAddr: "127.0.0.1:1", auth: "Bearer " + testSecret, withSource: true, wantStatus: http.StatusMethodNotAllowed},
+		{name: "loopback", method: http.MethodGet, remoteAddr: "10.0.0.1:1", auth: "Bearer " + testSecret, withSource: true, wantStatus: http.StatusForbidden},
+		{name: "authorization", method: http.MethodGet, remoteAddr: "127.0.0.1:1", withSource: true, wantStatus: http.StatusUnauthorized},
+		{name: "unavailable", method: http.MethodGet, remoteAddr: "127.0.0.1:1", auth: "Bearer " + testSecret, wantStatus: http.StatusServiceUnavailable},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var opts []HandlerOption
+			if tt.withSource {
+				opts = append(opts, WithCredentialDiagnostics(&fakeCredentialDiagnostics{}))
+			}
+			h, err := NewHandler(&fakeResolver{}, testSecret, opts...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest(tt.method, "/internal/v1/credentials", nil)
+			req.RemoteAddr = tt.remoteAddr
+			if tt.auth != "" {
+				req.Header.Set("Authorization", tt.auth)
+			}
+			rec := httptest.NewRecorder()
+			h.Credentials(rec, req)
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d", rec.Code, tt.wantStatus)
+			}
+		})
 	}
 }
 

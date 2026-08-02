@@ -382,3 +382,79 @@ func TestRouteConfig_UpstreamOAuthNullAndBlankDecodedAsNil(t *testing.T) {
 	}
 }
 
+func TestMigrateGitHubAppPrivateKey(t *testing.T) {
+	tests := []struct {
+		name      string
+		configKey string
+		envKey    string
+		want      string
+		wantErr   bool
+	}{
+		{name: "plaintext config", configKey: "private-key-from-config", want: "private-key-from-config"},
+		{name: "environment", envKey: "private-key-from-env", want: "private-key-from-env"},
+		{name: "missing", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GITHUB_APP_PRIVATE_KEY", tt.envKey)
+			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			cfg := &AppConfig{GitHubApp: GitHubAppConfig{PrivateKey: tt.configKey}}
+			km := testKeyMaterial(t)
+			got, err := MigrateGitHubAppPrivateKey(configPath, cfg, km)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.want {
+				t.Fatalf("private key = %q, want %q", got, tt.want)
+			}
+			reloaded, err := LoadConfig(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !IsEncrypted(reloaded.GitHubApp.PrivateKey) || strings.Contains(reloaded.GitHubApp.PrivateKey, tt.want) {
+				t.Fatal("GitHub App private key was not encrypted at rest")
+			}
+		})
+	}
+}
+
+func TestMigrateGitHubAppPrivateKeyEncryptedRoundTrip(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	km := testKeyMaterial(t)
+	encrypted, err := EncryptField(km, "private-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &AppConfig{GitHubApp: GitHubAppConfig{PrivateKey: encrypted}}
+	got, err := MigrateGitHubAppPrivateKey(configPath, cfg, km)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "private-key" {
+		t.Fatalf("private key = %q", got)
+	}
+}
+
+func TestMigrateGitHubAppPrivateKeyFromPath(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "app.pem")
+	if err := os.WriteFile(keyPath, []byte("private-key-from-file"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GITHUB_APP_PRIVATE_KEY", "")
+	t.Setenv("GITHUB_APP_PRIVATE_KEY_PATH", keyPath)
+	cfg := &AppConfig{}
+	got, err := MigrateGitHubAppPrivateKey(filepath.Join(dir, "config.yaml"), cfg, testKeyMaterial(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "private-key-from-file" || !IsEncrypted(cfg.GitHubApp.PrivateKey) {
+		t.Fatalf("unexpected migration result")
+	}
+}
