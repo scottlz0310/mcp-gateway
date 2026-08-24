@@ -3,6 +3,8 @@
 すべての変更は [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/) に従い、
 バージョニングは [Semantic Versioning](https://semver.org/lang/ja/) に従う。
 
+## [Unreleased]
+
 ## [0.10.0] - 2026-08-24
 
 ### 追加
