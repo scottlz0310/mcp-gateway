@@ -9,6 +9,11 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Added MCP protocol negotiation contract tests and documented the transparency boundary ([#216](https://github.com/scottlz0310/mcp-gateway/issues/216))
+  - Pins two-way pass-through of `MCP-Protocol-Version` and `Mcp-Session-Id`, preservation of the `server/discover` JSON-RPC body, ID and HTTP status, and `405` pass-through for GET / DELETE.
+  - Pins incremental forwarding of long-lived SSE streams (`subscriptions/listen`) including byte-for-byte keep-alive comment lines, so a buffering regression fails the build.
+  - Pins that the gateway never mints or requires an `Mcp-Session-Id`, and that auth errors and protocol negotiation errors are never conflated.
+  - Added [`docs/mcp-protocol-transparency.md`](docs/mcp-protocol-transparency.md) defining the contract, the explicit allowlist of gateway-applied changes, and the cross-repository E2E acceptance conditions.
 - Added `upstream_github_app=true` for GitHub App installation-token authentication without a personal access token ([#212](https://github.com/scottlz0310/mcp-gateway/issues/212))
   - Signs short-lived App JWTs using the numeric GitHub App ID as the issuer and an age-encrypted RSA private key, then caches installation tokens in memory with proactive refresh.
   - Retries replayable upstream requests once with a freshly minted token after HTTP 401.
@@ -16,6 +21,7 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- SSE responses now carry `X-Accel-Buffering: no` when the upstream did not set it, so reverse proxies in front of the gateway do not hold back long-lived MCP notification streams ([#216](https://github.com/scottlz0310/mcp-gateway/issues/216)). An upstream-supplied value is always preserved.
 - Removed the active `GITHUB_PERSONAL_ACCESS_TOKEN` contract from the bundled multi-service example. Cross-repository runtime and fallback removal are tracked by `Mcp-Docker#225` and `review-raven#106`.
 
 ### Changed

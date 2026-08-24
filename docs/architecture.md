@@ -54,6 +54,10 @@ mcp-gateway は CLI エージェントおよびデスクトップクライアン
 | MCP サーバーコンテナのライフサイクル管理 | mcp-docker |
 | CLI エージェント設定ファイル生成 | mcp-docker |
 | トースト通知・AI エージェント起動 | squirrel-notifier |
+| MCP プロトコルネゴシエーションの応答生成（`server/discover` への応答、capability の合成・集約） | 各 upstream MCP サーバー |
+| MCP セッション状態の保持 | 該当なし（`2026-07-28` に protocol-level session は存在しない） |
+
+gateway はこれらに対して**透明**であることが要件です。ヘッダー・JSON-RPC ボディ・HTTP ステータス・long-lived SSE stream をどう扱うかは [MCP プロトコル透過契約](mcp-protocol-transparency.md) に契約として定義し、`internal/proxy/mcp_contract_test.go` で固定しています。
 
 ## ルート例
 
@@ -116,6 +120,7 @@ squirrel-notifier
 - クライアント向け URL を mcp-gateway に集約する
 - upstream MCP サーバーをプライベート / 内部エンドポイントとして扱う
 - ゲートウェイはルーティングと認証に集中し、レビュードメインロジックを持たない
+- ゲートウェイは MCP プロトコルに対して透明であり、ネゴシエーションの結果を生成しない
 - ゲートウェイはコンテナのライフサイクルを管理しない（それは mcp-docker の責務）
 - ゲートウェイ設定は手書き形式と mcp-docker 生成形式の両方をサポートする
 - 各コンポーネントは独立して開発・更新・置き換えできる責務境界を持つ

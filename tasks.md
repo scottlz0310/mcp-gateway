@@ -31,6 +31,7 @@
 | Issue | 内容 | 対応 PR |
 |---|---|---|
 | [#212](https://github.com/scottlz0310/mcp-gateway/issues/212) | GitHub App installation token route を追加し GPAT を完全排除。cross-repo: `review-raven#106` / `Mcp-Docker#225` | 対応中 |
+| [#216](https://github.com/scottlz0310/mcp-gateway/issues/216) | MCP `2026-07-28` の protocol negotiation を透過する contract test。横断 tracker: `thread-owl#165`。透過契約と repo 横断 E2E 受け入れ条件を `docs/mcp-protocol-transparency.md` に定義 | 対応中 |
 | [#204](https://github.com/scottlz0310/mcp-gateway/issues/204) | thread-owl の Streamable HTTP 購読が reverse proxy 経由で 502 / timeout。原因は旧 undici の h2 クライアント側キューイング。#205 で HTTP/1.1 既定へ一時退避し、Node.js 26.5.1 上の修正版 undici で h2 E2E 成功済み | #205 / #210 |
 | [#206](https://github.com/scottlz0310/mcp-gateway/issues/206) | upstream 修正とクライアント更新を受けて TLS リスナーの HTTP/2 を既定有効へ戻す。`MCP_GATEWAY_ENABLE_HTTP2=false` の HTTP/1.1 退避策は維持 | #210 |
 

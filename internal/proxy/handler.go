@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"mime"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -330,6 +331,14 @@ func NewHandler(upstream *url.URL, inv TokenInvalidator, upstreamBearerTokenEnv 
 					}
 				}
 			}
+			// Long-lived SSE streams (MCP 2026-07-28 subscriptions/listen) must not be
+			// buffered on the way to the client. An upstream-supplied value wins; the
+			// gateway adds the hint itself when the upstream omitted it, so reverse
+			// proxies placed in front of the gateway do not hold the stream back.
+			if isEventStream(resp.Header.Get("Content-Type")) && resp.Header.Get("X-Accel-Buffering") == "" {
+				resp.Header.Set("X-Accel-Buffering", "no")
+			}
+
 			slog.Info("proxy response",
 				"upstream_status", resp.StatusCode,
 				"path", resp.Request.URL.Path,
@@ -399,4 +408,10 @@ func tokenHash(token string) string {
 	}
 	sum := sha256.Sum256([]byte(token))
 	return fmt.Sprintf("%x", sum[:4])
+}
+
+// isEventStream reports whether contentType is an SSE stream.
+func isEventStream(contentType string) bool {
+	baseType, _, err := mime.ParseMediaType(contentType)
+	return err == nil && baseType == "text/event-stream"
 }

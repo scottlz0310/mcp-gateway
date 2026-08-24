@@ -7,6 +7,11 @@
 
 ### 追加
 
+- MCP プロトコルネゴシエーションの contract test を追加し、透過の責務境界を文書化（[#216](https://github.com/scottlz0310/mcp-gateway/issues/216)）
+  - `MCP-Protocol-Version` と `Mcp-Session-Id` の双方向透過、`server/discover` の JSON-RPC ボディ・ID・HTTP ステータスの保持、GET / DELETE に対する `405` 透過を固定する。
+  - long-lived SSE stream（`subscriptions/listen`）の逐次転送を、keep-alive コメント行のバイト単位保持を含めて固定する。バッファリングの回帰はビルドを失敗させる。
+  - gateway が `Mcp-Session-Id` を発行も要求もしないこと、認証エラーとネゴシエーションエラーを混同しないことを固定する。
+  - 契約・gateway が明示的に適用する変更の許可リスト・repo 横断 E2E の受け入れ条件を定義した [`docs/mcp-protocol-transparency.md`](docs/mcp-protocol-transparency.md) を追加。
 - Personal Access Token を使わず GitHub App installation token で upstream 認証する `upstream_github_app=true` を追加（[#212](https://github.com/scottlz0310/mcp-gateway/issues/212)）
   - 数値 GitHub App ID を issuer とし、age 暗号化した RSA private key で短命 App JWT を署名する。installation token はメモリ内でキャッシュして期限前に更新する。
   - upstream 401 後、再送可能なリクエストを新しい token で1回だけ透過的に再試行する。
@@ -14,6 +19,7 @@
 
 ### 変更
 
+- upstream が設定していない SSE レスポンスに `X-Accel-Buffering: no` を付与するようにした。gateway の前段に置かれたリバースプロキシが long-lived な MCP 通知ストリームを滞留させないようにするため（[#216](https://github.com/scottlz0310/mcp-gateway/issues/216)）。upstream が設定済みの値は常に尊重する。
 - 同梱 multi-service example から active な `GITHUB_PERSONAL_ACCESS_TOKEN` 契約を削除。repo 横断の runtime / fallback 削除は `Mcp-Docker#225` と `review-raven#106` で追跡する。
 
 ### 変更
