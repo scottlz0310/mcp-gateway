@@ -7,6 +7,8 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-08-24
+
 ### Added
 
 - Added MCP protocol negotiation contract tests and documented the transparency boundary ([#216](https://github.com/scottlz0310/mcp-gateway/issues/216))
@@ -23,16 +25,13 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 - SSE responses now carry `X-Accel-Buffering: no` when the upstream did not set it, so reverse proxies in front of the gateway do not hold back long-lived MCP notification streams ([#216](https://github.com/scottlz0310/mcp-gateway/issues/216)). An upstream-supplied value is always preserved.
 - Removed the active `GITHUB_PERSONAL_ACCESS_TOKEN` contract from the bundled multi-service example. Cross-repository runtime and fallback removal are tracked by `Mcp-Docker#225` and `review-raven#106`.
-
-### Changed
-
 - HTTP/2 is enabled by default again on the TLS listener after the upstream undici fix ([#204](https://github.com/scottlz0310/mcp-gateway/issues/204), [#206](https://github.com/scottlz0310/mcp-gateway/issues/206))
   - undici fixed long-lived SSE GET and body-bearing POST multiplexing in 8.8.0; Node.js 26.5.1 bundles undici 8.9.0.
   - An end-to-end test with mcp-resource-subscriber on Node.js 26.5.1 verified concurrent SSE and POST traffic on the same h2 session without a 502 response.
   - `MCP_GATEWAY_ENABLE_HTTP2` now defaults to `true`; setting it to `false` keeps the HTTP/1.1-only fallback for clients using an affected older undici runtime.
   - Regression tests pin the configuration default and both ALPN modes.
 
-
+## [0.9.0] - 2026-07-10
 
 ### Added
 
@@ -465,7 +464,8 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 - Removed GitHub-specific HTTP calls from `auth.Handler`; delegated to `provider.Provider`.
 - Renamed middleware context key `github_login` → `authenticated_user` (internal only; external compatibility maintained).
 
-[Unreleased]: https://github.com/scottlz0310/mcp-gateway/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/scottlz0310/mcp-gateway/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.6.0...v0.7.0

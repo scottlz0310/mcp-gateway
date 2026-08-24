@@ -19,7 +19,7 @@
 
 ## 現在の判断基準
 
-- 対象: 2026-08-01 時点の open issue
+- 対象: 2026-08-24 時点の open issue
 - `#126` は設計決定 issue。Phase 1 (v0.6.0) + Phase 2 (v0.7.0) で実装完了。2026-06-21 にクローズ済み。
 - `#84` は upstream OAuth delegation の親 issue。実装 chain（#113〜#118, #166, #171）+ 関連修正（#162, #175, #177, #179）すべて完了。2026-06-21 にクローズ済み。
 - `#65` は Renovate Dependency Dashboard であり、通常の実装ロードマップには含めない。open 維持。
@@ -30,12 +30,19 @@
 
 | Issue | 内容 | 対応 PR |
 |---|---|---|
-| [#212](https://github.com/scottlz0310/mcp-gateway/issues/212) | GitHub App installation token route を追加し GPAT を完全排除。cross-repo: `review-raven#106` / `Mcp-Docker#225` | 対応中 |
-| [#216](https://github.com/scottlz0310/mcp-gateway/issues/216) | MCP `2026-07-28` の protocol negotiation を透過する contract test。横断 tracker: `thread-owl#165`。透過契約と repo 横断 E2E 受け入れ条件を `docs/mcp-protocol-transparency.md` に定義 | 対応中 |
 | [#204](https://github.com/scottlz0310/mcp-gateway/issues/204) | thread-owl の Streamable HTTP 購読が reverse proxy 経由で 502 / timeout。原因は旧 undici の h2 クライアント側キューイング。#205 で HTTP/1.1 既定へ一時退避し、Node.js 26.5.1 上の修正版 undici で h2 E2E 成功済み | #205 / #210 |
-| [#206](https://github.com/scottlz0310/mcp-gateway/issues/206) | upstream 修正とクライアント更新を受けて TLS リスナーの HTTP/2 を既定有効へ戻す。`MCP_GATEWAY_ENABLE_HTTP2=false` の HTTP/1.1 退避策は維持 | #210 |
 
 ※ #204 のクローズは、リリース後に Squirrel Notifier での実環境 E2E（受け入れ条件の `enqueue_review` 通知受信まで）を確認してから行う。subscriber 単体では Node.js 26.5.1 上の同一 h2 セッションで SSE 通知と後続 POST の成功を確認済み。
+
+## v0.10.0 で完了した issue（2026-08-24 リリース）
+
+| Issue | 内容 | 対応 PR |
+|---|---|---|
+| [#212](https://github.com/scottlz0310/mcp-gateway/issues/212) | GitHub App installation token route を追加し GPAT を完全排除。cross-repo: `review-raven#106` / `Mcp-Docker#225` | #213 |
+| [#216](https://github.com/scottlz0310/mcp-gateway/issues/216) | MCP `2026-07-28` の protocol negotiation を透過する contract test。横断 tracker: `thread-owl#165`。透過契約と repo 横断 E2E 受け入れ条件を `docs/mcp-protocol-transparency.md` に定義 | #222 |
+| [#206](https://github.com/scottlz0310/mcp-gateway/issues/206) | upstream 修正とクライアント更新を受けて TLS リスナーの HTTP/2 を既定有効へ戻す。`MCP_GATEWAY_ENABLE_HTTP2=false` の HTTP/1.1 退避策は維持 | #210 |
+
+※ #216 は `2026-07-28` 横断移行（`thread-owl#165`）の rollout 順「gateway → server → client」における最初の repo。gateway 側の透過契約が固定されたため、server 側（`thread-owl#176` / `review-raven#111`）へ進める状態になった。
 
 ## v0.9.0 で完了した issue（2026-07-10 リリース）
 

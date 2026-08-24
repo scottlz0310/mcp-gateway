@@ -5,6 +5,8 @@
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-08-24
+
 ### 追加
 
 - MCP プロトコルネゴシエーションの contract test を追加し、透過の責務境界を文書化（[#216](https://github.com/scottlz0310/mcp-gateway/issues/216)）
@@ -21,9 +23,6 @@
 
 - upstream が設定していない SSE レスポンスに `X-Accel-Buffering: no` を付与するようにした。gateway の前段に置かれたリバースプロキシが long-lived な MCP 通知ストリームを滞留させないようにするため（[#216](https://github.com/scottlz0310/mcp-gateway/issues/216)）。upstream が設定済みの値は常に尊重する。
 - 同梱 multi-service example から active な `GITHUB_PERSONAL_ACCESS_TOKEN` 契約を削除。repo 横断の runtime / fallback 削除は `Mcp-Docker#225` と `review-raven#106` で追跡する。
-
-### 変更
-
 - upstream の undici 修正を受け、TLS リスナーの HTTP/2 を再びデフォルトで有効化（[#204](https://github.com/scottlz0310/mcp-gateway/issues/204)、[#206](https://github.com/scottlz0310/mcp-gateway/issues/206)）
   - 長寿命 SSE GET とボディ付き POST の多重化問題は undici 8.8.0 で修正され、Node.js 26.5.1 は undici 8.9.0 を同梱している。
   - Node.js 26.5.1 上の mcp-resource-subscriber による E2E で、同一 h2 セッション上の SSE と POST が並行動作し、502 が発生しないことを確認した。
@@ -419,7 +418,8 @@
 - `auth.Handler` から GitHub 固有の HTTP 通信を排除し、`provider.Provider` への委譲に変更。
 - `middleware` のコンテキストキーを `github_login` → `authenticated_user` に rename（内部実装のみ、外部互換維持）。
 
-[Unreleased]: https://github.com/scottlz0310/mcp-gateway/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/scottlz0310/mcp-gateway/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.6.0...v0.7.0
