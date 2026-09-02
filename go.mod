@@ -1,6 +1,6 @@
 module github.com/scottlz0310/mcp-gateway
 
-go 1.27.0
+go 1.27.1
 
 require (
 	filippo.io/age v1.3.2
