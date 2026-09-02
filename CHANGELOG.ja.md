@@ -5,6 +5,10 @@
 
 ## [Unreleased]
 
+### 修正
+
+- Go 1.27 の解析時に断続的に発生する panic を防ぐため、`govulncheck` を v1.7.0 に更新（[#230](https://github.com/scottlz0310/mcp-gateway/issues/230)）。
+
 ## [0.10.0] - 2026-08-24
 
 ### 追加
