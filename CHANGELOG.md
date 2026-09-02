@@ -7,6 +7,10 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Updated `govulncheck` to v1.7.0 to prevent intermittent Go 1.27 analysis panics ([#230](https://github.com/scottlz0310/mcp-gateway/issues/230)).
+
 ## [0.10.0] - 2026-08-24
 
 ### Added
