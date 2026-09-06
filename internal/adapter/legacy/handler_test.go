@@ -1,10 +1,12 @@
 package legacy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -91,7 +93,8 @@ func TestRPCThroughProxy(t *testing.T) {
 				params, _ := readObject(msg["params"])
 				meta, _ := readObject(params["_meta"])
 				if r.URL.Path != "/rpc" || r.Header.Get("Authorization") != "Bearer upstream-secret" || r.Header.Get("X-Authenticated-User") != "alice" ||
-					r.Header.Get("Mcp-Method") != tc.method || r.Header.Get("Mcp-Name") != tc.name || r.Header.Get("Mcp-Protocol-Version") != modernVersion || stringValue(meta[versionKey]) != modernVersion || string(meta[capabilitiesKey]) != "{}" {
+					r.Header.Get("Mcp-Method") != tc.method || r.Header.Get("Mcp-Name") != tc.name || r.Header.Get("Mcp-Protocol-Version") != modernVersion ||
+					r.Header.Get("Accept") != "application/json, text/event-stream" || stringValue(meta[versionKey]) != modernVersion || string(meta[capabilitiesKey]) != "{}" {
 					t.Error("認証・ルート・protocol の中継が不正")
 				}
 				if tc.method == "tools/call" && (stringValue(meta["progressToken"]) != "p" || !strings.Contains(string(params["arguments"]), "9007199254740993")) {
@@ -105,6 +108,7 @@ func TestRPCThroughProxy(t *testing.T) {
 			t.Setenv("TEST_LEGACY_UPSTREAM_TOKEN", "upstream-secret")
 			h := NewHandler(proxy.NewHandler(u, nil, "TEST_LEGACY_UPSTREAM_TOKEN", "/mcp", nil))
 			r := request(`{"jsonrpc":"2.0","id":"req","method":"`+tc.method+`","params":`+tc.params+`}`, "2025-06-18")
+			r.Header.Set("Accept", "application/json")
 			r.Header.Set("Authorization", "Bearer client-secret")
 			r.Header.Set("X-Authenticated-User", "mallory")
 			r = r.WithContext(context.WithValue(r.Context(), middleware.ContextKeyIdentity, "alice"))
@@ -173,6 +177,20 @@ func TestInitialized(t *testing.T) {
 	}
 }
 
+func TestLegacyNotificationsAreAbsorbed(t *testing.T) {
+	for _, method := range []string{"notifications/initialized", "notifications/cancelled", "notifications/progress", "notifications/roots/list_changed"} {
+		t.Run(method, func(t *testing.T) {
+			called := false
+			w := httptest.NewRecorder()
+			NewHandler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true })).ServeHTTP(w,
+				request(`{"jsonrpc":"2.0","method":"`+method+`","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2025-06-18"}}}`, "2025-06-18"))
+			if called || w.Code != http.StatusAccepted || w.Body.Len() != 0 {
+				t.Fatalf("通知が吸収されません: called=%t status=%d body=%q", called, w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
 func TestDiscoveryFailure(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -202,6 +220,25 @@ func TestDiscoveryFailure(t *testing.T) {
 				t.Error("エラー応答が変更されました")
 			}
 		})
+	}
+}
+
+func TestDiscoveryFailureLogsReasonWithoutBody(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(previous)
+
+	w := httptest.NewRecorder()
+	NewHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "secret upstream body")
+	})).ServeHTTP(w, request(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}`, ""))
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d", w.Code)
+	}
+	if got := logs.String(); !strings.Contains(got, "legacy adapter discovery failed") || !strings.Contains(got, "reason=invalid_response") || !strings.Contains(got, "upstream_status=200") || strings.Contains(got, "secret upstream body") {
+		t.Fatalf("diagnostic log が不正です: %s", got)
 	}
 }
 

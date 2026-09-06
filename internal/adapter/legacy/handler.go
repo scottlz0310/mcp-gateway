@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"slices"
 	"strings"
@@ -50,13 +51,13 @@ func NewHandler(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		if strings.HasPrefix(method, "notifications/") && isNotification(msg["id"]) {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
 		meta, ok := readObject(params["_meta"])
 		if !ok || len(meta[versionKey]) > 0 {
 			next.ServeHTTP(w, r)
-			return
-		}
-		if method == "notifications/initialized" && len(msg["id"]) == 0 {
-			w.WriteHeader(http.StatusAccepted)
 			return
 		}
 		if len(msg["id"]) == 0 || string(msg["id"]) == "null" {
@@ -94,6 +95,7 @@ func NewHandler(next http.Handler) http.Handler {
 		out.Header.Del("Mcp-Session-Id")
 		out.Header.Set("Mcp-Protocol-Version", modernVersion)
 		out.Header.Set("Mcp-Method", method)
+		ensureAcceptHeader(out.Header)
 		out.Header.Del("Mcp-Name")
 		name := ""
 		switch method {
@@ -122,6 +124,10 @@ func legacyVersion(version string) bool {
 	return slices.Contains([]string{"2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"}, version)
 }
 
+func isNotification(id json.RawMessage) bool {
+	return len(id) == 0 || string(id) == "null"
+}
+
 func stringValue(raw json.RawMessage) string {
 	var value string
 	_ = json.Unmarshal(raw, &value)
@@ -145,6 +151,34 @@ func headerValue(value string) string {
 	return value
 }
 
+func ensureAcceptHeader(header http.Header) {
+	value := strings.Join(header.Values("Accept"), ",")
+	parts := make([]string, 0, 3)
+	for _, part := range strings.Split(value, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			parts = append(parts, part)
+		}
+	}
+	if !hasMediaType(parts, "application/json") {
+		parts = append(parts, "application/json")
+	}
+	if !hasMediaType(parts, "text/event-stream") {
+		parts = append(parts, "text/event-stream")
+	}
+	header.Set("Accept", strings.Join(parts, ", "))
+}
+
+func hasMediaType(parts []string, want string) bool {
+	for _, part := range parts {
+		mediaType := strings.TrimSpace(strings.SplitN(part, ";", 2)[0])
+		if strings.EqualFold(mediaType, want) {
+			return true
+		}
+	}
+	return false
+}
+
 // discovery のみ期限とサイズを制限して捕捉する。通常 RPC/SSE はバッファリングしない。
 func initialize(w http.ResponseWriter, r *http.Request, next http.Handler, id json.RawMessage, version string) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
@@ -158,10 +192,18 @@ func initialize(w http.ResponseWriter, r *http.Request, next http.Handler, id js
 	response := &capture{header: http.Header{}, cancel: cancel}
 	response.serve(next, r)
 	if response.failed || ctx.Err() != nil {
-		http.Error(w, "upstream discovery の受信に失敗しました", http.StatusBadGateway)
+		reason := response.failureReason
+		if reason == "" {
+			reason = "context_canceled"
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				reason = "timeout"
+			}
+		}
+		discoveryFailure(w, reason, response.status)
 		return
 	}
 	if response.status != http.StatusOK {
+		slog.Warn("legacy adapter discovery failed", "reason", "upstream_http_error", "upstream_status", response.status)
 		copyResponse(w, response.header, response.status, response.body.Bytes())
 		return
 	}
@@ -171,29 +213,30 @@ func initialize(w http.ResponseWriter, r *http.Request, next http.Handler, id js
 	}
 	var msg object
 	if json.Unmarshal(payload, &msg) != nil || stringValue(msg["jsonrpc"]) != "2.0" || !bytes.Equal(bytes.TrimSpace(msg["id"]), bytes.TrimSpace(id)) {
-		http.Error(w, "upstream discovery の応答が不正です", http.StatusBadGateway)
+		discoveryFailure(w, "invalid_response", response.status)
 		return
 	}
 	if len(msg["error"]) > 0 {
+		slog.Warn("legacy adapter discovery failed", "reason", "upstream_jsonrpc_error", "upstream_status", response.status)
 		copyResponse(w, response.header, response.status, response.body.Bytes())
 		return
 	}
 	result, ok := readObject(msg["result"])
 	var versions []string
 	if !ok || json.Unmarshal(result["supportedVersions"], &versions) != nil || !slices.Contains(versions, modernVersion) {
-		http.Error(w, "upstream discovery が必要な protocol version を返しません", http.StatusBadGateway)
+		discoveryFailure(w, "unsupported_protocol_version", response.status)
 		return
 	}
 	meta, _ := readObject(result["_meta"])
 	serverInfo := meta["io.modelcontextprotocol/serverInfo"]
 	info, ok := readObject(serverInfo)
 	if !ok || stringValue(info["name"]) == "" || stringValue(info["version"]) == "" {
-		http.Error(w, "upstream discovery に serverInfo がありません", http.StatusBadGateway)
+		discoveryFailure(w, "missing_server_info", response.status)
 		return
 	}
 	caps, ok := readObject(result["capabilities"])
 	if !ok || len(result["capabilities"]) == 0 {
-		http.Error(w, "upstream discovery の capabilities が不正です", http.StatusBadGateway)
+		discoveryFailure(w, "invalid_capabilities", response.status)
 		return
 	}
 	legacyCaps := object{}
@@ -210,7 +253,7 @@ func initialize(w http.ResponseWriter, r *http.Request, next http.Handler, id js
 	msg["result"], _ = json.Marshal(legacyResult)
 	converted, err := json.Marshal(msg)
 	if err != nil {
-		http.Error(w, "initialize 応答の変換に失敗しました", http.StatusBadGateway)
+		discoveryFailure(w, "response_encoding", response.status)
 		return
 	}
 	for _, key := range []string{"Content-Length", "Content-Encoding", "Etag", "Mcp-Session-Id", "Mcp-Protocol-Version"} {
@@ -222,11 +265,12 @@ func initialize(w http.ResponseWriter, r *http.Request, next http.Handler, id js
 }
 
 type capture struct {
-	header http.Header
-	status int
-	body   bytes.Buffer
-	cancel context.CancelFunc
-	failed bool
+	header        http.Header
+	status        int
+	body          bytes.Buffer
+	cancel        context.CancelFunc
+	failed        bool
+	failureReason string
 }
 
 func (c *capture) Header() http.Header { return c.header }
@@ -241,6 +285,7 @@ func (c *capture) Write(body []byte) (int, error) {
 	}
 	if c.body.Len()+len(body) > maxBody {
 		c.failed = true
+		c.failureReason = "response_too_large"
 		c.cancel()
 		return 0, errors.New("discovery 応答がサイズ上限を超えました")
 	}
@@ -254,12 +299,18 @@ func (c *capture) serve(next http.Handler, r *http.Request) {
 				panic(p)
 			}
 			c.failed = true
+			c.failureReason = "upstream_handler_failed"
 		}
 	}()
 	next.ServeHTTP(c, r)
 	if c.status == 0 {
 		c.status = http.StatusOK
 	}
+}
+
+func discoveryFailure(w http.ResponseWriter, reason string, upstreamStatus int) {
+	slog.Warn("legacy adapter discovery failed", "reason", reason, "upstream_status", upstreamStatus)
+	http.Error(w, "upstream discovery の変換に失敗しました", http.StatusBadGateway)
 }
 
 func copyResponse(w http.ResponseWriter, header http.Header, status int, body []byte) {

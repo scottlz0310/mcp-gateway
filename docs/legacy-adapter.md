@@ -23,6 +23,7 @@ Mcp-Docker はこの環境変数を gateway コンテナへ渡します。Compos
 |---|---|
 | legacy `initialize` | 同じ JSON-RPC ID で `server/discover` を代理発行。`supportedVersions` と serverInfo を確認し、要求された旧 version の initialize 応答を返す |
 | `notifications/initialized` | HTTP 202、空の本文で受理し、upstream へ送らない |
+| その他の legacy `notifications/*`（id なし） | MCP `2026-07-28` の Streamable HTTP では client-to-server notification が定義されないため、HTTP 202、空の本文で受理し、upstream へ送らない。キャンセルは legacy client 側の接続終了で表現する |
 | 通常の legacy RPC | `Mcp-Protocol-Version`、`Mcp-Method`、必要な `Mcp-Name`、`params._meta` の version / clientCapabilities を補完 |
 | modern version header 付き、または `Mcp-Method: server/discover` | 本文を読み取らず既存 proxy へ渡す |
 | header なしの `server/discover`、protocol metadata 付き RPC | 判別のため本文を読み取るが、元のバイト列・header をそのまま渡す |
@@ -32,7 +33,7 @@ Mcp-Docker はこの環境変数を gateway コンテナへ渡します。Compos
 
 旧式の `resources/subscribe`、GET SSE、通知配信、sampling / elicitation 等のサーバーからの callback は変換対象外です。initialize では tools / resources / prompts / completions の存在のみを広告し、subscribe / listChanged / logging / experimental は広告しません。各 RPC の clientCapabilities は空です。
 
-通常 RPC の応答・HTTP error・SSE はそのまま中継します。discovery の JSON / SSE 成功応答のみ initialize に変換し、変換前の ETag 等を除去します。upstream の HTTP / JSON-RPC エラーは透過し、不正な discovery 成功応答は HTTP 502 にします。discovery の受信は最大 8 MiB、30 秒。本文判別も最大 8 MiB までで、それを超えるリクエストは変換せず中継します。
+通常 RPC の `Accept` は元の値を保持しつつ、`application/json` と `text/event-stream` が明示されるよう補完します。応答・HTTP error・SSE はそのまま中継します。discovery の JSON / SSE 成功応答のみ initialize に変換し、変換前の ETag 等を除去します。upstream の HTTP / JSON-RPC エラーは透過し、不正な discovery 成功応答は HTTP 502 にします。discovery の失敗時は、本文を記録せず、理由と upstream status のみを `slog.Warn` に記録します。discovery の受信は最大 8 MiB、30 秒。本文判別も最大 8 MiB までで、それを超えるリクエストは変換せず中継します。
 
 ## 検証
 
