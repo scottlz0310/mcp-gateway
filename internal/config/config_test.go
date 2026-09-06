@@ -9,6 +9,25 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func TestLegacyAdapterYAMLRoundTrip(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(map[bool]string{false: "disabled", true: "enabled"}[enabled], func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			cfg := &AppConfig{Gateway: GatewayConfig{LegacyAdapterEnabled: enabled}}
+			if err := SaveConfig(path, cfg); err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := LoadConfig(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if loaded.Gateway.LegacyAdapterEnabled != enabled {
+				t.Fatal("YAML 設定が保持されません")
+			}
+		})
+	}
+}
+
 // TestMigrateSecret_EncryptedValue decrypts an ENC[age:] value from config.
 func TestMigrateSecret_EncryptedValue(t *testing.T) {
 	dir := t.TempDir()

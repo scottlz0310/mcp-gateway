@@ -7,6 +7,10 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- 既定無効の legacy MCP アダプタを追加。initialize の代理 discovery、RPC の protocol metadata / header 補完、modern 通信の bypass に対応（[#233](https://github.com/scottlz0310/mcp-gateway/issues/233)）。設定と撤去手順は [legacy アダプタ](docs/legacy-adapter.md) を参照。
+
 ### Fixed
 
 - Updated `govulncheck` to v1.7.0 to prevent intermittent Go 1.27 analysis panics ([#230](https://github.com/scottlz0310/mcp-gateway/issues/230)).

@@ -94,6 +94,7 @@ type AuthConfig struct {
 
 // GatewayConfig holds gateway-level settings that can be persisted in config.yaml.
 type GatewayConfig struct {
+	LegacyAdapterEnabled bool `yaml:"legacy_adapter_enabled,omitempty"`
 	// BindAddr is the TCP address the HTTP listener binds to (e.g. "127.0.0.1:8080").
 	// When empty, the runtime defaults to 127.0.0.1 with the resolved port.
 	BindAddr string `yaml:"bind_addr,omitempty"`

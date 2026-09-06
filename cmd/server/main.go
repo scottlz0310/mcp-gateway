@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/scottlz0310/mcp-gateway/internal/adapter/legacy"
 	"github.com/scottlz0310/mcp-gateway/internal/auth"
 	"github.com/scottlz0310/mcp-gateway/internal/auth/provider"
 	"github.com/scottlz0310/mcp-gateway/internal/authaudit"
@@ -92,6 +93,11 @@ func main() {
 	}
 
 	// Apply config.yaml gateway overrides (priority: env var > config.yaml > loadConfig default).
+	cfg.legacyAdapterEnabled, err = resolveLegacyAdapter(appCfg.Gateway.LegacyAdapterEnabled, os.LookupEnv)
+	if err != nil {
+		slog.Error("legacy adapter の設定が不正です", "err", err)
+		os.Exit(1)
+	}
 	// publicURL: MCP_GATEWAY_PUBLIC_URL > MCP_GATEWAY_BASE_URL > yaml public_url > yaml base_url > default
 	if strings.TrimSpace(appCfg.Gateway.BaseURL) != "" {
 		slog.Warn("gateway.base_url in config.yaml is deprecated; use gateway.public_url instead")
@@ -418,6 +424,9 @@ func main() {
 			proxyOptions = append(proxyOptions, proxy.WithServerTokenSource(route.Name, githubAppTokenSource))
 		}
 		h := proxy.NewHandler(route.Upstream, oauthHandler, route.UpstreamBearerTokenEnv, route.Prefix, upstreamOAuthOpts, proxyOptions...)
+		if cfg.legacyAdapterEnabled {
+			h = legacy.NewHandler(h)
+		}
 		var wrapped http.Handler
 		if route.NoAuth {
 			wrapped = h
@@ -503,6 +512,7 @@ func main() {
 		"trusted_proxies", len(trustedProxies),
 		"token_audience_strict", cfg.tokenAudienceStrict,
 		"github_refresh_enabled", cfg.githubRefreshEnabled,
+		"legacy_adapter_enabled", cfg.legacyAdapterEnabled,
 		"auth_audit_log_path", auditRecorder.Path(),
 	)
 
@@ -649,6 +659,7 @@ type config struct {
 	tokenExpiresInSec      int
 	tokenAudienceStrict    bool
 	githubRefreshEnabled   bool
+	legacyAdapterEnabled   bool
 	tokenStorePath         string
 	keyPath                string
 	configPath             string
@@ -657,6 +668,18 @@ type config struct {
 	// upstream OAuth state paths
 	upstreamClientStorePath string
 	upstreamTokenStorePath  string
+}
+
+func resolveLegacyAdapter(yamlValue bool, lookup func(string) (string, bool)) (bool, error) {
+	value, set := lookup("GATEWAY_LEGACY_ADAPTER_ENABLED")
+	if !set {
+		return yamlValue, nil
+	}
+	enabled, err := strconv.ParseBool(strings.TrimSpace(value))
+	if err != nil {
+		return false, fmt.Errorf("GATEWAY_LEGACY_ADAPTER_ENABLED には true または false を指定してください")
+	}
+	return enabled, nil
 }
 
 func loadConfig() config {

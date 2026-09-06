@@ -16,6 +16,8 @@ mcp-gateway を通常モードで起動するには、以下のすべてが揃�
 
 ## 優先順位
 
+過渡期の MCP 互換機能は `GATEWAY_LEGACY_ADAPTER_ENABLED` / `gateway.legacy_adapter_enabled`（既定 `false`）で制御します。対象と制限は [legacy アダプタ](legacy-adapter.md) を参照してください。
+
 設定は以下の順序で解決されます。
 
 | 設定 | 優先順位 |

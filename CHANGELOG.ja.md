@@ -5,6 +5,10 @@
 
 ## [Unreleased]
 
+### 追加
+
+- 既定無効の legacy MCP アダプタを追加。initialize の代理 discovery、RPC の protocol metadata / header 補完、modern 通信の bypass に対応（[#233](https://github.com/scottlz0310/mcp-gateway/issues/233)）。設定と撤去手順は [legacy アダプタ](docs/legacy-adapter.md) を参照。
+
 ### 修正
 
 - Go 1.27 の解析時に断続的に発生する panic を防ぐため、`govulncheck` を v1.7.0 に更新（[#230](https://github.com/scottlz0310/mcp-gateway/issues/230)）。

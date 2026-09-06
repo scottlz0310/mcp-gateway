@@ -28,6 +28,9 @@
 
 ## 対応中の issue
 
+- [x] #233: 独立 legacy アダプタ、設定、単体・契約テスト、連携・撤去ドキュメントを実装。
+- [ ] #233 / Mcp-Docker#240: agy から thread-owl / review-raven への実構成 E2E（リリース・Compose 設定後）。
+
 | Issue | 内容 | 対応 PR |
 |---|---|---|
 | [#204](https://github.com/scottlz0310/mcp-gateway/issues/204) | thread-owl の Streamable HTTP 購読が reverse proxy 経由で 502 / timeout。原因は旧 undici の h2 クライアント側キューイング。#205 で HTTP/1.1 既定へ一時退避し、Node.js 26.5.1 上の修正版 undici で h2 E2E 成功済み | #205 / #210 |
