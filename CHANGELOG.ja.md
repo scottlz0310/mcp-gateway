@@ -5,6 +5,8 @@
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-10-05
+
 ### 追加
 
 - GitHub App の秘密鍵を、PEM を base64 にした単一行で受け取る `GITHUB_APP_PRIVATE_KEY_B64` を追加。複数行の値を運べない注入経路（Bitwarden と dsx など）から、`github_app.private_key` を環境変数でシードできる。優先順位は `config.yaml` > `GITHUB_APP_PRIVATE_KEY` > `GITHUB_APP_PRIVATE_KEY_B64` > `GITHUB_APP_PRIVATE_KEY_PATH`。値が不正なときは、次の取得元へ進まず、起動エラーにする。詳細は [設定リファレンス](docs/configuration.md)。
@@ -427,7 +429,8 @@
 - `auth.Handler` から GitHub 固有の HTTP 通信を排除し、`provider.Provider` への委譲に変更。
 - `middleware` のコンテキストキーを `github_login` → `authenticated_user` に rename（内部実装のみ、外部互換維持）。
 
-[Unreleased]: https://github.com/scottlz0310/mcp-gateway/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/scottlz0310/mcp-gateway/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/scottlz0310/mcp-gateway/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.7.0...v0.8.0
