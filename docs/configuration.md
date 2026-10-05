@@ -243,7 +243,7 @@ GITHUB_APP_PRIVATE_KEY_PATH=/run/secrets/github-app-private-key.pem
 
 ```bash
 # Linux / Git Bash（macOS は `base64 < private-key.pem | tr -d '\n'`）
-GITHUB_APP_PRIVATE_KEY_B64=$(base64 -w0 private-key.pem)
+export GITHUB_APP_PRIVATE_KEY_B64="$(base64 -w0 private-key.pem)"
 ```
 
 ```powershell
