@@ -7,6 +7,8 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-10-05
+
 ### Added
 
 - Added `GITHUB_APP_PRIVATE_KEY_B64`, which accepts the GitHub App private key as a single-line base64 PEM. Injection paths that cannot carry a multi-line value (for example Bitwarden with dsx) can now seed `github_app.private_key` from an environment variable. Precedence is `config.yaml` > `GITHUB_APP_PRIVATE_KEY` > `GITHUB_APP_PRIVATE_KEY_B64` > `GITHUB_APP_PRIVATE_KEY_PATH`; a malformed value fails startup instead of falling through to the next source. See [configuration](docs/configuration.md).
@@ -473,7 +475,8 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 - Removed GitHub-specific HTTP calls from `auth.Handler`; delegated to `provider.Provider`.
 - Renamed middleware context key `github_login` → `authenticated_user` (internal only; external compatibility maintained).
 
-[Unreleased]: https://github.com/scottlz0310/mcp-gateway/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/scottlz0310/mcp-gateway/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/scottlz0310/mcp-gateway/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/scottlz0310/mcp-gateway/compare/v0.7.0...v0.8.0
