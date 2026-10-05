@@ -7,6 +7,7 @@
 
 ### 追加
 
+- GitHub App の秘密鍵を、PEM を base64 にした単一行で受け取る `GITHUB_APP_PRIVATE_KEY_B64` を追加。複数行の値を運べない注入経路（Bitwarden と dsx など）から、`github_app.private_key` を環境変数でシードできる。優先順位は `config.yaml` > `GITHUB_APP_PRIVATE_KEY` > `GITHUB_APP_PRIVATE_KEY_B64` > `GITHUB_APP_PRIVATE_KEY_PATH`。値が不正なときは、次の取得元へ進まず、起動エラーにする。詳細は [設定リファレンス](docs/configuration.md)。
 - 既定無効の legacy MCP アダプタを追加。initialize の代理 discovery、RPC の protocol metadata / header 補完、modern 通信の bypass に対応（[#233](https://github.com/scottlz0310/mcp-gateway/issues/233)）。設定と撤去手順は [legacy アダプタ](docs/legacy-adapter.md) を参照。
 
 ### 修正

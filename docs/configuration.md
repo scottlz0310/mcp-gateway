@@ -34,7 +34,7 @@ mcp-gateway を通常モードで起動するには、以下のすべてが揃�
 | GitHub リフレッシュトークンローテーション | `MCP_GATEWAY_GITHUB_REFRESH_ENABLED` > `gateway.github_refresh_enabled` > `false` |
 | GitHub App ID | `GITHUB_APP_ID` > `github_app.app_id` |
 | GitHub App installation ID | `GITHUB_APP_INSTALLATION_ID` > `github_app.installation_id` |
-| GitHub App private key | 暗号化/平文 `github_app.private_key` > `GITHUB_APP_PRIVATE_KEY` > `GITHUB_APP_PRIVATE_KEY_PATH` |
+| GitHub App private key | 暗号化/平文 `github_app.private_key` > `GITHUB_APP_PRIVATE_KEY` > `GITHUB_APP_PRIVATE_KEY_B64` > `GITHUB_APP_PRIVATE_KEY_PATH` |
 | 許可リダイレクトホスト | `MCP_GATEWAY_ALLOWED_REDIRECT_HOSTS` > `gateway.allowed_redirect_hosts` > `localhost, 127.0.0.1, vscode.dev, antigravity.google`（デフォルト） |
 | 許可リダイレクトスキーム | `MCP_GATEWAY_ALLOWED_REDIRECT_SCHEMES` > `gateway.allowed_redirect_schemes` > `antigravity, antigravity-insiders`（デフォルト） |
 
@@ -58,7 +58,8 @@ OAuth クライアントシークレットは意図的に特別扱いです。`c
 | `GITHUB_APP_ID` | なし | `upstream_github_app=true` ルートがJWTの `iss` に使用する正の整数GitHub App ID。caller OAuth のClient IDとは別の値。 |
 | `GITHUB_APP_INSTALLATION_ID` | なし | installation token を発行する対象 installation の正の整数 ID。 |
 | `GITHUB_APP_PRIVATE_KEY` | なし | GitHub App RSA private key の PEM。初回起動時に `ENC[age:]` へ暗号化して `config.yaml` に保存する。ログには出力しない。 |
-| `GITHUB_APP_PRIVATE_KEY_PATH` | なし | PEM private key ファイルのパス。`GITHUB_APP_PRIVATE_KEY` が空の場合の初回シード。暗号化後の config があれば以後は不要。 |
+| `GITHUB_APP_PRIVATE_KEY_B64` | なし | GitHub App RSA private key の PEM を base64 にした単一行。`GITHUB_APP_PRIVATE_KEY` が空の場合に使い、初回起動時に `ENC[age:]` へ暗号化して `config.yaml` に保存する。複数行の PEM を環境変数へ入れられない注入経路（Bitwarden と dsx など）向け。値が不正な base64、または空白だけに復号される場合は、次の取得元へ進まず起動エラーにする。 |
+| `GITHUB_APP_PRIVATE_KEY_PATH` | なし | PEM private key ファイルのパス。`GITHUB_APP_PRIVATE_KEY` と `GITHUB_APP_PRIVATE_KEY_B64` が空の場合の初回シード。暗号化後の config があれば以後は不要。 |
 | `GITHUB_API_URL` | `https://api.github.com` | installation token 発行先の GitHub API base URL。GitHub Enterprise Server では API URL を指定する。 |
 | `ROUTE_<NAME>` | なし | `<prefix>\|<upstream_url>[|auth=none]` 形式のルート定義。`config.yaml` で設定されていない限り1つ以上必須。 |
 | `MCP_CONFIG_FILE` | OS state dir¹ `/config.yaml` | 永続化 YAML 設定ファイルのパス。 |
@@ -236,6 +237,18 @@ ROUTE_GITHUB=/mcp/github|http://github-mcp:8082|upstream_github_app=true
 GITHUB_APP_ID=123456
 GITHUB_APP_INSTALLATION_ID=12345678
 GITHUB_APP_PRIVATE_KEY_PATH=/run/secrets/github-app-private-key.pem
+```
+
+秘密鍵をファイルではなく環境変数で渡す場合は、PEM を base64 の単一行にして `GITHUB_APP_PRIVATE_KEY_B64` に設定します（`GITHUB_APP_PRIVATE_KEY_PATH` は不要）。
+
+```bash
+# Linux / Git Bash（macOS は `base64 < private-key.pem | tr -d '\n'`）
+GITHUB_APP_PRIVATE_KEY_B64=$(base64 -w0 private-key.pem)
+```
+
+```powershell
+# PowerShell
+$env:GITHUB_APP_PRIVATE_KEY_B64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes('private-key.pem'))
 ```
 
 ゲートウェイは RSA private key で有効期間9分の App JWT を署名し、対象 installation の access token を取得します。installation token はメモリ内だけに保持し、期限5分前に更新します。upstream が 401 を返した場合は token を強制再発行し、body が再送可能なリクエストに限り1回だけ透過的に再試行します。

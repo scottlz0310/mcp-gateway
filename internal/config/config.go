@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/pem"
 	"fmt"
 	"log/slog"
@@ -263,6 +264,13 @@ func MigrateGitHubAppPrivateKey(configPath string, cfg *AppConfig, km *KeyMateri
 	default:
 		plaintext := os.Getenv("GITHUB_APP_PRIVATE_KEY")
 		if strings.TrimSpace(plaintext) == "" {
+			decoded, err := decodeGitHubAppPrivateKeyB64(os.Getenv("GITHUB_APP_PRIVATE_KEY_B64"))
+			if err != nil {
+				return "", err
+			}
+			plaintext = decoded
+		}
+		if strings.TrimSpace(plaintext) == "" {
 			if keyPath := strings.TrimSpace(os.Getenv("GITHUB_APP_PRIVATE_KEY_PATH")); keyPath != "" {
 				keyBytes, err := os.ReadFile(keyPath)
 				if err != nil {
@@ -272,7 +280,7 @@ func MigrateGitHubAppPrivateKey(configPath string, cfg *AppConfig, km *KeyMateri
 			}
 		}
 		if strings.TrimSpace(plaintext) == "" {
-			return "", fmt.Errorf("github_app.private_key is required: set GITHUB_APP_PRIVATE_KEY, GITHUB_APP_PRIVATE_KEY_PATH, or provide an encrypted value in config.yaml")
+			return "", fmt.Errorf("github_app.private_key is required: set GITHUB_APP_PRIVATE_KEY, GITHUB_APP_PRIVATE_KEY_B64, GITHUB_APP_PRIVATE_KEY_PATH, or provide an encrypted value in config.yaml")
 		}
 		encrypted, err := EncryptField(km, plaintext)
 		if err != nil {
@@ -284,6 +292,25 @@ func MigrateGitHubAppPrivateKey(configPath string, cfg *AppConfig, km *KeyMateri
 		}
 		return plaintext, nil
 	}
+}
+
+// decodeGitHubAppPrivateKeyB64 は、PEM を base64 の単一行にした値を元に戻す。
+// 複数行の PEM は dsx などの環境変数の注入経路で壊れるため、この形式で受け取る。
+// 未設定（空）は次の取得元へ進むために "" を返す。設定されているのに壊れている値は、
+// 次の取得元へ黙って進まず、エラーにする（誤設定に気づけなくなるため）。
+func decodeGitHubAppPrivateKeyB64(encoded string) (string, error) {
+	encoded = strings.TrimSpace(encoded)
+	if encoded == "" {
+		return "", nil
+	}
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return "", fmt.Errorf("decoding GITHUB_APP_PRIVATE_KEY_B64: %w", err)
+	}
+	if strings.TrimSpace(string(decoded)) == "" {
+		return "", fmt.Errorf("GITHUB_APP_PRIVATE_KEY_B64 decodes to an empty value")
+	}
+	return string(decoded), nil
 }
 
 // MigrateOIDCPrivateKey resolves the OIDC RSA private key, following this priority:
