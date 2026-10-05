@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"strings"
@@ -475,5 +476,77 @@ func TestMigrateGitHubAppPrivateKeyFromPath(t *testing.T) {
 	}
 	if got != "private-key-from-file" || !IsEncrypted(cfg.GitHubApp.PrivateKey) {
 		t.Fatalf("unexpected migration result")
+	}
+}
+
+func TestMigrateGitHubAppPrivateKeyFromBase64(t *testing.T) {
+	b64 := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	wrap := func(s string) string {
+		var sb strings.Builder
+		for i := 0; i < len(s); i += 8 {
+			sb.WriteString(s[i:min(i+8, len(s))])
+			sb.WriteString("\n")
+		}
+		return sb.String()
+	}
+	multiLinePEM := "-----BEGIN RSA PRIVATE KEY-----\nline1\nline2\n-----END RSA PRIVATE KEY-----\n"
+
+	tests := []struct {
+		name     string
+		envKey   string
+		envB64   string
+		fileBody string // non-empty writes GITHUB_APP_PRIVATE_KEY_PATH
+		want     string
+		wantErr  string
+	}{
+		{name: "base64", envB64: b64("key-from-b64"), want: "key-from-b64"},
+		{name: "multi-line PEM round trip", envB64: b64(multiLinePEM), want: multiLinePEM},
+		{name: "wrapped base64", envB64: wrap(b64(multiLinePEM)), want: multiLinePEM},
+		{name: "plain env wins over base64", envKey: "key-from-env", envB64: b64("key-from-b64"), want: "key-from-env"},
+		{name: "base64 wins over path", envB64: b64("key-from-b64"), fileBody: "key-from-file", want: "key-from-b64"},
+		{name: "blank base64 falls through to path", envB64: "  ", fileBody: "key-from-file", want: "key-from-file"},
+		{name: "invalid base64", envB64: "not base64!", wantErr: "decoding GITHUB_APP_PRIVATE_KEY_B64"},
+		{name: "invalid base64 does not fall through to path", envB64: "not base64!", fileBody: "key-from-file", wantErr: "decoding GITHUB_APP_PRIVATE_KEY_B64"},
+		{name: "base64 of blank value", envB64: b64("  \n"), wantErr: "decodes to an empty value"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			keyPath := ""
+			if tt.fileBody != "" {
+				keyPath = filepath.Join(dir, "app.pem")
+				if err := os.WriteFile(keyPath, []byte(tt.fileBody), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("GITHUB_APP_PRIVATE_KEY", tt.envKey)
+			t.Setenv("GITHUB_APP_PRIVATE_KEY_B64", tt.envB64)
+			t.Setenv("GITHUB_APP_PRIVATE_KEY_PATH", keyPath)
+
+			configPath := filepath.Join(dir, "config.yaml")
+			got, err := MigrateGitHubAppPrivateKey(configPath, &AppConfig{}, testKeyMaterial(t))
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %v, want containing %q", err, tt.wantErr)
+				}
+				if _, statErr := os.Stat(configPath); statErr == nil {
+					t.Fatal("config.yaml was written despite the error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.want {
+				t.Fatalf("private key = %q, want %q", got, tt.want)
+			}
+			reloaded, err := LoadConfig(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !IsEncrypted(reloaded.GitHubApp.PrivateKey) || strings.Contains(reloaded.GitHubApp.PrivateKey, tt.want) {
+				t.Fatal("GitHub App private key was not encrypted at rest")
+			}
+		})
 	}
 }
