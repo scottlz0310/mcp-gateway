@@ -1,5 +1,7 @@
 # mcp-gateway
 
+リリースの準備・公開は [リリース手順](docs/release-automation.md) を参照してください。
+
 MCP (Model Context Protocol) サービス群のための統合認証・ルーティングゲートウェイ。
 
 mcp-gateway は GitHub OAuth 2.0 認証、MCP Authorization メタデータ、複数の

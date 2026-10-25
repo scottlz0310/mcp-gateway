@@ -4,6 +4,9 @@
 バージョニングは [Semantic Versioning](https://semver.org/lang/ja/) に従う。
 
 ## [Unreleased]
+### Changed
+
+- 安定版の prepare・draft・イメージ生成/再取得検証・finalize を release-automate へ統一した。2言語 CHANGELOG を同時に確定し、日本語本文へ Docker・検証証跡を追記する。タグ起点の旧公開と自動生成ノートの併記を廃止する。
 
 ## [0.10.1] - 2026-10-05
 
