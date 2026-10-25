@@ -1,5 +1,7 @@
 # mcp-gateway
 
+リリースの準備・公開は [リリース手順](docs/release-automation.md) を参照してください。
+
 Unified authentication and routing gateway for MCP (Model Context Protocol)
 services.
 

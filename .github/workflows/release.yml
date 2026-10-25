@@ -2,59 +2,113 @@ name: Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
 
 permissions:
-  contents: write
-  packages: write
+  contents: read
+
+concurrency:
+  group: stable-release-${{ github.repository }}
+  cancel-in-progress: false
 
 jobs:
-  test:
+  draft:
+    if: startsWith(github.event.head_commit.message, 'chore(release):')
+    uses: scottlz0310/release-automate/.github/workflows/reusable-publish-release.yml@7f53bc1716dc7da1740be166e55b5d94b33041e6 # v3.2.0
+    permissions:
+      contents: write
+    with:
+      draft: true
+      changelog_path: CHANGELOG.ja.md
+
+  build:
+    needs: draft
+    if: needs.draft.outputs.release_state == 'draft'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      image_tag: ${{ steps.meta.outputs.version }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.draft.outputs.target_sha }}
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - name: Run tests
-        run: go test -race ./...
-
-  release:
-    runs-on: ubuntu-latest
-    needs: test
-    steps:
-      - uses: actions/checkout@v7
-
+          cache-dependency-path: go.sum
+      - name: 対象コミットを検証
+        run: |
+          go vet ./...
+          go test -race -timeout 10m ./...
       - uses: docker/setup-qemu-action@v4
-
       - uses: docker/setup-buildx-action@v4
-
       - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
       - uses: docker/metadata-action@v6
         id: meta
         with:
-          images: ghcr.io/scottlz0310/mcp-gateway
+          images: ghcr.io/${{ github.repository }}
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-
-      - uses: docker/build-push-action@v7
+            type=semver,pattern={{version}},value=${{ needs.draft.outputs.tag_name }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.draft.outputs.tag_name }}
+      - name: 安定版イメージを公開
+        id: build
+        uses: docker/build-push-action@v7
         with:
           context: .
+          file: Dockerfile
           push: true
-          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64,linux/arm64
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
+  verify-image:
+    needs: [draft, build]
+    if: needs.draft.outputs.release_state == 'draft'
+    runs-on: ubuntu-latest
+    permissions:
+      packages: read
+    steps:
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
         with:
-          generate_release_notes: true
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: 公開イメージの digest と対象アーキテクチャを検証
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}
+          DIGEST: ${{ needs.build.outputs.digest }}
+          IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          tagged_digest=$(timeout 60 docker buildx imagetools inspect "$IMAGE:$IMAGE_TAG" --format '{{.Manifest.Digest}}')
+          if [[ "$tagged_digest" != "$DIGEST" ]]; then
+            printf '::error::版タグの digest が build 結果と不一致です: expected=%s actual=%s\n' "$DIGEST" "$tagged_digest" >&2
+            exit 1
+          fi
+          timeout 60 docker buildx imagetools inspect "$IMAGE@$DIGEST" --raw > manifest.json
+          jq -e '[.manifests[].platform | select(.os == "linux") | .architecture] |
+            (index("amd64") != null and index("arm64") != null)' manifest.json
+
+  finalize:
+    needs: [draft, build, verify-image]
+    if: needs.draft.outputs.release_state == 'draft'
+    uses: scottlz0310/release-automate/.github/workflows/reusable-finalize-release.yml@7f53bc1716dc7da1740be166e55b5d94b33041e6 # v3.2.0
+    permissions:
+      contents: write
+    with:
+      tag_name: ${{ needs.draft.outputs.tag_name }}
+      target_sha: ${{ needs.draft.outputs.target_sha }}
+      append_release_evidence: true
+      docker_image: ghcr.io/${{ github.repository }}
+      docker_digest: ${{ needs.build.outputs.digest }}
+      verification_results: ${{ toJSON(needs) }}
