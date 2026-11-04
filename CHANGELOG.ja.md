@@ -6,6 +6,8 @@
 ## [Unreleased]
 ### Changed
 
+- GitHub App のセットアップ手順（`README.md`・`README.ja.md`）の権限を修正した。サインインだけなら `Metadata`（Read-only）で足りる。`Email addresses` が必須とする記述は、コード（`GET /user` から読むのは `login` と `name` だけ）と一致していなかった。Repository 権限は、App の権限で動く route（`upstream_github_app=true`）や、呼び出し元の GitHub トークンを転送する route（`upstream_provider_token=true`）に限って必要、と書き直した。`examples/copilot-review-routing/.env.example` の同じ記述も直した。
+
 - リリース共通workflowをrelease-automate v3.2.1へ更新し、準備時の比較元に対象版以上の旧系列タグを選ばない修正を取り込んだ。
 
 - 安定版の prepare・draft・イメージ生成/再取得検証・finalize を release-automate へ統一した。2言語 CHANGELOG を同時に確定し、日本語本文へ Docker・検証証跡を追記する。タグ起点の旧公開と自動生成ノートの併記を廃止する。

@@ -8,6 +8,8 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 ### Changed
 
+- Corrected the GitHub App permissions in the setup guide (`README.md`, `README.ja.md`): sign-in only needs `Metadata` (Read-only). The previous claim that `Email addresses` is required did not match the code, which reads only `login` and `name` from `GET /user`. Repository permissions are now described as needed only for routes that act with the App (`upstream_github_app=true`) or forward the caller's GitHub token (`upstream_provider_token=true`). Fixed the same claim in `examples/copilot-review-routing/.env.example`.
+
 - リリース共通workflowをrelease-automate v3.2.1へ更新し、準備時の比較元に対象版以上の旧系列タグを選ばない修正を取り込んだ。
 
 - 安定版の prepare・draft・イメージ生成/再取得検証・finalize を release-automate へ統一した。2言語 CHANGELOG を同時に確定し、日本語本文へ Docker・検証証跡を追記する。タグ起点の旧公開と自動生成ノートの併記を廃止する。

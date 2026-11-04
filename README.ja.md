@@ -25,18 +25,21 @@ VS Code などの MCP クライアントから見た単一の HTTP エントリ�
   http://127.0.0.1:8080/device_callback
   ```
   デプロイ環境では `http://127.0.0.1:8080` を `<MCP_GATEWAY_PUBLIC_URL>` に置き換えてください。
-- **Permissions** — 推奨設定:
+- **Permissions** — サインインだけなら **`Metadata`（Read-only）で足ります**。自動で選択され、外せません。
+  ほかの Repository・Account 権限（`Email addresses` を含む）はすべて `No access` のままにします。
 
   | カテゴリ | 権限 | アクセス |
   |---------|------|---------|
   | Repository | Metadata | Read-only（自動選択） |
-  | Repository | Contents | Read-only |
-  | Repository | Issues | Read and write |
-  | Repository | Pull requests | Read and write |
-  | Account | Email addresses | Read-only |
 
-  `Email addresses` はユーザー識別に必須です。Repository 権限は `review-raven` / `github-mcp-server`
-  upstream が必要とします。自分の MCP upstream に合わせて最小限の権限に調整してください。
+  gateway が呼び出し元の識別に使うのは、`GET /user` の `login`（と `name`）だけです。
+  メールアドレスやリポジトリの内容は読みません。
+
+  権限を足すのは、upstream が必要とするときだけにし、必要な分だけにします。たとえば
+  `upstream_github_app=true`（サーバー間の installation token）や `upstream_provider_token=true`
+  （呼び出し元の GitHub トークンを転送）の route は、この App の権限で動きます。その upstream が必要とする
+  Repository 権限（`github-mcp-server` なら Contents・Issues・Pull requests など）を付与してください。
+  サインインだけに使う App が、それらを持つ必要はありません。
 - **Webhook** — 無効のままにします（OAuth フローでは使用しません）。
 - **Where can this GitHub App be installed?** — 個人利用の場合は `Only on this account` を選択します。
 
