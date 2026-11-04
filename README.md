@@ -27,19 +27,23 @@ Configure the following settings:
   http://127.0.0.1:8080/device_callback
   ```
   For deployed environments, replace `http://127.0.0.1:8080` with `<MCP_GATEWAY_PUBLIC_URL>`.
-- **Permissions** — recommended settings:
+- **Permissions** — for sign-in only, **`Metadata` (Read-only) is enough**. It is
+  selected automatically and cannot be removed. Leave every other Repository and
+  Account permission (including `Email addresses`) as `No access`.
 
   | Category | Permission | Access |
   |----------|-----------|--------|
   | Repository | Metadata | Read-only (auto-selected) |
-  | Repository | Contents | Read-only |
-  | Repository | Issues | Read and write |
-  | Repository | Pull requests | Read and write |
-  | Account | Email addresses | Read-only |
 
-  `Email addresses` is required for user identification. The repository permissions
-  are needed by `review-raven` / `github-mcp-server` upstreams. Adjust to the
-  minimum required by your own MCP upstreams.
+  The gateway reads only `login` (and `name`) from `GET /user` to identify the
+  caller; it never reads the caller's email address or repository contents.
+
+  Add more permissions only when an upstream needs them, and only as much as it
+  needs. For example, a route with `upstream_github_app=true` (server-to-server
+  installation token) or `upstream_provider_token=true` (forwards the caller's
+  GitHub token) acts with this App's permissions, so grant the Repository
+  permissions that upstream requires (e.g. Contents, Issues, Pull requests for
+  `github-mcp-server`). An App that only signs users in should not hold them.
 - **Webhook** — leave disabled (not used by the OAuth flow).
 - **Where can this GitHub App be installed?** — `Only on this account` for personal use.
 
