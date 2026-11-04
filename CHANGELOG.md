@@ -13,6 +13,7 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 - リリース共通workflowをrelease-automate v3.2.1へ更新し、準備時の比較元に対象版以上の旧系列タグを選ばない修正を取り込んだ。
 
 - 安定版の prepare・draft・イメージ生成/再取得検証・finalize を release-automate へ統一した。2言語 CHANGELOG を同時に確定し、日本語本文へ Docker・検証証跡を追記する。タグ起点の旧公開と自動生成ノートの併記を廃止する。
+- `renovate.json` の `extends` から、中央プリセットで解除済みの非推奨プリセット（`options/automerge`・`options/schedule`・`options/security`）への参照を削除した。スケジュール・待機期間・自動マージ等は中央側で既に解除されているため更新の挙動は変わらず、Dependency Dashboard の警告表示が消える。
 
 ## [0.10.1] - 2026-10-05
 
