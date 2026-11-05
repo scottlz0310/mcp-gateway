@@ -14,6 +14,7 @@ and versioning follows [Semantic Versioning](https://semver.org/).
 
 - 安定版の prepare・draft・イメージ生成/再取得検証・finalize を release-automate へ統一した。2言語 CHANGELOG を同時に確定し、日本語本文へ Docker・検証証跡を追記する。タグ起点の旧公開と自動生成ノートの併記を廃止する。
 - `renovate.json` の `extends` から、中央プリセットで解除済みの非推奨プリセット（`options/automerge`・`options/schedule`・`options/security`）への参照を削除した。スケジュール・待機期間・自動マージ等は中央側で既に解除されているため更新の挙動は変わらず、Dependency Dashboard の警告表示が消える。
+- `tasks.md` を撤去した。進捗とタスクは Issue と Pull Request、リポジトリの外のハンドオフで管理する。参照していた `docs/runbook-e2e-v0.1.0.md` のリンクと、過去の archive の案内を直した。
 
 ## [0.10.1] - 2026-10-05
 

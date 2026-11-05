@@ -2,6 +2,8 @@
 
 `mcp-gateway` の継続的なタスク管理ファイル。各 issue の状態とサブタスク、依存関係を記録する。
 
+2026-11-05 に `tasks.md` 自体を撤去した。以下の記述にある `tasks.md` は、撤去前のファイルを指す（[最後の版](https://github.com/scottlz0310/mcp-gateway/blob/b3e590eb2a1b10cabf262c7b7ff1902815d4664f/tasks.md)）。以後の進捗は Issue と Pull Request で追う。
+
 ## 凡例
 
 - `[ ]` 未着手

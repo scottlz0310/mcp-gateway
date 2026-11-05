@@ -786,4 +786,4 @@ docker compose up -d mcp-gateway
 - [docs/operations.md](operations.md) — 通常運用ドキュメント
 - [CHANGELOG.md](../CHANGELOG.md) — v0.1.0 変更点
 - [docs/spike-18-copilot-api-auth.md](spike-18-copilot-api-auth.md) — Copilot API 認証調査
-- [tasks.md](../tasks.md) — タスク全体管理（v0.2.0 ロードマップ含む）
+- [docs/tasks-archive-v0.3.0.md](tasks-archive-v0.3.0.md) — 過去のタスク管理（v0.2.0 ロードマップ含む。`tasks.md` は 2026-11-05 に撤去した）
