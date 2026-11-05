@@ -2,6 +2,8 @@
 
 `tasks.md` から外した完了済みタスクの archive。v0.3.0 以前の履歴は [`tasks-archive-v0.3.0.md`](tasks-archive-v0.3.0.md) を参照。
 
+2026-11-05 に `tasks.md` 自体を撤去した。以下の記述にある `tasks.md` は、撤去前のファイルを指す（[最後の版](https://github.com/scottlz0310/mcp-gateway/blob/b3e590eb2a1b10cabf262c7b7ff1902815d4664f/tasks.md)）。以後の進捗は Issue と Pull Request で追う。
+
 このファイルは詳細な変更履歴ではなく、タスク管理上「完了済みとして現行ロードマップから外した issue」の索引である。リリース単位の詳細は [`CHANGELOG.md`](../CHANGELOG.md) / [`CHANGELOG.ja.md`](../CHANGELOG.ja.md) を参照。
 
 ## v0.4.0
