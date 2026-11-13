@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM golang:1.27.3-alpine AS builder
+FROM golang:1.27.4-alpine AS builder
 ENV GOTOOLCHAIN=auto
 WORKDIR /src
 COPY go.mod ./
